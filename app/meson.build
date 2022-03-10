@@ -16,6 +16,7 @@ apps = [
         'test-gpudev',
         'test-pipeline',
         'test-pmd',
+        'test-pmd-gtpu',
         'test-regex',
         'test-sad',
 ]
