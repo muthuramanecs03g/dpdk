@@ -26,6 +26,8 @@
 #define IAVF_TX_NO_VECTOR_FLAGS (				 \
 		RTE_ETH_TX_OFFLOAD_MULTI_SEGS |		 \
 		RTE_ETH_TX_OFFLOAD_TCP_TSO |		 \
+		RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |    \
+		RTE_ETH_TX_OFFLOAD_OUTER_UDP_CKSUM |	\
 		RTE_ETH_TX_OFFLOAD_SECURITY)
 
 #define IAVF_TX_VECTOR_OFFLOAD (				 \
@@ -53,10 +55,14 @@
 #define IAVF_TSO_MAX_SEG          UINT8_MAX
 #define IAVF_TX_MAX_MTU_SEG       8
 
+#define IAVF_TX_MIN_PKT_LEN 17
+
 #define IAVF_TX_CKSUM_OFFLOAD_MASK (		 \
 		RTE_MBUF_F_TX_IP_CKSUM |		 \
 		RTE_MBUF_F_TX_L4_MASK |		 \
-		RTE_MBUF_F_TX_TCP_SEG)
+		RTE_MBUF_F_TX_TCP_SEG |          \
+		RTE_MBUF_F_TX_OUTER_IP_CKSUM |   \
+		RTE_MBUF_F_TX_OUTER_UDP_CKSUM)
 
 #define IAVF_TX_OFFLOAD_MASK (  \
 		RTE_MBUF_F_TX_OUTER_IPV6 |		 \
@@ -67,10 +73,16 @@
 		RTE_MBUF_F_TX_IP_CKSUM |		 \
 		RTE_MBUF_F_TX_L4_MASK |		 \
 		RTE_MBUF_F_TX_TCP_SEG |		 \
+		RTE_MBUF_F_TX_TUNNEL_MASK |	\
+		RTE_MBUF_F_TX_OUTER_IP_CKSUM |  \
+		RTE_MBUF_F_TX_OUTER_UDP_CKSUM | \
 		RTE_ETH_TX_OFFLOAD_SECURITY)
 
 #define IAVF_TX_OFFLOAD_NOTSUP_MASK \
 		(RTE_MBUF_F_TX_OFFLOAD_MASK ^ IAVF_TX_OFFLOAD_MASK)
+
+extern uint64_t iavf_timestamp_dynflag;
+extern int iavf_timestamp_dynfield_offset;
 
 /**
  * Rx Flex Descriptors
@@ -187,6 +199,7 @@ struct iavf_rx_queue {
 	struct rte_mbuf *pkt_last_seg;  /* last segment of current packet */
 	struct rte_mbuf fake_mbuf;      /* dummy mbuf */
 	uint8_t rxdid;
+	uint8_t rel_mbufs_type;
 
 	/* used for VPMD */
 	uint16_t rxrearm_nb;       /* number of remaining to be re-armed */
@@ -217,10 +230,10 @@ struct iavf_rx_queue {
 	uint8_t proto_xtr; /* protocol extraction type */
 	uint64_t xtr_ol_flag;
 		/* flexible descriptor metadata extraction offload flag */
-	iavf_rxd_to_pkt_fields_t rxd_to_pkt_fields;
-				/* handle flexible descriptor by RXDID */
 	struct iavf_rx_queue_stats stats;
 	uint64_t offloads;
+	uint64_t phc_time;
+	uint64_t hw_time_update;
 };
 
 struct iavf_tx_entry {
@@ -248,6 +261,7 @@ struct iavf_tx_queue {
 	uint16_t last_desc_cleaned;    /* last desc have been cleaned*/
 	uint16_t free_thresh;
 	uint16_t rs_thresh;
+	uint8_t rel_mbufs_type;
 
 	uint16_t port_id;
 	uint16_t queue_id;
@@ -389,6 +403,12 @@ struct iavf_32b_rx_flex_desc_comms_ipsec {
 	/* Qword 3 */
 	__le32 flow_id;
 	__le32 ipsec_said;
+};
+
+enum iavf_rxtx_rel_mbufs_type {
+	IAVF_REL_MBUFS_DEFAULT		= 0,
+	IAVF_REL_MBUFS_SSE_VEC		= 1,
+	IAVF_REL_MBUFS_AVX512_VEC	= 2,
 };
 
 /* Receive Flex Descriptor profile IDs: There are a total
@@ -694,6 +714,9 @@ int iavf_txq_vec_setup_avx512(struct iavf_tx_queue *txq);
 uint8_t iavf_proto_xtr_type_to_rxdid(uint8_t xtr_type);
 
 void iavf_set_default_ptype_table(struct rte_eth_dev *dev);
+void iavf_tx_queue_release_mbufs_avx512(struct iavf_tx_queue *txq);
+void iavf_rx_queue_release_mbufs_sse(struct iavf_rx_queue *rxq);
+void iavf_tx_queue_release_mbufs_sse(struct iavf_tx_queue *txq);
 
 static inline
 void iavf_dump_rx_descriptor(struct iavf_rx_queue *rxq,
@@ -778,6 +801,24 @@ void iavf_fdir_rx_proc_enable(struct iavf_adapter *ad, bool on)
 				FDIR_PROC_ENABLE_PER_QUEUE(ad, on);
 		}
 	}
+}
+
+static inline
+uint64_t iavf_tstamp_convert_32b_64b(uint64_t time, uint32_t in_timestamp)
+{
+	const uint64_t mask = 0xFFFFFFFF;
+	uint32_t delta;
+	uint64_t ns;
+
+	delta = (in_timestamp - (uint32_t)(time & mask));
+	if (delta > (mask / 2)) {
+		delta = ((uint32_t)(time & mask) - in_timestamp);
+		ns = time - delta;
+	} else {
+		ns = time + delta;
+	}
+
+	return ns;
 }
 
 #ifdef RTE_LIBRTE_IAVF_DEBUG_DUMP_DESC

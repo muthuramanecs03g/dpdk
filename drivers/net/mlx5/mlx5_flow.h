@@ -21,6 +21,9 @@
 /* E-Switch Manager port, used for rte_flow_item_port_id. */
 #define MLX5_PORT_ESW_MGR UINT32_MAX
 
+/* E-Switch Manager port, used for rte_flow_item_ethdev. */
+#define MLX5_REPRESENTED_PORT_ESW_MGR UINT16_MAX
+
 /* Private rte flow items. */
 enum mlx5_rte_flow_item_type {
 	MLX5_RTE_FLOW_ITEM_TYPE_END = INT_MIN,
@@ -185,6 +188,13 @@ enum mlx5_feature_name {
 #define MLX5_FLOW_ITEM_OUTER_FLEX (UINT64_C(1) << 37)
 #define MLX5_FLOW_ITEM_INNER_FLEX (UINT64_C(1) << 38)
 #define MLX5_FLOW_ITEM_FLEX_TUNNEL (UINT64_C(1) << 39)
+
+/* ESP item */
+#define MLX5_FLOW_ITEM_ESP (UINT64_C(1) << 40)
+
+/* Port Representor/Represented Port item */
+#define MLX5_FLOW_ITEM_PORT_REPRESENTOR (UINT64_C(1) << 41)
+#define MLX5_FLOW_ITEM_REPRESENTED_PORT (UINT64_C(1) << 42)
 
 /* Outer Masks. */
 #define MLX5_FLOW_LAYER_OUTER_L3 \
@@ -427,7 +437,7 @@ enum mlx5_feature_name {
 #define MLX5_ACT_NUM_MDF_IPV6		4
 #define MLX5_ACT_NUM_MDF_MAC		2
 #define MLX5_ACT_NUM_MDF_VID		1
-#define MLX5_ACT_NUM_MDF_PORT		2
+#define MLX5_ACT_NUM_MDF_PORT		1
 #define MLX5_ACT_NUM_MDF_TTL		1
 #define MLX5_ACT_NUM_DEC_TTL		MLX5_ACT_NUM_MDF_TTL
 #define MLX5_ACT_NUM_MDF_TCPSEQ		1
@@ -700,7 +710,6 @@ struct mlx5_flow_handle {
 	uint32_t split_flow_id:27; /**< Sub flow unique match flow id. */
 	uint32_t is_meter_flow_id:1; /**< Indicate if flow_id is for meter. */
 	uint32_t fate_action:3; /**< Fate action type. */
-	uint32_t flex_item; /**< referenced Flex Item bitmask. */
 	union {
 		uint32_t rix_hrxq; /**< Hash Rx queue object index. */
 		uint32_t rix_jump; /**< Index to the jump action resource. */
@@ -716,6 +725,7 @@ struct mlx5_flow_handle {
 #if defined(HAVE_IBV_FLOW_DV_SUPPORT) || !defined(HAVE_INFINIBAND_VERBS_H)
 	struct mlx5_flow_handle_dv dvh;
 #endif
+	uint8_t flex_item; /**< referenced Flex Item bitmask. */
 } __rte_packed;
 
 /*
@@ -1185,6 +1195,16 @@ struct rte_flow_template_table {
 	(MLX5_RSS_HASH_IPV6 | IBV_RX_HASH_SRC_PORT_TCP)
 #define MLX5_RSS_HASH_IPV6_TCP_DST_ONLY \
 	(MLX5_RSS_HASH_IPV6 | IBV_RX_HASH_DST_PORT_TCP)
+
+#ifndef HAVE_IBV_RX_HASH_IPSEC_SPI
+#define IBV_RX_HASH_IPSEC_SPI (1U << 8)
+#endif
+
+#define MLX5_RSS_HASH_ESP_SPI IBV_RX_HASH_IPSEC_SPI
+#define MLX5_RSS_HASH_IPV4_ESP (MLX5_RSS_HASH_IPV4 | \
+				MLX5_RSS_HASH_ESP_SPI)
+#define MLX5_RSS_HASH_IPV6_ESP (MLX5_RSS_HASH_IPV6 | \
+				MLX5_RSS_HASH_ESP_SPI)
 #define MLX5_RSS_HASH_NONE 0ULL
 
 
@@ -1200,9 +1220,12 @@ static const uint64_t mlx5_rss_hash_fields[] = {
 	MLX5_RSS_HASH_IPV4,
 	MLX5_RSS_HASH_IPV4_TCP,
 	MLX5_RSS_HASH_IPV4_UDP,
+	MLX5_RSS_HASH_IPV4_ESP,
 	MLX5_RSS_HASH_IPV6,
 	MLX5_RSS_HASH_IPV6_TCP,
 	MLX5_RSS_HASH_IPV6_UDP,
+	MLX5_RSS_HASH_IPV6_ESP,
+	MLX5_RSS_HASH_ESP_SPI,
 	MLX5_RSS_HASH_NONE,
 };
 
@@ -1359,6 +1382,7 @@ typedef int (*mlx5_flow_create_mtr_acts_t)
 			(struct rte_eth_dev *dev,
 		      struct mlx5_flow_meter_policy *mtr_policy,
 		      const struct rte_flow_action *actions[RTE_COLORS],
+		      struct rte_flow_attr *attr,
 		      struct rte_mtr_error *error);
 typedef void (*mlx5_flow_destroy_mtr_acts_t)
 			(struct rte_eth_dev *dev,
@@ -2017,6 +2041,7 @@ void mlx5_flow_destroy_mtr_acts(struct rte_eth_dev *dev,
 int mlx5_flow_create_mtr_acts(struct rte_eth_dev *dev,
 		      struct mlx5_flow_meter_policy *mtr_policy,
 		      const struct rte_flow_action *actions[RTE_COLORS],
+		      struct rte_flow_attr *attr,
 		      struct rte_mtr_error *error);
 int mlx5_flow_create_policy_rules(struct rte_eth_dev *dev,
 			     struct mlx5_flow_meter_policy *mtr_policy);
@@ -2054,4 +2079,15 @@ int flow_dv_action_query(struct rte_eth_dev *dev,
 size_t flow_dv_get_item_hdr_len(const enum rte_flow_item_type item_type);
 int flow_dv_convert_encap_data(const struct rte_flow_item *items, uint8_t *buf,
 			   size_t *size, struct rte_flow_error *error);
+
+#define MLX5_PF_VPORT_ID 0
+#define MLX5_ECPF_VPORT_ID 0xFFFE
+
+int16_t mlx5_flow_get_esw_manager_vport_id(struct rte_eth_dev *dev);
+int mlx5_flow_get_item_vport_id(struct rte_eth_dev *dev,
+				const struct rte_flow_item *item,
+				uint16_t *vport_id,
+				bool *all_ports,
+				struct rte_flow_error *error);
+
 #endif /* RTE_PMD_MLX5_FLOW_H_ */

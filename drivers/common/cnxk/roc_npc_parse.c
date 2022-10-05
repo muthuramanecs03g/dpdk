@@ -21,6 +21,20 @@ npc_parse_meta_items(struct npc_parse_state *pst)
 	return 0;
 }
 
+int
+npc_parse_mark_item(struct npc_parse_state *pst)
+{
+	if (pst->pattern->type == ROC_NPC_ITEM_TYPE_MARK) {
+		if (pst->flow->nix_intf != NIX_INTF_RX)
+			return -EINVAL;
+
+		pst->is_second_pass_rule = true;
+		pst->pattern++;
+	}
+
+	return 0;
+}
+
 static int
 npc_flow_raw_item_prepare(const struct roc_npc_flow_item_raw *raw_spec,
 			  const struct roc_npc_flow_item_raw *raw_mask,
@@ -337,15 +351,10 @@ npc_parse_lb(struct npc_parse_state *pst)
 		}
 		info.len = pattern->size;
 	} else if (pst->pattern->type == ROC_NPC_ITEM_TYPE_QINQ) {
-		vlan_item[0] = pst->pattern->spec;
 		info.hw_mask = NULL;
-		info.len = sizeof(vlan_item[0]->hdr);
+		info.len = pattern->size;
 		lt = NPC_LT_LB_STAG_QINQ;
 		lflags = NPC_F_STAG_CTAG;
-		if (vlan_item[0] && vlan_item[0]->has_more_vlan) {
-			lflags = NPC_F_LB_L_WITH_QINQ_CTAG &
-				 NPC_F_LB_L_WITH_QINQ_QINQ;
-		}
 	} else if (pst->pattern->type == ROC_NPC_ITEM_TYPE_RAW) {
 		raw_spec = pst->pattern->spec;
 		if (raw_spec->relative)
@@ -585,6 +594,13 @@ npc_parse_lc(struct npc_parse_state *pst)
 		info.len = pst->pattern->size;
 		info.hw_hdr_len = 40;
 		break;
+	case ROC_NPC_ITEM_TYPE_IPV6_FRAG_EXT:
+		lid = NPC_LID_LC;
+		lt = NPC_LT_LC_IP6_EXT;
+		flags = NPC_F_LC_U_IP6_FRAG;
+		info.len = pst->pattern->size;
+		info.hw_hdr_len = 40;
+		break;
 	case ROC_NPC_ITEM_TYPE_L3_CUSTOM:
 		lt = NPC_LT_LC_CUSTOM0;
 		info.len = pst->pattern->size;
@@ -683,11 +699,13 @@ npc_parse_ld(struct npc_parse_state *pst)
 	case ROC_NPC_ITEM_TYPE_GRE:
 		lt = NPC_LT_LD_GRE;
 		info.len = pst->pattern->size;
+		pst->tunnel = 1;
 		break;
 	case ROC_NPC_ITEM_TYPE_GRE_KEY:
 		lt = NPC_LT_LD_GRE;
 		info.len = pst->pattern->size;
 		info.hw_hdr_len = 4;
+		pst->tunnel = 1;
 		break;
 	case ROC_NPC_ITEM_TYPE_NVGRE:
 		lt = NPC_LT_LD_NVGRE;

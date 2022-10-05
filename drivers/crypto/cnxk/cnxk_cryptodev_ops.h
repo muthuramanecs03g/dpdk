@@ -33,10 +33,14 @@ struct cpt_qp_meta_info {
 #define CPT_OP_FLAGS_METABUF	       (1 << 1)
 #define CPT_OP_FLAGS_AUTH_VERIFY       (1 << 0)
 #define CPT_OP_FLAGS_IPSEC_DIR_INBOUND (1 << 2)
+#define CPT_OP_FLAGS_IPSEC_INB_REPLAY  (1 << 3)
 
 struct cpt_inflight_req {
 	union cpt_res_s res;
-	struct rte_crypto_op *cop;
+	union {
+		struct rte_crypto_op *cop;
+		struct rte_event_vector *vec;
+	};
 	void *mdata;
 	uint8_t op_flags;
 	void *qp;
@@ -62,6 +66,10 @@ struct crypto_adpter_info {
 	/**< Set if queue pair is added to crypto adapter */
 	struct rte_mempool *req_mp;
 	/**< CPT inflight request mempool */
+	uint16_t vector_sz;
+	/** Maximum number of cops to combine into single vector */
+	struct rte_mempool *vector_mp;
+	/** Pool for allocating rte_event_vector */
 };
 
 struct cnxk_cpt_qp {
@@ -69,16 +77,16 @@ struct cnxk_cpt_qp {
 	/**< Crypto LF */
 	struct pending_queue pend_q;
 	/**< Pending queue */
+	struct roc_cpt_lmtline lmtline;
+	/**< Lmtline information */
+	struct cpt_qp_meta_info meta_info;
+	/**< Metabuf info required to support operations on the queue pair */
+	struct crypto_adpter_info ca;
+	/**< Crypto adapter related info */
 	struct rte_mempool *sess_mp;
 	/**< Session mempool */
 	struct rte_mempool *sess_mp_priv;
 	/**< Session private data mempool */
-	struct cpt_qp_meta_info meta_info;
-	/**< Metabuf info required to support operations on the queue pair */
-	struct roc_cpt_lmtline lmtline;
-	/**< Lmtline information */
-	struct crypto_adpter_info ca;
-	/**< Crypto adapter related info */
 };
 
 int cnxk_cpt_dev_config(struct rte_cryptodev *dev,
@@ -124,24 +132,6 @@ int cnxk_ae_session_cfg(struct rte_cryptodev *dev,
 			struct rte_crypto_asym_xform *xform,
 			struct rte_cryptodev_asym_session *sess);
 void cnxk_cpt_dump_on_err(struct cnxk_cpt_qp *qp);
-
-static inline union rte_event_crypto_metadata *
-cnxk_event_crypto_mdata_get(struct rte_crypto_op *op)
-{
-	union rte_event_crypto_metadata *ec_mdata;
-
-	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)
-		ec_mdata = rte_cryptodev_sym_session_get_user_data(
-			op->sym->session);
-	else if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS &&
-		 op->private_data_offset)
-		ec_mdata = (union rte_event_crypto_metadata
-				    *)((uint8_t *)op + op->private_data_offset);
-	else
-		return NULL;
-
-	return ec_mdata;
-}
 
 static __rte_always_inline void
 pending_queue_advance(uint64_t *index, const uint64_t mask)

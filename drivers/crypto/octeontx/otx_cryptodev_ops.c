@@ -3,7 +3,7 @@
  */
 
 #include <rte_alarm.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_cryptodev.h>
 #include <cryptodev_pmd.h>
 #include <rte_eventdev.h>
@@ -675,6 +675,7 @@ submit_request_to_sso(struct ssows *ws, uintptr_t req,
 	uint64_t add_work;
 
 	add_work = rsp_info->flow_id | (RTE_EVENT_TYPE_CRYPTODEV << 28) |
+		   (rsp_info->sub_event_type << 20) |
 		   ((uint64_t)(rsp_info->sched_type) << 32);
 
 	if (!rsp_info->sched_type)
@@ -682,24 +683,6 @@ submit_request_to_sso(struct ssows *ws, uintptr_t req,
 
 	rte_atomic_thread_fence(__ATOMIC_RELEASE);
 	ssovf_store_pair(add_work, req, ws->grps[rsp_info->queue_id]);
-}
-
-static inline union rte_event_crypto_metadata *
-get_event_crypto_mdata(struct rte_crypto_op *op)
-{
-	union rte_event_crypto_metadata *ec_mdata;
-
-	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)
-		ec_mdata = rte_cryptodev_sym_session_get_user_data(
-							   op->sym->session);
-	else if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS &&
-		 op->private_data_offset)
-		ec_mdata = (union rte_event_crypto_metadata *)
-			((uint8_t *)op + op->private_data_offset);
-	else
-		return NULL;
-
-	return ec_mdata;
 }
 
 uint16_t __rte_hot
@@ -712,7 +695,7 @@ otx_crypto_adapter_enqueue(void *port, struct rte_crypto_op *op)
 	uint8_t op_type, cdev_id;
 	uint16_t qp_id;
 
-	ec_mdata = get_event_crypto_mdata(op);
+	ec_mdata = rte_cryptodev_session_event_mdata_get(op);
 	if (unlikely(ec_mdata == NULL)) {
 		rte_errno = EINVAL;
 		return 0;
@@ -754,7 +737,7 @@ otx_cpt_asym_rsa_op(struct rte_crypto_op *cop, struct cpt_request_info *req,
 		memcpy(rsa->cipher.data, req->rptr, rsa->cipher.length);
 		break;
 	case RTE_CRYPTO_ASYM_OP_DECRYPT:
-		if (rsa->pad == RTE_CRYPTO_RSA_PADDING_NONE)
+		if (rsa->padding.type == RTE_CRYPTO_RSA_PADDING_NONE)
 			rsa->message.length = rsa_ctx->n.length;
 		else {
 			/* Get length of decrypted output */
@@ -771,7 +754,7 @@ otx_cpt_asym_rsa_op(struct rte_crypto_op *cop, struct cpt_request_info *req,
 		memcpy(rsa->sign.data, req->rptr, rsa->sign.length);
 		break;
 	case RTE_CRYPTO_ASYM_OP_VERIFY:
-		if (rsa->pad == RTE_CRYPTO_RSA_PADDING_NONE)
+		if (rsa->padding.type == RTE_CRYPTO_RSA_PADDING_NONE)
 			rsa->sign.length = rsa_ctx->n.length;
 		else {
 			/* Get length of decrypted output */

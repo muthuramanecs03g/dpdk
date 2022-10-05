@@ -119,7 +119,7 @@ implementer_cavium = {
             'flags': flags_part_number_thunderx
         },
         '0xa3': {
-            'compiler_options': ['-mcpu=thunderxt83'],
+            'compiler_options': ['-march=armv8-a+crc', '-mcpu=thunderxt83'],
             'flags': flags_part_number_thunderx
         },
         '0xaf': {
@@ -197,6 +197,22 @@ implementer_hisilicon = {
     }
 }
 
+implementer_phytium = {
+    'description': 'Phytium',
+    'flags': [
+        ['RTE_MACHINE', '"armv8a"'],
+        ['RTE_USE_C11_MEM_MODEL', true],
+        ['RTE_CACHE_LINE_SIZE', 64],
+        ['RTE_MAX_LCORE', 64],
+        ['RTE_MAX_NUMA_NODES', 8]
+    ],
+    'part_number_config': {
+        '0x662': {
+            'machine_args': ['-march=armv8-a+crc'],
+        },
+    }
+}
+
 implementer_qualcomm = {
     'description': 'Qualcomm',
     'flags': [
@@ -225,7 +241,8 @@ implementers = {
     '0x43': implementer_cavium,
     '0x48': implementer_hisilicon,
     '0x50': implementer_ampere,
-    '0x51': implementer_qualcomm
+    '0x51': implementer_qualcomm,
+    '0x70': implementer_phytium,
 }
 
 # SoC specific armv8 flags have the highest priority
@@ -281,7 +298,8 @@ soc_cn10k = {
     ],
     'part_number': '0xd49',
     'extra_march_features': ['crypto'],
-    'numa': false
+    'numa': false,
+    'sve_acle': false
 }
 
 soc_dpaa = {
@@ -301,6 +319,13 @@ soc_emag = {
     'description': 'Ampere eMAG',
     'implementer': '0x50',
     'part_number': '0x0'
+}
+
+soc_ft2000plus = {
+    'description': 'Phytium FT-2000+',
+    'implementer': '0x70',
+    'part_number': '0x662',
+    'numa': true
 }
 
 soc_graviton2 = {
@@ -371,6 +396,12 @@ soc_thunderxt88 = {
     'part_number': '0xa1'
 }
 
+soc_thunderxt83 = {
+    'description': 'Marvell ThunderX T83',
+    'implementer': '0x43',
+    'part_number': '0xa3'
+}
+
 '''
 Start of SoCs list
 generic:         Generic un-optimized build for armv8 aarch64 execution mode.
@@ -382,6 +413,7 @@ cn9k:            Marvell OCTEON 9
 cn10k:           Marvell OCTEON 10
 dpaa:            NXP DPAA
 emag:            Ampere eMAG
+ft2000plus:      Phytium FT-2000+
 graviton2:       AWS Graviton2
 kunpeng920:      HiSilicon Kunpeng 920
 kunpeng930:      HiSilicon Kunpeng 930
@@ -390,6 +422,7 @@ n2:              Arm Neoverse N2
 stingray:        Broadcom Stingray
 thunderx2:       Marvell ThunderX2 T99
 thunderxt88:     Marvell ThunderX T88
+thunderxt83:     Marvell ThunderX T83
 End of SoCs list
 '''
 # The string above is included in the documentation, keep it in sync with the
@@ -404,6 +437,7 @@ socs = {
     'cn10k' : soc_cn10k,
     'dpaa': soc_dpaa,
     'emag': soc_emag,
+    'ft2000plus': soc_ft2000plus,
     'graviton2': soc_graviton2,
     'kunpeng920': soc_kunpeng920,
     'kunpeng930': soc_kunpeng930,
@@ -411,7 +445,8 @@ socs = {
     'n2': soc_n2,
     'stingray': soc_stingray,
     'thunderx2': soc_thunderx2,
-    'thunderxt88': soc_thunderxt88
+    'thunderxt88': soc_thunderxt88,
+    'thunderxt83': soc_thunderxt83,
 }
 
 dpdk_conf.set('RTE_ARCH_ARM', 1)
@@ -605,7 +640,7 @@ endif
 
 if cc.get_define('__ARM_FEATURE_SVE', args: machine_args) != ''
     compile_time_cpuflags += ['RTE_CPUFLAG_SVE']
-    if (cc.check_header('arm_sve.h'))
+    if (cc.check_header('arm_sve.h') and soc_config.get('sve_acle', true))
         dpdk_conf.set('RTE_HAS_SVE_ACLE', 1)
     endif
 endif

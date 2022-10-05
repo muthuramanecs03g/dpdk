@@ -38,7 +38,7 @@ roc_nix_tm_sq_aura_fc(struct roc_nix_sq *sq, bool enable)
 
 	req->aura.fc_ena = enable;
 	req->aura_mask.fc_ena = 1;
-	if (roc_model_is_cn9k() || roc_model_is_cn10ka_a0()) {
+	if (roc_model_is_cn9k() || roc_errata_npa_has_no_fc_stype_ststp()) {
 		req->aura.fc_stype = 0x0;      /* STF */
 		req->aura_mask.fc_stype = 0x0; /* STF */
 	} else {
@@ -67,7 +67,7 @@ roc_nix_tm_sq_aura_fc(struct roc_nix_sq *sq, bool enable)
 	if (enable)
 		*(volatile uint64_t *)sq->fc = rsp->aura.count;
 	else
-		*(volatile uint64_t *)sq->fc = sq->nb_sqb_bufs;
+		*(volatile uint64_t *)sq->fc = sq->aura_sqb_bufs;
 	/* Sync write barrier */
 	plt_wmb();
 	return 0;
@@ -292,6 +292,7 @@ roc_nix_tm_node_add(struct roc_nix *roc_nix, struct roc_nix_tm_node *roc_node)
 	node->pkt_mode_set = roc_node->pkt_mode_set;
 	node->free_fn = roc_node->free_fn;
 	node->tree = ROC_NIX_TM_USER;
+	node->rel_chan = NIX_TM_CHAN_INVALID;
 
 	return nix_tm_node_add(roc_nix, node);
 }
@@ -473,7 +474,7 @@ roc_nix_tm_hierarchy_disable(struct roc_nix *roc_nix)
 		if (!sq)
 			continue;
 
-		rc = nix_tm_bp_config_set(roc_nix, sq->qid, 0, false);
+		rc = nix_tm_bp_config_set(roc_nix, sq->qid, 0, false, false);
 		if (rc && rc != -ENOENT) {
 			plt_err("Failed to disable backpressure, rc=%d", rc);
 			goto cleanup;
@@ -534,7 +535,7 @@ roc_nix_tm_hierarchy_disable(struct roc_nix *roc_nix)
 		tail_off = (val >> 28) & 0x3F;
 
 		if (sqb_cnt > 1 || head_off != tail_off ||
-		    (*(uint64_t *)sq->fc != sq->nb_sqb_bufs))
+		    (*(uint64_t *)sq->fc != sq->aura_sqb_bufs))
 			plt_err("Failed to gracefully flush sq %u", sq->qid);
 	}
 

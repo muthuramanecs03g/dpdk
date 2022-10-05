@@ -830,7 +830,7 @@
 #define NIX_CHAN_LBKX_CHX(a, b)                                                \
 	(0x000ull | ((uint64_t)(a) << 8) | (uint64_t)(b))
 #define NIX_CHAN_CPT_CH_END   (0x4ffull) /* [CN10K, .) */
-#define NIX_CHAN_CPT_CH_START (0x400ull) /* [CN10K, .) */
+#define NIX_CHAN_CPT_CH_START (0x800ull) /* [CN10K, .) */
 #define NIX_CHAN_R4	      (0x400ull) /* [CN9K, CN10K) */
 #define NIX_CHAN_R5	      (0x500ull)
 #define NIX_CHAN_R6	      (0x600ull)
@@ -842,6 +842,11 @@
 /* [CN10K, .) */
 #define NIX_CHAN_RPMX_LMACX_CHX(a, b, c)                                       \
 	(0x800ull | ((uint64_t)(a) << 8) | ((uint64_t)(b) << 4) | (uint64_t)(c))
+
+/* The mask is to extract lower 10-bits of channel number
+ * which CPT will pass to X2P.
+ */
+#define NIX_CHAN_CPT_X2P_MASK (0x3ffull)
 
 #define NIX_INTF_SDP  (0x4ull)
 #define NIX_INTF_CGX0 (0x0ull) /* [CN9K, CN10K) */
@@ -1237,7 +1242,9 @@ struct nix_cn10k_rq_ctx_s {
 	uint64_t ipsech_ena : 1;
 	uint64_t ena_wqwd : 1;
 	uint64_t cq : 20;
-	uint64_t rsvd_36_24 : 13;
+	uint64_t rsvd_34_24 : 11;
+	uint64_t port_ol4_dis : 1;
+	uint64_t port_il4_dis : 1;
 	uint64_t lenerr_dis : 1;
 	uint64_t csum_il4_dis : 1;
 	uint64_t csum_ol4_dis : 1;

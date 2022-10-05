@@ -156,13 +156,10 @@ struct cnxk_fc_cfg {
 };
 
 struct cnxk_pfc_cfg {
-	struct cnxk_fc_cfg fc_cfg;
 	uint16_t class_en;
 	uint16_t pause_time;
-	uint8_t rx_tc;
-	uint8_t rx_qid;
-	uint8_t tx_tc;
-	uint8_t tx_qid;
+	uint16_t rx_pause_en;
+	uint16_t tx_pause_en;
 };
 
 struct cnxk_eth_qconf {
@@ -276,8 +273,11 @@ TAILQ_HEAD(cnxk_eth_sec_sess_list, cnxk_eth_sec_sess);
 
 /* Inbound security data */
 struct cnxk_eth_dev_sec_inb {
+	/* IPSec inbound min SPI */
+	uint32_t min_spi;
+
 	/* IPSec inbound max SPI */
-	uint16_t max_spi;
+	uint32_t max_spi;
 
 	/* Using inbound with inline device */
 	bool inl_dev;
@@ -320,6 +320,9 @@ struct cnxk_eth_dev_sec_outb {
 
 	/* Crypto queues => CPT lf count */
 	uint16_t nb_crypto_qs;
+
+	/* FC sw mem */
+	uint64_t *fc_sw_mem;
 
 	/* Active sessions */
 	uint16_t nb_sess;
@@ -396,7 +399,6 @@ struct cnxk_eth_dev {
 	struct cnxk_eth_qconf *rx_qconf;
 
 	/* Flow control configuration */
-	uint16_t pfc_tc_sq_map[CNXK_NIX_PFC_CHAN_COUNT];
 	struct cnxk_pfc_cfg pfc_cfg;
 	struct cnxk_fc_cfg fc_cfg;
 
@@ -409,7 +411,8 @@ struct cnxk_eth_dev {
 	uint64_t clk_delta;
 
 	/* Ingress policer */
-	enum roc_nix_bpf_color precolor_tbl[ROC_NIX_BPF_PRE_COLOR_MAX];
+	enum roc_nix_bpf_color precolor_tbl[ROC_NIX_BPF_PRECOLOR_TBL_SIZE_DSCP];
+	enum rte_mtr_color_in_protocol proto;
 	struct cnxk_mtr_profiles mtr_profiles;
 	struct cnxk_mtr_policy mtr_policy;
 	struct cnxk_mtr mtr;
@@ -440,6 +443,8 @@ struct cnxk_eth_rxq_sp {
 	struct cnxk_eth_dev *dev;
 	struct cnxk_eth_qconf qconf;
 	uint16_t qid;
+	uint8_t tx_pause;
+	uint8_t tc;
 } __plt_cache_aligned;
 
 struct cnxk_eth_txq_sp {
@@ -529,7 +534,7 @@ int cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 			    uint16_t nb_desc, uint16_t fp_tx_q_sz,
 			    const struct rte_eth_txconf *tx_conf);
 int cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
-			    uint16_t nb_desc, uint16_t fp_rx_q_sz,
+			    uint32_t nb_desc, uint16_t fp_rx_q_sz,
 			    const struct rte_eth_rxconf *rx_conf,
 			    struct rte_mempool *mp);
 int cnxk_nix_tx_queue_start(struct rte_eth_dev *eth_dev, uint16_t qid);
@@ -580,6 +585,7 @@ int cnxk_nix_rss_hash_update(struct rte_eth_dev *eth_dev,
 			     struct rte_eth_rss_conf *rss_conf);
 int cnxk_nix_rss_hash_conf_get(struct rte_eth_dev *eth_dev,
 			       struct rte_eth_rss_conf *rss_conf);
+int cnxk_nix_eth_dev_priv_dump(struct rte_eth_dev *eth_dev, FILE *file);
 
 /* Link */
 void cnxk_nix_toggle_flag_link_cfg(struct cnxk_eth_dev *dev, bool set);
@@ -628,7 +634,8 @@ int cnxk_ethdev_parse_devargs(struct rte_devargs *devargs,
 int cnxk_nix_dev_get_reg(struct rte_eth_dev *eth_dev,
 			 struct rte_dev_reg_info *regs);
 /* Security */
-int cnxk_eth_outb_sa_idx_get(struct cnxk_eth_dev *dev, uint32_t *idx_p);
+int cnxk_eth_outb_sa_idx_get(struct cnxk_eth_dev *dev, uint32_t *idx_p,
+			     uint32_t spi);
 int cnxk_eth_outb_sa_idx_put(struct cnxk_eth_dev *dev, uint32_t idx);
 int cnxk_nix_lookup_mem_sa_base_set(struct cnxk_eth_dev *dev);
 int cnxk_nix_lookup_mem_sa_base_clear(struct cnxk_eth_dev *dev);
@@ -639,6 +646,8 @@ struct cnxk_eth_sec_sess *cnxk_eth_sec_sess_get_by_spi(struct cnxk_eth_dev *dev,
 struct cnxk_eth_sec_sess *
 cnxk_eth_sec_sess_get_by_sess(struct cnxk_eth_dev *dev,
 			      struct rte_security_session *sess);
+int cnxk_nix_inl_meta_pool_cb(uint64_t *aura_handle, uint32_t buf_sz, uint32_t nb_bufs,
+			      bool destroy);
 
 /* Other private functions */
 int nix_recalc_mtu(struct rte_eth_dev *eth_dev);
@@ -663,8 +672,10 @@ int nix_mtr_color_action_validate(struct rte_eth_dev *eth_dev, uint32_t id,
 				  uint32_t *prev_id, uint32_t *next_id,
 				  struct cnxk_mtr_policy_node *policy,
 				  int *tree_level);
-int nix_priority_flow_ctrl_configure(struct rte_eth_dev *eth_dev,
-				     struct cnxk_pfc_cfg *conf);
+int nix_priority_flow_ctrl_rq_conf(struct rte_eth_dev *eth_dev, uint16_t qid,
+				   uint8_t tx_pause, uint8_t tc);
+int nix_priority_flow_ctrl_sq_conf(struct rte_eth_dev *eth_dev, uint16_t qid,
+				   uint8_t rx_pause, uint8_t tc);
 
 /* Inlines */
 static __rte_always_inline uint64_t

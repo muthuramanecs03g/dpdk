@@ -5,8 +5,6 @@
 #ifndef _PMD_AESNI_MB_PRIV_H_
 #define _PMD_AESNI_MB_PRIV_H_
 
-#include <intel-ipsec-mb.h>
-
 #if defined(RTE_LIB_SECURITY)
 #define AESNI_MB_DOCSIS_SEC_ENABLED 1
 #include <rte_security.h>
@@ -726,6 +724,10 @@ struct aesni_mb_qp_data {
 	 * by the driver when verifying a digest provided
 	 * by the user (using authentication verify operation)
 	 */
+	union {
+		struct gcm_context_data gcm_sgl_ctx;
+		struct chacha20_poly1305_context_data chacha_sgl_ctx;
+	};
 };
 
 /* Maximum length for digest */

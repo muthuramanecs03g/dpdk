@@ -6,7 +6,6 @@
 #include <rte_net.h>
 #include <rte_vect.h>
 
-#include "rte_pmd_ice.h"
 #include "ice_rxtx.h"
 #include "ice_rxtx_vec_common.h"
 
@@ -15,16 +14,11 @@
 		RTE_MBUF_F_TX_TCP_SEG |		 \
 		RTE_MBUF_F_TX_OUTER_IP_CKSUM)
 
-/* Offset of mbuf dynamic field for protocol extraction data */
-int rte_net_ice_dynfield_proto_xtr_metadata_offs = -1;
-
-/* Mask of mbuf dynamic flags for protocol extraction type */
-uint64_t rte_net_ice_dynflag_proto_xtr_vlan_mask;
-uint64_t rte_net_ice_dynflag_proto_xtr_ipv4_mask;
-uint64_t rte_net_ice_dynflag_proto_xtr_ipv6_mask;
-uint64_t rte_net_ice_dynflag_proto_xtr_ipv6_flow_mask;
-uint64_t rte_net_ice_dynflag_proto_xtr_tcp_mask;
-uint64_t rte_net_ice_dynflag_proto_xtr_ip_offset_mask;
+/**
+ * The mbuf dynamic field pointer for protocol extraction metadata.
+ */
+#define ICE_DYNF_PROTO_XTR_METADATA(m, n) \
+	RTE_MBUF_DYNFIELD((m), (n), uint32_t *)
 
 static int
 ice_monitor_callback(const uint64_t value,
@@ -160,7 +154,7 @@ ice_rxd_to_pkt_fields_by_comms_aux_v1(struct ice_rx_queue *rxq,
 		if (metadata) {
 			mb->ol_flags |= rxq->xtr_ol_flag;
 
-			*RTE_NET_ICE_DYNF_PROTO_XTR_METADATA(mb) = metadata;
+			*ICE_DYNF_PROTO_XTR_METADATA(mb, rxq->xtr_field_offs) = metadata;
 		}
 	}
 #else
@@ -200,7 +194,7 @@ ice_rxd_to_pkt_fields_by_comms_aux_v2(struct ice_rx_queue *rxq,
 		if (metadata) {
 			mb->ol_flags |= rxq->xtr_ol_flag;
 
-			*RTE_NET_ICE_DYNF_PROTO_XTR_METADATA(mb) = metadata;
+			*ICE_DYNF_PROTO_XTR_METADATA(mb, rxq->xtr_field_offs) = metadata;
 		}
 	}
 #else
@@ -226,29 +220,12 @@ ice_select_rxd_to_pkt_fields_handler(struct ice_rx_queue *rxq, uint32_t rxdid)
 
 	switch (rxdid) {
 	case ICE_RXDID_COMMS_AUX_VLAN:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_vlan_mask;
-		break;
-
 	case ICE_RXDID_COMMS_AUX_IPV4:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_ipv4_mask;
-		break;
-
 	case ICE_RXDID_COMMS_AUX_IPV6:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_ipv6_mask;
-		break;
-
 	case ICE_RXDID_COMMS_AUX_IPV6_FLOW:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_ipv6_flow_mask;
-		break;
-
 	case ICE_RXDID_COMMS_AUX_TCP:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_tcp_mask;
-		break;
-
 	case ICE_RXDID_COMMS_AUX_IP_OFFSET:
-		rxq->xtr_ol_flag = rte_net_ice_dynflag_proto_xtr_ip_offset_mask;
 		break;
-
 	case ICE_RXDID_COMMS_GENERIC:
 		/* fallthrough */
 	case ICE_RXDID_COMMS_OVS:
@@ -260,7 +237,7 @@ ice_select_rxd_to_pkt_fields_handler(struct ice_rx_queue *rxq, uint32_t rxdid)
 		break;
 	}
 
-	if (!rte_net_ice_dynf_proto_xtr_metadata_avail())
+	if (rxq->xtr_field_offs == -1)
 		rxq->xtr_ol_flag = 0;
 }
 
@@ -346,7 +323,7 @@ ice_program_hw_rx_queue(struct ice_rx_queue *rxq)
 		return -EINVAL;
 	}
 
-	ice_select_rxd_to_pkt_fields_handler(rxq, rxdid);
+	rxq->rxdid = rxdid;
 
 	/* Enable Flexible Descriptors in the queue context which
 	 * allows this driver to select a specific receive descriptor format
@@ -1121,6 +1098,10 @@ ice_rx_queue_setup(struct rte_eth_dev *dev,
 	rxq->rx_deferred_start = rx_conf->rx_deferred_start;
 	rxq->proto_xtr = pf->proto_xtr != NULL ?
 			 pf->proto_xtr[queue_idx] : PROTO_XTR_NONE;
+	if (rxq->proto_xtr != PROTO_XTR_NONE &&
+			ad->devargs.xtr_flag_offs[rxq->proto_xtr] != 0xff)
+		rxq->xtr_ol_flag = 1ULL << ad->devargs.xtr_flag_offs[rxq->proto_xtr];
+	rxq->xtr_field_offs = ad->devargs.xtr_field_offs;
 
 	/* Allocate the maximum number of RX ring hardware descriptor. */
 	len = ICE_MAX_RING_DESC;
@@ -1497,7 +1478,9 @@ ice_rxd_error_to_pkt_flags(uint16_t stat_err0)
 		return 0;
 
 	if (likely(!(stat_err0 & ICE_RX_FLEX_ERR0_BITS))) {
-		flags |= (RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD);
+		flags |= (RTE_MBUF_F_RX_IP_CKSUM_GOOD |
+			  RTE_MBUF_F_RX_L4_CKSUM_GOOD |
+			  RTE_MBUF_F_RX_OUTER_L4_CKSUM_GOOD);
 		return flags;
 	}
 
@@ -1574,9 +1557,10 @@ ice_rx_scan_hw_ring(struct ice_rx_queue *rxq)
 	uint64_t pkt_flags = 0;
 	uint32_t *ptype_tbl = rxq->vsi->adapter->ptype_tbl;
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
+	bool is_tsinit = false;
+	uint64_t ts_ns;
 	struct ice_vsi *vsi = rxq->vsi;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
-	uint64_t ts_ns;
 	struct ice_adapter *ad = rxq->vsi->adapter;
 #endif
 	rxdp = &rxq->rx_ring[rxq->rx_tail];
@@ -1588,8 +1572,14 @@ ice_rx_scan_hw_ring(struct ice_rx_queue *rxq)
 	if (!(stat_err0 & (1 << ICE_RX_FLEX_DESC_STATUS0_DD_S)))
 		return 0;
 
-	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP)
-		rxq->hw_register_set = 1;
+#ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
+	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+		uint64_t sw_cur_time = rte_get_timer_cycles() / (rte_get_timer_hz() / 1000);
+
+		if (unlikely(sw_cur_time - rxq->hw_time_update > 4))
+			is_tsinit = 1;
+	}
+#endif
 
 	/**
 	 * Scan LOOK_AHEAD descriptors at a time to determine which
@@ -1625,14 +1615,26 @@ ice_rx_scan_hw_ring(struct ice_rx_queue *rxq)
 			rxd_to_pkt_fields_ops[rxq->rxdid](rxq, mb, &rxdp[j]);
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
 			if (ice_timestamp_dynflag > 0) {
-				ts_ns = ice_tstamp_convert_32b_64b(hw, ad,
-					rxq->hw_register_set,
-					rte_le_to_cpu_32(rxdp[j].wb.flex_ts.ts_high));
-				rxq->hw_register_set = 0;
+				rxq->time_high =
+				rte_le_to_cpu_32(rxdp[j].wb.flex_ts.ts_high);
+				if (unlikely(is_tsinit)) {
+					ts_ns = ice_tstamp_convert_32b_64b(hw, ad, 1,
+									   rxq->time_high);
+					rxq->hw_time_low = (uint32_t)ts_ns;
+					rxq->hw_time_high = (uint32_t)(ts_ns >> 32);
+					is_tsinit = false;
+				} else {
+					if (rxq->time_high < rxq->hw_time_low)
+						rxq->hw_time_high += 1;
+					ts_ns = (uint64_t)rxq->hw_time_high << 32 | rxq->time_high;
+					rxq->hw_time_low = rxq->time_high;
+				}
+				rxq->hw_time_update = rte_get_timer_cycles() /
+						     (rte_get_timer_hz() / 1000);
 				*RTE_MBUF_DYNFIELD(mb,
-					ice_timestamp_dynfield_offset,
-					rte_mbuf_timestamp_t *) = ts_ns;
-				mb->ol_flags |= ice_timestamp_dynflag;
+						   ice_timestamp_dynfield_offset,
+						   rte_mbuf_timestamp_t *) = ts_ns;
+				pkt_flags |= ice_timestamp_dynflag;
 			}
 
 			if (ad->ptp_ena && ((mb->packet_type &
@@ -1831,14 +1833,19 @@ ice_recv_scattered_pkts(void *rx_queue,
 	uint64_t pkt_flags;
 	uint32_t *ptype_tbl = rxq->vsi->adapter->ptype_tbl;
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
+	bool is_tsinit = false;
+	uint64_t ts_ns;
 	struct ice_vsi *vsi = rxq->vsi;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
-	uint64_t ts_ns;
 	struct ice_adapter *ad = rxq->vsi->adapter;
-#endif
 
-	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP)
-		rxq->hw_register_set = 1;
+	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+		uint64_t sw_cur_time = rte_get_timer_cycles() / (rte_get_timer_hz() / 1000);
+
+		if (unlikely(sw_cur_time - rxq->hw_time_update > 4))
+			is_tsinit = true;
+	}
+#endif
 
 	while (nb_rx < nb_pkts) {
 		rxdp = &rx_ring[rx_id];
@@ -1951,14 +1958,25 @@ ice_recv_scattered_pkts(void *rx_queue,
 		pkt_flags = ice_rxd_error_to_pkt_flags(rx_stat_err0);
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
 		if (ice_timestamp_dynflag > 0) {
-			ts_ns = ice_tstamp_convert_32b_64b(hw, ad,
-				rxq->hw_register_set,
-				rte_le_to_cpu_32(rxd.wb.flex_ts.ts_high));
-			rxq->hw_register_set = 0;
-			*RTE_MBUF_DYNFIELD(first_seg,
-				ice_timestamp_dynfield_offset,
-				rte_mbuf_timestamp_t *) = ts_ns;
-			first_seg->ol_flags |= ice_timestamp_dynflag;
+			rxq->time_high =
+			   rte_le_to_cpu_32(rxd.wb.flex_ts.ts_high);
+			if (unlikely(is_tsinit)) {
+				ts_ns = ice_tstamp_convert_32b_64b(hw, ad, 1, rxq->time_high);
+				rxq->hw_time_low = (uint32_t)ts_ns;
+				rxq->hw_time_high = (uint32_t)(ts_ns >> 32);
+				is_tsinit = false;
+			} else {
+				if (rxq->time_high < rxq->hw_time_low)
+					rxq->hw_time_high += 1;
+				ts_ns = (uint64_t)rxq->hw_time_high << 32 | rxq->time_high;
+				rxq->hw_time_low = rxq->time_high;
+			}
+			rxq->hw_time_update = rte_get_timer_cycles() /
+					     (rte_get_timer_hz() / 1000);
+			*RTE_MBUF_DYNFIELD(rxm,
+					   (ice_timestamp_dynfield_offset),
+					   rte_mbuf_timestamp_t *) = ts_ns;
+			pkt_flags |= ice_timestamp_dynflag;
 		}
 
 		if (ad->ptp_ena && ((first_seg->packet_type & RTE_PTYPE_L2_MASK)
@@ -2325,14 +2343,19 @@ ice_recv_pkts(void *rx_queue,
 	uint64_t pkt_flags;
 	uint32_t *ptype_tbl = rxq->vsi->adapter->ptype_tbl;
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
+	bool is_tsinit = false;
+	uint64_t ts_ns;
 	struct ice_vsi *vsi = rxq->vsi;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
-	uint64_t ts_ns;
 	struct ice_adapter *ad = rxq->vsi->adapter;
-#endif
 
-	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP)
-		rxq->hw_register_set = 1;
+	if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+		uint64_t sw_cur_time = rte_get_timer_cycles() / (rte_get_timer_hz() / 1000);
+
+		if (unlikely(sw_cur_time - rxq->hw_time_update > 4))
+			is_tsinit = 1;
+	}
+#endif
 
 	while (nb_rx < nb_pkts) {
 		rxdp = &rx_ring[rx_id];
@@ -2386,14 +2409,25 @@ ice_recv_pkts(void *rx_queue,
 		pkt_flags = ice_rxd_error_to_pkt_flags(rx_stat_err0);
 #ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
 		if (ice_timestamp_dynflag > 0) {
-			ts_ns = ice_tstamp_convert_32b_64b(hw, ad,
-				rxq->hw_register_set,
-				rte_le_to_cpu_32(rxd.wb.flex_ts.ts_high));
-			rxq->hw_register_set = 0;
+			rxq->time_high =
+			   rte_le_to_cpu_32(rxd.wb.flex_ts.ts_high);
+			if (unlikely(is_tsinit)) {
+				ts_ns = ice_tstamp_convert_32b_64b(hw, ad, 1, rxq->time_high);
+				rxq->hw_time_low = (uint32_t)ts_ns;
+				rxq->hw_time_high = (uint32_t)(ts_ns >> 32);
+				is_tsinit = false;
+			} else {
+				if (rxq->time_high < rxq->hw_time_low)
+					rxq->hw_time_high += 1;
+				ts_ns = (uint64_t)rxq->hw_time_high << 32 | rxq->time_high;
+				rxq->hw_time_low = rxq->time_high;
+			}
+			rxq->hw_time_update = rte_get_timer_cycles() /
+					     (rte_get_timer_hz() / 1000);
 			*RTE_MBUF_DYNFIELD(rxm,
-				ice_timestamp_dynfield_offset,
-				rte_mbuf_timestamp_t *) = ts_ns;
-			rxm->ol_flags |= ice_timestamp_dynflag;
+					   (ice_timestamp_dynfield_offset),
+					   rte_mbuf_timestamp_t *) = ts_ns;
+			pkt_flags |= ice_timestamp_dynflag;
 		}
 
 		if (ad->ptp_ena && ((rxm->packet_type & RTE_PTYPE_L2_MASK) ==
@@ -2408,6 +2442,7 @@ ice_recv_pkts(void *rx_queue,
 		/* copy old mbuf to rx_pkts */
 		rx_pkts[nb_rx++] = rxm;
 	}
+
 	rxq->rx_tail = rx_id;
 	/**
 	 * If the number of free RX descriptors is greater than the RX free
@@ -2501,35 +2536,18 @@ ice_txd_enable_checksum(uint64_t ol_flags,
 			<< ICE_TX_DESC_LEN_MACLEN_S;
 
 	/* Enable L3 checksum offloads */
-	/*Tunnel package usage outer len enable L3 checksum offload*/
-	if (ol_flags & RTE_MBUF_F_TX_TUNNEL_MASK) {
-		if (ol_flags & RTE_MBUF_F_TX_IP_CKSUM) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4_CSUM;
-			*td_offset |= (tx_offload.outer_l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		} else if (ol_flags & RTE_MBUF_F_TX_IPV4) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4;
-			*td_offset |= (tx_offload.outer_l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		} else if (ol_flags & RTE_MBUF_F_TX_IPV6) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV6;
-			*td_offset |= (tx_offload.outer_l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		}
-	} else {
-		if (ol_flags & RTE_MBUF_F_TX_IP_CKSUM) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4_CSUM;
-			*td_offset |= (tx_offload.l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		} else if (ol_flags & RTE_MBUF_F_TX_IPV4) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4;
-			*td_offset |= (tx_offload.l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		} else if (ol_flags & RTE_MBUF_F_TX_IPV6) {
-			*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV6;
-			*td_offset |= (tx_offload.l3_len >> 2) <<
-				ICE_TX_DESC_LEN_IPLEN_S;
-		}
+	if (ol_flags & RTE_MBUF_F_TX_IP_CKSUM) {
+		*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4_CSUM;
+		*td_offset |= (tx_offload.l3_len >> 2) <<
+			ICE_TX_DESC_LEN_IPLEN_S;
+	} else if (ol_flags & RTE_MBUF_F_TX_IPV4) {
+		*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV4;
+		*td_offset |= (tx_offload.l3_len >> 2) <<
+			ICE_TX_DESC_LEN_IPLEN_S;
+	} else if (ol_flags & RTE_MBUF_F_TX_IPV6) {
+		*td_cmd |= ICE_TX_DESC_CMD_IIPT_IPV6;
+		*td_offset |= (tx_offload.l3_len >> 2) <<
+			ICE_TX_DESC_LEN_IPLEN_S;
 	}
 
 	if (ol_flags & RTE_MBUF_F_TX_TCP_SEG) {
@@ -3424,6 +3442,9 @@ ice_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
 	int i, ret;
 	uint64_t ol_flags;
 	struct rte_mbuf *m;
+	struct ice_tx_queue *txq = tx_queue;
+	struct rte_eth_dev *dev = &rte_eth_devices[txq->port_id];
+	uint16_t max_frame_size = dev->data->mtu + ICE_ETH_OVERHEAD;
 
 	for (i = 0; i < nb_pkts; i++) {
 		m = tx_pkts[i];
@@ -3437,6 +3458,14 @@ ice_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
 			 * MSS outside the range are considered malicious
 			 */
 			rte_errno = EINVAL;
+			return i;
+		}
+
+		/* check the data_len in mbuf */
+		if (m->data_len < ICE_TX_MIN_PKT_LEN ||
+			m->data_len > max_frame_size) {
+			rte_errno = EINVAL;
+			PMD_DRV_LOG(ERR, "INVALID mbuf: bad data_len=[%hu]", m->data_len);
 			return i;
 		}
 
@@ -3569,8 +3598,9 @@ static const struct {
 	{ ice_xmit_pkts_vec_avx512, "Vector AVX512" },
 	{ ice_xmit_pkts_vec_avx512_offload, "Offload Vector AVX512" },
 #endif
-	{ ice_xmit_pkts_vec_avx2, "Vector AVX2" },
-	{ ice_xmit_pkts_vec,      "Vector SSE" },
+	{ ice_xmit_pkts_vec_avx2,         "Vector AVX2" },
+	{ ice_xmit_pkts_vec_avx2_offload, "Offload Vector AVX2" },
+	{ ice_xmit_pkts_vec,              "Vector SSE" },
 #endif
 };
 

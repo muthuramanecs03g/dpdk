@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
  *   Copyright (c) 2016 Freescale Semiconductor, Inc. All rights reserved.
- *   Copyright 2017-2021 NXP
+ *   Copyright 2017-2022 NXP
  *
  */
 
@@ -19,7 +19,8 @@
 #include <rte_security_driver.h>
 #endif
 #include <rte_cycles.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
+#include <rte_io.h>
 #include <rte_ip.h>
 #include <rte_kvargs.h>
 #include <rte_malloc.h>
@@ -40,7 +41,7 @@
 #include <desc/pdcp.h>
 #include <desc/sdap.h>
 
-#include <rte_dpaa_bus.h>
+#include <bus_dpaa_driver.h>
 #include <dpaa_sec.h>
 #include <dpaa_sec_event.h>
 #include <dpaa_sec_log.h>
@@ -151,9 +152,6 @@ dqrr_out_fq_cb_rx(struct qman_portal *qm __always_unused,
 	struct dpaa_sec_job *job;
 	struct dpaa_sec_op_ctx *ctx;
 
-	if (DPAA_PER_LCORE_DPAA_SEC_OP_NB >= DPAA_SEC_BURST)
-		return qman_cb_dqrr_defer;
-
 	if (!(dqrr->stat & QM_DQRR_STAT_FD_VALID))
 		return qman_cb_dqrr_consume;
 
@@ -182,7 +180,6 @@ dqrr_out_fq_cb_rx(struct qman_portal *qm __always_unused,
 		}
 		mbuf->data_len = len;
 	}
-	DPAA_PER_LCORE_RTE_CRYPTO_OP[DPAA_PER_LCORE_DPAA_SEC_OP_NB++] = ctx->op;
 	dpaa_sec_op_ending(ctx);
 
 	return qman_cb_dqrr_consume;
@@ -2551,11 +2548,6 @@ dpaa_sec_attach_sess_q(struct dpaa_sec_qp *qp, dpaa_sec_session *sess)
 	int ret;
 
 	sess->qp[rte_lcore_id() % MAX_DPAA_CORES] = qp;
-	ret = dpaa_sec_prep_cdb(sess);
-	if (ret) {
-		DPAA_SEC_ERR("Unable to prepare sec cdb");
-		return ret;
-	}
 	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
@@ -2709,6 +2701,11 @@ dpaa_sec_sym_session_configure(struct rte_cryptodev *dev,
 	set_sym_session_private_data(sess, dev->driver_id,
 			sess_private_data);
 
+	ret = dpaa_sec_prep_cdb(sess_private_data);
+	if (ret) {
+		DPAA_SEC_ERR("Unable to prepare sec cdb");
+		return ret;
+	}
 
 	return 0;
 }
@@ -3307,6 +3304,12 @@ dpaa_sec_security_session_create(void *dev,
 
 	set_sec_session_private_data(sess, sess_private_data);
 
+	ret = dpaa_sec_prep_cdb(sess_private_data);
+	if (ret) {
+		DPAA_SEC_ERR("Unable to prepare sec cdb");
+		return ret;
+	}
+
 	return ret;
 }
 
@@ -3654,9 +3657,35 @@ dpaa_sec_dev_init(struct rte_cryptodev *cryptodev)
 	struct dpaa_sec_qp *qp;
 	uint32_t i, flags;
 	int ret;
+	void *cmd_map;
+	int map_fd = -1;
 
 	PMD_INIT_FUNC_TRACE();
 
+	internals = cryptodev->data->dev_private;
+	map_fd = open("/dev/mem", O_RDWR);
+	if (unlikely(map_fd < 0)) {
+		DPAA_SEC_ERR("Unable to open (/dev/mem)");
+		return map_fd;
+	}
+	internals->sec_hw = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE,
+			    MAP_SHARED, map_fd, SEC_BASE_ADDR);
+	if (internals->sec_hw == MAP_FAILED) {
+		DPAA_SEC_ERR("Memory map failed");
+		close(map_fd);
+		return -EINVAL;
+	}
+	cmd_map = (uint8_t *)internals->sec_hw +
+		  (BLOCK_OFFSET * QI_BLOCK_NUMBER) + CMD_REG;
+	if (!(be32_to_cpu(rte_read32(cmd_map)) & QICTL_DQEN))
+		/* enable QI interface */
+		rte_write32(cpu_to_be32(QICTL_DQEN), cmd_map);
+
+	ret = munmap(internals->sec_hw, MAP_SIZE);
+	if (ret)
+		DPAA_SEC_WARN("munmap failed\n");
+
+	close(map_fd);
 	cryptodev->driver_id = dpaa_cryptodev_driver_id;
 	cryptodev->dev_ops = &crypto_ops;
 
@@ -3673,7 +3702,6 @@ dpaa_sec_dev_init(struct rte_cryptodev *cryptodev)
 			RTE_CRYPTODEV_FF_OOP_LB_IN_SGL_OUT |
 			RTE_CRYPTODEV_FF_OOP_LB_IN_LB_OUT;
 
-	internals = cryptodev->data->dev_private;
 	internals->max_nb_queue_pairs = RTE_DPAA_MAX_NB_SEC_QPS;
 	internals->max_nb_sessions = RTE_DPAA_SEC_PMD_MAX_NB_SESSIONS;
 
@@ -3740,23 +3768,24 @@ cryptodev_dpaa_sec_probe(struct rte_dpaa_driver *dpaa_drv __rte_unused,
 
 	int retval;
 
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
+
 	snprintf(cryptodev_name, sizeof(cryptodev_name), "%s", dpaa_dev->name);
 
 	cryptodev = rte_cryptodev_pmd_allocate(cryptodev_name, rte_socket_id());
 	if (cryptodev == NULL)
 		return -ENOMEM;
 
-	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
-		cryptodev->data->dev_private = rte_zmalloc_socket(
-					"cryptodev private structure",
-					sizeof(struct dpaa_sec_dev_private),
-					RTE_CACHE_LINE_SIZE,
-					rte_socket_id());
+	cryptodev->data->dev_private = rte_zmalloc_socket(
+				"cryptodev private structure",
+				sizeof(struct dpaa_sec_dev_private),
+				RTE_CACHE_LINE_SIZE,
+				rte_socket_id());
 
-		if (cryptodev->data->dev_private == NULL)
-			rte_panic("Cannot allocate memzone for private "
-					"device data");
-	}
+	if (cryptodev->data->dev_private == NULL)
+		rte_panic("Cannot allocate memzone for private "
+				"device data");
 
 	dpaa_dev->crypto_dev = cryptodev;
 	cryptodev->device = &dpaa_dev->device;
@@ -3798,8 +3827,7 @@ cryptodev_dpaa_sec_probe(struct rte_dpaa_driver *dpaa_drv __rte_unused,
 	retval = -ENXIO;
 out:
 	/* In case of error, cleanup is done */
-	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
-		rte_free(cryptodev->data->dev_private);
+	rte_free(cryptodev->data->dev_private);
 
 	rte_cryptodev_pmd_release_device(cryptodev);
 

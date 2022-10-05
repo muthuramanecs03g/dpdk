@@ -10,7 +10,7 @@
 #include <ethdev_driver.h>
 #include <ethdev_vdev.h>
 #include <rte_malloc.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_kvargs.h>
 #include <rte_net.h>
 #include <rte_debug.h>
@@ -30,6 +30,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -1213,6 +1214,8 @@ tap_dev_close(struct rte_eth_dev *dev)
 	TAP_LOG(DEBUG, "Closing %s Ethernet device on numa %u",
 		tuntap_types[internals->type], rte_socket_id());
 
+	rte_intr_instance_free(internals->intr_handle);
+
 	if (internals->ioctl_sock != -1) {
 		close(internals->ioctl_sock);
 		internals->ioctl_sock = -1;
@@ -2177,8 +2180,8 @@ error_exit:
 		close(pmd->ioctl_sock);
 	/* mac_addrs must not be freed alone because part of dev_private */
 	dev->data->mac_addrs = NULL;
-	rte_eth_dev_release_port(dev);
 	rte_intr_instance_free(pmd->intr_handle);
+	rte_eth_dev_release_port(dev);
 
 error_exit_nodev:
 	TAP_LOG(ERR, "%s Unable to initialize %s",

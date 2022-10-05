@@ -5,6 +5,8 @@
 
 #include <rte_eventdev.h>
 
+#define CNXK_NIX_CQ_INL_CLAMP_MAX (64UL * 1024UL)
+
 static inline uint64_t
 nix_get_rx_offload_capa(struct cnxk_eth_dev *dev)
 {
@@ -40,6 +42,39 @@ nix_get_speed_capa(struct cnxk_eth_dev *dev)
 	return speed_capa;
 }
 
+static uint32_t
+nix_inl_cq_sz_clamp_up(struct roc_nix *nix, struct rte_mempool *mp,
+		       uint32_t nb_desc)
+{
+	struct roc_nix_rq *inl_rq;
+	uint64_t limit;
+
+	if (!roc_errata_cpt_hang_on_x2p_bp())
+		return nb_desc;
+
+	/* CQ should be able to hold all buffers in first pass RQ's aura
+	 * this RQ's aura.
+	 */
+	inl_rq = roc_nix_inl_dev_rq(nix);
+	if (!inl_rq) {
+		/* This itself is going to be inline RQ's aura */
+		limit = roc_npa_aura_op_limit_get(mp->pool_id);
+	} else {
+		limit = roc_npa_aura_op_limit_get(inl_rq->aura_handle);
+		/* Also add this RQ's aura if it is different */
+		if (inl_rq->aura_handle != mp->pool_id)
+			limit += roc_npa_aura_op_limit_get(mp->pool_id);
+	}
+	nb_desc = PLT_MAX(limit + 1, nb_desc);
+	if (nb_desc > CNXK_NIX_CQ_INL_CLAMP_MAX) {
+		plt_warn("Could not setup CQ size to accommodate"
+			 " all buffers in related auras (%" PRIu64 ")",
+			 limit);
+		nb_desc = CNXK_NIX_CQ_INL_CLAMP_MAX;
+	}
+	return nb_desc;
+}
+
 int
 cnxk_nix_inb_mode_set(struct cnxk_eth_dev *dev, bool use_inl_dev)
 {
@@ -68,6 +103,10 @@ nix_security_setup(struct cnxk_eth_dev *dev)
 	int i, rc = 0;
 
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY) {
+		/* Setup minimum SA table when inline device is used */
+		nix->ipsec_in_min_spi = dev->inb.no_inl_dev ? dev->inb.min_spi : 0;
+		nix->ipsec_in_max_spi = dev->inb.no_inl_dev ? dev->inb.max_spi : 1;
+
 		/* Setup Inline Inbound */
 		rc = roc_nix_inl_inb_init(nix);
 		if (rc) {
@@ -155,9 +194,19 @@ nix_security_setup(struct cnxk_eth_dev *dev)
 		dev->outb.sa_base = roc_nix_inl_outb_sa_base_get(nix);
 		dev->outb.sa_bmap_mem = mem;
 		dev->outb.sa_bmap = bmap;
+
+		dev->outb.fc_sw_mem = plt_zmalloc(dev->outb.nb_crypto_qs *
+							  RTE_CACHE_LINE_SIZE,
+						  RTE_CACHE_LINE_SIZE);
+		if (!dev->outb.fc_sw_mem) {
+			plt_err("Outbound fc sw mem alloc failed");
+			goto sa_bmap_free;
+		}
 	}
 	return 0;
 
+sa_bmap_free:
+	plt_free(dev->outb.sa_bmap_mem);
 sa_dptr_free:
 	if (dev->inb.sa_dptr)
 		plt_free(dev->inb.sa_dptr);
@@ -253,6 +302,9 @@ nix_security_release(struct cnxk_eth_dev *dev)
 			plt_free(dev->outb.sa_dptr);
 			dev->outb.sa_dptr = NULL;
 		}
+
+		plt_free(dev->outb.fc_sw_mem);
+		dev->outb.fc_sw_mem = NULL;
 	}
 
 	dev->inb.inl_dev = false;
@@ -309,6 +361,9 @@ nix_init_flow_ctrl_config(struct rte_eth_dev *eth_dev)
 	enum roc_nix_fc_mode fc_mode = ROC_NIX_FC_FULL;
 	struct cnxk_fc_cfg *fc = &dev->fc_cfg;
 	int rc;
+
+	if (roc_nix_is_vf_or_sdp(&dev->nix))
+		return 0;
 
 	/* To avoid Link credit deadlock on Ax, disable Tx FC if it's enabled */
 	if (roc_model_is_cn96_ax() &&
@@ -423,6 +478,7 @@ cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	sq->qid = qid;
 	sq->nb_desc = nb_desc;
 	sq->max_sqe_sz = nix_sq_max_sqe_sz(dev);
+	sq->tc = ROC_NIX_PFC_CLASS_INVALID;
 
 	rc = roc_nix_sq_init(&dev->nix, sq);
 	if (rc) {
@@ -487,7 +543,7 @@ cnxk_nix_tx_queue_release(struct rte_eth_dev *eth_dev, uint16_t qid)
 
 int
 cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
-			uint16_t nb_desc, uint16_t fp_rx_q_sz,
+			uint32_t nb_desc, uint16_t fp_rx_q_sz,
 			const struct rte_eth_rxconf *rx_conf,
 			struct rte_mempool *mp)
 {
@@ -530,23 +586,16 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 		eth_dev->data->rx_queues[qid] = NULL;
 	}
 
-	/* Clam up cq limit to size of packet pool aura for LBK
-	 * to avoid meta packet drop as LBK does not currently support
-	 * backpressure.
-	 */
-	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY && roc_nix_is_lbk(nix)) {
-		uint64_t pkt_pool_limit = roc_nix_inl_dev_rq_limit_get();
-
-		/* Use current RQ's aura limit if inl rq is not available */
-		if (!pkt_pool_limit)
-			pkt_pool_limit = roc_npa_aura_op_limit_get(mp->pool_id);
-		nb_desc = RTE_MAX(nb_desc, pkt_pool_limit);
-	}
-
 	/* Its a no-op when inline device is not used */
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY ||
 	    dev->tx_offloads & RTE_ETH_TX_OFFLOAD_SECURITY)
 		roc_nix_inl_dev_xaq_realloc(mp->pool_id);
+
+	/* Increase CQ size to Aura size to avoid CQ overflow and
+	 * then CPT buffer leak.
+	 */
+	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY)
+		nb_desc = nix_inl_cq_sz_clamp_up(nix, mp, nb_desc);
 
 	/* Setup ROC CQ */
 	cq = &dev->cqs[qid];
@@ -561,6 +610,7 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	/* Setup ROC RQ */
 	rq = &dev->rqs[qid];
 	rq->qid = qid;
+	rq->cqid = cq->qid;
 	rq->aura_handle = mp->pool_id;
 	rq->flow_tag_width = 32;
 	rq->sso_ena = false;
@@ -572,7 +622,8 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	rq->first_skip = first_skip;
 	rq->later_skip = sizeof(struct rte_mbuf);
 	rq->lpb_size = mp->elt_size;
-	rq->lpb_drop_ena = !(dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY);
+	if (roc_errata_nix_no_meta_aura())
+		rq->lpb_drop_ena = !(dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY);
 
 	/* Enable Inline IPSec on RQ, will not be used for Poll mode */
 	if (roc_nix_inl_inb_is_enabled(nix))
@@ -601,6 +652,9 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	rxq_sp->qconf.conf.rx.offloads = dev->rx_offloads;
 	rxq_sp->qconf.nb_desc = nb_desc;
 	rxq_sp->qconf.mp = mp;
+	rxq_sp->tc = 0;
+	rxq_sp->tx_pause = (dev->fc_cfg.mode == RTE_ETH_FC_FULL ||
+			    dev->fc_cfg.mode == RTE_ETH_FC_TX_PAUSE);
 
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY) {
 		/* Pass a tagmask used to handle error packets in inline device.
@@ -611,7 +665,7 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 			0x0FF00000 | ((uint32_t)RTE_EVENT_TYPE_ETHDEV << 28);
 
 		/* Setup rq reference for inline dev if present */
-		rc = roc_nix_inl_dev_rq_get(rq);
+		rc = roc_nix_inl_dev_rq_get(rq, !!eth_dev->data->dev_started);
 		if (rc)
 			goto free_mem;
 	}
@@ -1026,7 +1080,7 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 	struct roc_nix_fc_cfg fc_cfg = {0};
 	struct roc_nix *nix = &dev->nix;
 	struct rte_ether_addr *ea;
-	uint8_t nb_rxq, nb_txq;
+	uint16_t nb_rxq, nb_txq;
 	uint64_t rx_cfg;
 	void *qs;
 	int rc;
@@ -1041,11 +1095,6 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 
 	if (conf->dcb_capability_en == 1) {
 		plt_err("dcb enable is not supported");
-		goto fail_configure;
-	}
-
-	if (conf->fdir_conf.mode != RTE_FDIR_MODE_NONE) {
-		plt_err("Flow director is not supported");
 		goto fail_configure;
 	}
 
@@ -1116,12 +1165,21 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 	nb_rxq = RTE_MAX(data->nb_rx_queues, 1);
 	nb_txq = RTE_MAX(data->nb_tx_queues, 1);
 
+	if (roc_nix_is_lbk(nix))
+		nix->enable_loop = eth_dev->data->dev_conf.lpbk_mode;
+
+	nix->tx_compl_ena = 0;
+
 	/* Alloc a nix lf */
 	rc = roc_nix_lf_alloc(nix, nb_rxq, nb_txq, rx_cfg);
 	if (rc) {
 		plt_err("Failed to init nix_lf rc=%d", rc);
 		goto fail_configure;
 	}
+
+	/* Check if ptp is enable in PF owning this VF*/
+	if (!roc_nix_is_pf(nix) && (!roc_nix_is_sdp(nix)))
+		dev->ptp_en = roc_nix_ptp_is_enable(nix);
 
 	dev->npc.channel = roc_nix_get_base_chan(nix);
 
@@ -1235,6 +1293,9 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 		}
 	}
 
+	if (roc_nix_is_lbk(nix))
+		goto skip_lbk_setup;
+
 	/* Configure loop back mode */
 	rc = roc_nix_mac_loopback_enable(nix,
 					 eth_dev->data->dev_conf.lpbk_mode);
@@ -1243,6 +1304,7 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 		goto cq_fini;
 	}
 
+skip_lbk_setup:
 	/* Setup Inline security support */
 	rc = nix_security_setup(dev);
 	if (rc)
@@ -1264,8 +1326,6 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 		goto cq_fini;
 	}
 
-	/* Initialize TC to SQ mapping as invalid */
-	memset(dev->pfc_tc_sq_map, 0xFF, sizeof(dev->pfc_tc_sq_map));
 	/*
 	 * Restore queue config when reconfigure followed by
 	 * reconfigure and no queue configure invoked from application case.
@@ -1424,6 +1484,10 @@ cnxk_nix_dev_stop(struct rte_eth_dev *eth_dev)
 
 	roc_nix_inl_outb_soft_exp_poll_switch(&dev->nix, false);
 
+	/* Stop inline device RQ first */
+	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY)
+		roc_nix_inl_rq_ena_dis(&dev->nix, false);
+
 	/* Stop rx queues and free up pkts pending */
 	for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
 		rc = dev_ops->rx_queue_stop(eth_dev, i);
@@ -1467,6 +1531,14 @@ cnxk_nix_dev_start(struct rte_eth_dev *eth_dev)
 		rc = cnxk_nix_rx_queue_start(eth_dev, i);
 		if (rc)
 			return rc;
+	}
+
+	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY) {
+		rc = roc_nix_inl_rq_ena_dis(&dev->nix, true);
+		if (rc) {
+			plt_err("Failed to enable Inline device RQ, rc=%d", rc);
+			return rc;
+		}
 	}
 
 	/* Start tx queues  */
@@ -1605,6 +1677,7 @@ struct eth_dev_ops cnxk_eth_dev_ops = {
 	.set_queue_rate_limit = cnxk_nix_tm_set_queue_rate_limit,
 	.tm_ops_get = cnxk_nix_tm_ops_get,
 	.mtr_ops_get = cnxk_nix_mtr_ops_get,
+	.eth_dev_priv_dump  = cnxk_nix_eth_dev_priv_dump,
 };
 
 static int
@@ -1627,8 +1700,7 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 		return -ENOMEM;
 	sec_ctx->device = eth_dev;
 	sec_ctx->ops = &cnxk_eth_sec_ops;
-	sec_ctx->flags =
-		(RTE_SEC_CTX_F_FAST_SET_MDATA | RTE_SEC_CTX_F_FAST_GET_UDATA);
+	sec_ctx->flags = RTE_SEC_CTX_F_FAST_SET_MDATA;
 	eth_dev->security_ctx = sec_ctx;
 
 	/* For secondary processes, the primary has done all the work */
@@ -1648,6 +1720,7 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	/* Initialize base roc nix */
 	nix->pci_dev = pci_dev;
 	nix->hw_vlan_ins = true;
+	nix->port_id = eth_dev->data->port_id;
 	rc = roc_nix_dev_init(nix);
 	if (rc) {
 		plt_err("Failed to initialize roc nix rc=%d", rc);
@@ -1661,9 +1734,13 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	roc_nix_mac_link_info_get_cb_register(nix,
 					      cnxk_eth_dev_link_status_get_cb);
 
+	/* Register callback for inline meta pool create */
+	roc_nix_inl_meta_pool_cb_register(cnxk_nix_inl_meta_pool_cb);
+
 	dev->eth_dev = eth_dev;
 	dev->configured = 0;
 	dev->ptype_disable = 0;
+	dev->proto = RTE_MTR_COLOR_IN_PROTO_OUTER_VLAN;
 
 	TAILQ_INIT(&dev->inb.list);
 	TAILQ_INIT(&dev->outb.list);
@@ -1754,15 +1831,15 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 	struct rte_eth_fc_conf fc_conf;
 	int rc, i;
 
-	/* Disable switch hdr pkind */
-	roc_nix_switch_hdr_set(&dev->nix, 0, 0, 0, 0);
-
 	plt_free(eth_dev->security_ctx);
 	eth_dev->security_ctx = NULL;
 
 	/* Nothing to be done for secondary processes */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
+
+	/* Disable switch hdr pkind */
+	roc_nix_switch_hdr_set(&dev->nix, 0, 0, 0, 0);
 
 	/* Clear the flag since we are closing down */
 	dev->configured = 0;
@@ -1776,22 +1853,18 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 	rc = cnxk_nix_flow_ctrl_set(eth_dev, &fc_conf);
 
 	pfc_conf.mode = RTE_ETH_FC_NONE;
-	for (i = 0; i < CNXK_NIX_PFC_CHAN_COUNT; i++) {
-		if (dev->pfc_tc_sq_map[i] != 0xFFFF) {
-			pfc_conf.rx_pause.tx_qid = dev->pfc_tc_sq_map[i];
-			pfc_conf.rx_pause.tc = i;
-			pfc_conf.tx_pause.rx_qid = i;
-			pfc_conf.tx_pause.tc = i;
-			rc = cnxk_nix_priority_flow_ctrl_queue_config(eth_dev,
-				&pfc_conf);
-			if (rc)
-				plt_err("Failed to reset PFC. error code(%d)",
-					rc);
-		}
+	for (i = 0; i < RTE_MAX(eth_dev->data->nb_rx_queues,
+				eth_dev->data->nb_tx_queues);
+	     i++) {
+		pfc_conf.rx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
+		pfc_conf.rx_pause.tx_qid = i;
+		pfc_conf.tx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
+		pfc_conf.tx_pause.rx_qid = i;
+		rc = cnxk_nix_priority_flow_ctrl_queue_config(eth_dev,
+							      &pfc_conf);
+		if (rc && rc != -ENOTSUP)
+			plt_err("Failed to reset PFC. error code(%d)", rc);
 	}
-
-	fc_conf.mode = RTE_ETH_FC_FULL;
-	rc = cnxk_nix_flow_ctrl_set(eth_dev, &fc_conf);
 
 	/* Disable and free rte_meter entries */
 	nix_meter_fini(dev);
@@ -1900,7 +1973,7 @@ cnxk_nix_remove(struct rte_pci_device *pci_dev)
 
 	/* Check if this device is hosting common resource */
 	nix = roc_idev_npa_nix_get();
-	if (nix->pci_dev != pci_dev)
+	if (!nix || nix->pci_dev != pci_dev)
 		return 0;
 
 	/* Try nix fini now */

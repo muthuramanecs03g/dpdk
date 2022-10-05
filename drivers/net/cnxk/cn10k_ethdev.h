@@ -19,6 +19,7 @@ struct cn10k_eth_txq {
 	uint64_t sa_base;
 	uint64_t *cpt_fc;
 	uint16_t cpt_desc;
+	int32_t *cpt_fc_sw;
 	uint64_t lso_tun_fmt;
 	uint64_t ts_mem;
 	uint64_t mark_flag : 8;
@@ -38,7 +39,7 @@ struct cn10k_eth_rxq {
 	uint16_t data_off;
 	uint64_t sa_base;
 	uint64_t lmt_base;
-	uint64_t aura_handle;
+	uint64_t meta_aura;
 	uint16_t rq;
 	struct cnxk_timesync_info *tstamp;
 } __plt_cache_aligned;
@@ -71,7 +72,10 @@ struct cn10k_sec_sess_priv {
 			uint8_t mode : 1;
 			uint8_t roundup_byte : 5;
 			uint8_t roundup_len;
-			uint16_t partial_len;
+			uint16_t partial_len : 10;
+			uint16_t chksum : 2;
+			uint16_t dec_ttl : 1;
+			uint16_t rsvd : 3;
 		};
 
 		uint64_t u64;

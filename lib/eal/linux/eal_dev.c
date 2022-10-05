@@ -2,6 +2,7 @@
  * Copyright(c) 2018 Intel Corporation
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -13,7 +14,7 @@
 #include <rte_dev.h>
 #include <rte_interrupts.h>
 #include <rte_alarm.h>
-#include <rte_bus.h>
+#include <bus_driver.h>
 #include <rte_spinlock.h>
 #include <rte_errno.h>
 
@@ -380,6 +381,7 @@ rte_dev_event_monitor_stop(void)
 	close(rte_intr_fd_get(intr_handle));
 	rte_intr_instance_free(intr_handle);
 	intr_handle = NULL;
+	ret = 0;
 
 	monitor_refcount--;
 

@@ -13,7 +13,7 @@
 
 #include <rte_log.h>
 #include <rte_debug.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_memory.h>
 #include <rte_memcpy.h>
 #include <rte_memzone.h>
@@ -89,7 +89,10 @@ rte_crypto_cipher_algorithm_strings[] = {
 
 	[RTE_CRYPTO_CIPHER_KASUMI_F8]	= "kasumi-f8",
 	[RTE_CRYPTO_CIPHER_SNOW3G_UEA2]	= "snow3g-uea2",
-	[RTE_CRYPTO_CIPHER_ZUC_EEA3]	= "zuc-eea3"
+	[RTE_CRYPTO_CIPHER_ZUC_EEA3]	= "zuc-eea3",
+	[RTE_CRYPTO_CIPHER_SM4_ECB]	= "sm4-ecb",
+	[RTE_CRYPTO_CIPHER_SM4_CBC]	= "sm4-cbc",
+	[RTE_CRYPTO_CIPHER_SM4_CTR]	= "sm4-ctr"
 };
 
 /**
@@ -130,9 +133,19 @@ rte_crypto_auth_algorithm_strings[] = {
 	[RTE_CRYPTO_AUTH_SHA512]	= "sha2-512",
 	[RTE_CRYPTO_AUTH_SHA512_HMAC]	= "sha2-512-hmac",
 
+	[RTE_CRYPTO_AUTH_SHA3_224]	= "sha3-224",
+	[RTE_CRYPTO_AUTH_SHA3_224_HMAC] = "sha3-224-hmac",
+	[RTE_CRYPTO_AUTH_SHA3_256]	= "sha3-256",
+	[RTE_CRYPTO_AUTH_SHA3_256_HMAC] = "sha3-256-hmac",
+	[RTE_CRYPTO_AUTH_SHA3_384]	= "sha3-384",
+	[RTE_CRYPTO_AUTH_SHA3_384_HMAC] = "sha3-384-hmac",
+	[RTE_CRYPTO_AUTH_SHA3_512]	= "sha3-512",
+	[RTE_CRYPTO_AUTH_SHA3_512_HMAC]	= "sha3-512-hmac",
+
 	[RTE_CRYPTO_AUTH_KASUMI_F9]	= "kasumi-f9",
 	[RTE_CRYPTO_AUTH_SNOW3G_UIA2]	= "snow3g-uia2",
-	[RTE_CRYPTO_AUTH_ZUC_EIA3]	= "zuc-eia3"
+	[RTE_CRYPTO_AUTH_ZUC_EIA3]	= "zuc-eia3",
+	[RTE_CRYPTO_AUTH_SM3]		= "sm3"
 };
 
 /**
@@ -177,10 +190,17 @@ const char *rte_crypto_asym_op_strings[] = {
 	[RTE_CRYPTO_ASYM_OP_ENCRYPT]	= "encrypt",
 	[RTE_CRYPTO_ASYM_OP_DECRYPT]	= "decrypt",
 	[RTE_CRYPTO_ASYM_OP_SIGN]	= "sign",
-	[RTE_CRYPTO_ASYM_OP_VERIFY]	= "verify",
-	[RTE_CRYPTO_ASYM_OP_PRIVATE_KEY_GENERATE]	= "priv_key_generate",
-	[RTE_CRYPTO_ASYM_OP_PUBLIC_KEY_GENERATE] = "pub_key_generate",
-	[RTE_CRYPTO_ASYM_OP_SHARED_SECRET_COMPUTE] = "sharedsecret_compute",
+	[RTE_CRYPTO_ASYM_OP_VERIFY]	= "verify"
+};
+
+/**
+ * Asymmetric crypto key exchange operation strings identifiers.
+ */
+const char *rte_crypto_asym_ke_strings[] = {
+	[RTE_CRYPTO_ASYM_KE_PRIV_KEY_GENERATE] = "priv_key_generate",
+	[RTE_CRYPTO_ASYM_KE_PUB_KEY_GENERATE] = "pub_key_generate",
+	[RTE_CRYPTO_ASYM_KE_SHARED_SECRET_COMPUTE] = "sharedsecret_compute",
+	[RTE_CRYPTO_ASYM_KE_PUB_KEY_VERIFY] = "pub_ec_key_verify"
 };
 
 /**
@@ -208,16 +228,19 @@ rte_cryptodev_get_cipher_algo_enum(enum rte_crypto_cipher_algorithm *algo_enum,
 		const char *algo_string)
 {
 	unsigned int i;
+	int ret = -1;	/* Invalid string */
 
 	for (i = 1; i < RTE_DIM(rte_crypto_cipher_algorithm_strings); i++) {
 		if (strcmp(algo_string, rte_crypto_cipher_algorithm_strings[i]) == 0) {
 			*algo_enum = (enum rte_crypto_cipher_algorithm) i;
-			return 0;
+			ret = 0;
+			break;
 		}
 	}
 
-	/* Invalid string */
-	return -1;
+	rte_cryptodev_trace_get_cipher_algo_enum(algo_string, *algo_enum, ret);
+
+	return ret;
 }
 
 int
@@ -225,16 +248,19 @@ rte_cryptodev_get_auth_algo_enum(enum rte_crypto_auth_algorithm *algo_enum,
 		const char *algo_string)
 {
 	unsigned int i;
+	int ret = -1;	/* Invalid string */
 
 	for (i = 1; i < RTE_DIM(rte_crypto_auth_algorithm_strings); i++) {
 		if (strcmp(algo_string, rte_crypto_auth_algorithm_strings[i]) == 0) {
 			*algo_enum = (enum rte_crypto_auth_algorithm) i;
-			return 0;
+			ret = 0;
+			break;
 		}
 	}
 
-	/* Invalid string */
-	return -1;
+	rte_cryptodev_trace_get_auth_algo_enum(algo_string, *algo_enum, ret);
+
+	return ret;
 }
 
 int
@@ -242,16 +268,19 @@ rte_cryptodev_get_aead_algo_enum(enum rte_crypto_aead_algorithm *algo_enum,
 		const char *algo_string)
 {
 	unsigned int i;
+	int ret = -1;	/* Invalid string */
 
 	for (i = 1; i < RTE_DIM(rte_crypto_aead_algorithm_strings); i++) {
 		if (strcmp(algo_string, rte_crypto_aead_algorithm_strings[i]) == 0) {
 			*algo_enum = (enum rte_crypto_aead_algorithm) i;
-			return 0;
+			ret = 0;
+			break;
 		}
 	}
 
-	/* Invalid string */
-	return -1;
+	rte_cryptodev_trace_get_aead_algo_enum(algo_string, *algo_enum, ret);
+
+	return ret;
 }
 
 int
@@ -259,17 +288,20 @@ rte_cryptodev_asym_get_xform_enum(enum rte_crypto_asym_xform_type *xform_enum,
 		const char *xform_string)
 {
 	unsigned int i;
+	int ret = -1;	/* Invalid string */
 
 	for (i = 1; i < RTE_DIM(rte_crypto_asym_xform_strings); i++) {
 		if (strcmp(xform_string,
 			rte_crypto_asym_xform_strings[i]) == 0) {
 			*xform_enum = (enum rte_crypto_asym_xform_type) i;
-			return 0;
+			ret = 0;
+			break;
 		}
 	}
 
-	/* Invalid string */
-	return -1;
+	rte_cryptodev_trace_asym_get_xform_enum(xform_string, *xform_enum, ret);
+
+	return ret;
 }
 
 /**
@@ -287,6 +319,7 @@ rte_cryptodev_sym_capability_get(uint8_t dev_id,
 		const struct rte_cryptodev_sym_capability_idx *idx)
 {
 	const struct rte_cryptodev_capabilities *capability;
+	const struct rte_cryptodev_symmetric_capability *sym_capability = NULL;
 	struct rte_cryptodev_info dev_info;
 	int i = 0;
 
@@ -301,19 +334,28 @@ rte_cryptodev_sym_capability_get(uint8_t dev_id,
 			continue;
 
 		if (idx->type == RTE_CRYPTO_SYM_XFORM_AUTH &&
-			capability->sym.auth.algo == idx->algo.auth)
-			return &capability->sym;
+			capability->sym.auth.algo == idx->algo.auth) {
+			sym_capability = &capability->sym;
+			break;
+		}
 
 		if (idx->type == RTE_CRYPTO_SYM_XFORM_CIPHER &&
-			capability->sym.cipher.algo == idx->algo.cipher)
-			return &capability->sym;
+			capability->sym.cipher.algo == idx->algo.cipher) {
+			sym_capability = &capability->sym;
+			break;
+		}
 
 		if (idx->type == RTE_CRYPTO_SYM_XFORM_AEAD &&
-				capability->sym.aead.algo == idx->algo.aead)
-			return &capability->sym;
+				capability->sym.aead.algo == idx->algo.aead) {
+			sym_capability = &capability->sym;
+			break;
+		}
 	}
 
-	return NULL;
+	rte_cryptodev_trace_sym_capability_get(dev_id, dev_info.driver_name,
+		dev_info.driver_id, idx->type, sym_capability);
+
+	return sym_capability;
 }
 
 static int
@@ -346,6 +388,7 @@ rte_cryptodev_asym_capability_get(uint8_t dev_id,
 		const struct rte_cryptodev_asym_capability_idx *idx)
 {
 	const struct rte_cryptodev_capabilities *capability;
+	const struct rte_cryptodev_asymmetric_xform_capability *asym_cap = NULL;
 	struct rte_cryptodev_info dev_info;
 	unsigned int i = 0;
 
@@ -357,10 +400,16 @@ rte_cryptodev_asym_capability_get(uint8_t dev_id,
 		if (capability->op != RTE_CRYPTO_OP_TYPE_ASYMMETRIC)
 			continue;
 
-		if (capability->asym.xform_capa.xform_type == idx->type)
-			return &capability->asym.xform_capa;
+		if (capability->asym.xform_capa.xform_type == idx->type) {
+			asym_cap = &capability->asym.xform_capa;
+			break;
+		}
 	}
-	return NULL;
+
+	rte_cryptodev_trace_asym_capability_get(dev_info.driver_name,
+		dev_info.driver_id, idx->type, asym_cap);
+
+	return asym_cap;
 };
 
 int
@@ -368,13 +417,21 @@ rte_cryptodev_sym_capability_check_cipher(
 		const struct rte_cryptodev_symmetric_capability *capability,
 		uint16_t key_size, uint16_t iv_size)
 {
-	if (param_range_check(key_size, &capability->cipher.key_size) != 0)
-		return -1;
+	int ret = 0; /* success */
+
+	if (param_range_check(key_size, &capability->cipher.key_size) != 0) {
+		ret = -1;
+		goto done;
+	}
 
 	if (param_range_check(iv_size, &capability->cipher.iv_size) != 0)
-		return -1;
+		ret = -1;
 
-	return 0;
+done:
+	rte_cryptodev_trace_sym_capability_check_cipher(capability, key_size,
+		iv_size, ret);
+
+	return ret;
 }
 
 int
@@ -382,16 +439,27 @@ rte_cryptodev_sym_capability_check_auth(
 		const struct rte_cryptodev_symmetric_capability *capability,
 		uint16_t key_size, uint16_t digest_size, uint16_t iv_size)
 {
-	if (param_range_check(key_size, &capability->auth.key_size) != 0)
-		return -1;
+	int ret = 0; /* success */
 
-	if (param_range_check(digest_size, &capability->auth.digest_size) != 0)
-		return -1;
+	if (param_range_check(key_size, &capability->auth.key_size) != 0) {
+		ret = -1;
+		goto done;
+	}
+
+	if (param_range_check(digest_size,
+		&capability->auth.digest_size) != 0) {
+		ret = -1;
+		goto done;
+	}
 
 	if (param_range_check(iv_size, &capability->auth.iv_size) != 0)
-		return -1;
+		ret = -1;
 
-	return 0;
+done:
+	rte_cryptodev_trace_sym_capability_check_auth(capability, key_size,
+		digest_size, iv_size, ret);
+
+	return ret;
 }
 
 int
@@ -400,29 +468,48 @@ rte_cryptodev_sym_capability_check_aead(
 		uint16_t key_size, uint16_t digest_size, uint16_t aad_size,
 		uint16_t iv_size)
 {
-	if (param_range_check(key_size, &capability->aead.key_size) != 0)
-		return -1;
+	int ret = 0; /* success */
 
-	if (param_range_check(digest_size, &capability->aead.digest_size) != 0)
-		return -1;
+	if (param_range_check(key_size, &capability->aead.key_size) != 0) {
+		ret = -1;
+		goto done;
+	}
 
-	if (param_range_check(aad_size, &capability->aead.aad_size) != 0)
-		return -1;
+	if (param_range_check(digest_size,
+		&capability->aead.digest_size) != 0) {
+		ret = -1;
+		goto done;
+	}
+
+	if (param_range_check(aad_size, &capability->aead.aad_size) != 0) {
+		ret = -1;
+		goto done;
+	}
 
 	if (param_range_check(iv_size, &capability->aead.iv_size) != 0)
-		return -1;
+		ret = -1;
 
-	return 0;
+done:
+	rte_cryptodev_trace_sym_capability_check_aead(capability, key_size,
+		digest_size, aad_size, iv_size, ret);
+
+	return ret;
 }
+
 int
 rte_cryptodev_asym_xform_capability_check_optype(
 	const struct rte_cryptodev_asymmetric_xform_capability *capability,
 	enum rte_crypto_asym_op_type op_type)
 {
-	if (capability->op_types & (1 << op_type))
-		return 1;
+	int ret = 0;
 
-	return 0;
+	if (capability->op_types & (1 << op_type))
+		ret = 1;
+
+	rte_cryptodev_trace_asym_xform_capability_check_optype(
+		capability->op_types, op_type, ret);
+
+	return ret;
 }
 
 int
@@ -430,24 +517,34 @@ rte_cryptodev_asym_xform_capability_check_modlen(
 	const struct rte_cryptodev_asymmetric_xform_capability *capability,
 	uint16_t modlen)
 {
+	int ret = 0; /* success */
+
 	/* no need to check for limits, if min or max = 0 */
 	if (capability->modlen.min != 0) {
-		if (modlen < capability->modlen.min)
-			return -1;
+		if (modlen < capability->modlen.min) {
+			ret = -1;
+			goto done;
+		}
 	}
 
 	if (capability->modlen.max != 0) {
-		if (modlen > capability->modlen.max)
-			return -1;
+		if (modlen > capability->modlen.max) {
+			ret = -1;
+			goto done;
+		}
 	}
 
 	/* in any case, check if given modlen is module increment */
 	if (capability->modlen.increment != 0) {
 		if (modlen % (capability->modlen.increment))
-			return -1;
+			ret = -1;
 	}
 
-	return 0;
+done:
+	rte_cryptodev_trace_asym_xform_capability_check_modlen(capability,
+		modlen, ret);
+
+	return ret;
 }
 
 /* spinlock for crypto device enq callbacks */
@@ -570,6 +667,8 @@ cb_init_err:
 const char *
 rte_cryptodev_get_feature_name(uint64_t flag)
 {
+	rte_cryptodev_trace_get_feature_name(flag);
+
 	switch (flag) {
 	case RTE_CRYPTODEV_FF_SYMMETRIC_CRYPTO:
 		return "SYMMETRIC_CRYPTO";
@@ -668,22 +767,28 @@ unsigned int
 rte_cryptodev_is_valid_dev(uint8_t dev_id)
 {
 	struct rte_cryptodev *dev = NULL;
+	unsigned int ret = 1;
 
-	if (!rte_cryptodev_is_valid_device_data(dev_id))
-		return 0;
+	if (!rte_cryptodev_is_valid_device_data(dev_id)) {
+		ret = 0;
+		goto done;
+	}
 
 	dev = rte_cryptodev_pmd_get_dev(dev_id);
 	if (dev->attached != RTE_CRYPTODEV_ATTACHED)
-		return 0;
-	else
-		return 1;
-}
+		ret = 0;
 
+done:
+	rte_cryptodev_trace_is_valid_dev(dev_id, ret);
+
+	return ret;
+}
 
 int
 rte_cryptodev_get_dev_id(const char *name)
 {
 	unsigned i;
+	int ret = -1;
 
 	if (name == NULL)
 		return -1;
@@ -694,16 +799,22 @@ rte_cryptodev_get_dev_id(const char *name)
 		if ((strcmp(cryptodev_globals.devs[i].data->name, name)
 				== 0) &&
 				(cryptodev_globals.devs[i].attached ==
-						RTE_CRYPTODEV_ATTACHED))
-			return i;
+						RTE_CRYPTODEV_ATTACHED)) {
+			ret = (int)i;
+			break;
+		}
 	}
 
-	return -1;
+	rte_cryptodev_trace_get_dev_id(name, ret);
+
+	return ret;
 }
 
 uint8_t
 rte_cryptodev_count(void)
 {
+	rte_cryptodev_trace_count(cryptodev_globals.nb_devs);
+
 	return cryptodev_globals.nb_devs;
 }
 
@@ -717,6 +828,8 @@ rte_cryptodev_device_count_by_driver(uint8_t driver_id)
 			cryptodev_globals.devs[i].attached ==
 					RTE_CRYPTODEV_ATTACHED)
 			dev_count++;
+
+	rte_cryptodev_trace_device_count_by_driver(driver_id, dev_count);
 
 	return dev_count;
 }
@@ -744,18 +857,24 @@ rte_cryptodev_devices_get(const char *driver_name, uint8_t *devices,
 		}
 	}
 
+	rte_cryptodev_trace_devices_get(driver_name, count);
+
 	return count;
 }
 
 void *
 rte_cryptodev_get_sec_ctx(uint8_t dev_id)
 {
+	void *sec_ctx = NULL;
+
 	if (dev_id < RTE_CRYPTO_MAX_DEVS &&
 			(rte_crypto_devices[dev_id].feature_flags &
 			RTE_CRYPTODEV_FF_SECURITY))
-		return rte_crypto_devices[dev_id].security_ctx;
+		sec_ctx = rte_crypto_devices[dev_id].security_ctx;
 
-	return NULL;
+	rte_cryptodev_trace_get_sec_ctx(dev_id, sec_ctx);
+
+	return sec_ctx;
 }
 
 int
@@ -768,6 +887,8 @@ rte_cryptodev_socket_id(uint8_t dev_id)
 
 	dev = rte_cryptodev_pmd_get_dev(dev_id);
 
+	rte_cryptodev_trace_socket_id(dev_id, dev->data->name,
+		dev->data->socket_id);
 	return dev->data->socket_id;
 }
 
@@ -949,6 +1070,10 @@ rte_cryptodev_queue_pair_count(uint8_t dev_id)
 	}
 
 	dev = &rte_crypto_devices[dev_id];
+	rte_cryptodev_trace_queue_pair_count(dev, dev->data->name,
+		dev->data->socket_id, dev->data->dev_id,
+		dev->data->nb_queue_pairs);
+
 	return dev->data->nb_queue_pairs;
 }
 
@@ -971,7 +1096,8 @@ rte_cryptodev_queue_pairs_config(struct rte_cryptodev *dev, uint16_t nb_qpairs,
 
 	memset(&dev_info, 0, sizeof(struct rte_cryptodev_info));
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_infos_get, -ENOTSUP);
+	if (*dev->dev_ops->dev_infos_get == NULL)
+		return -ENOTSUP;
 	(*dev->dev_ops->dev_infos_get)(dev, &dev_info);
 
 	if (nb_qpairs > (dev_info.max_nb_queue_pairs)) {
@@ -1000,8 +1126,8 @@ rte_cryptodev_queue_pairs_config(struct rte_cryptodev *dev, uint16_t nb_qpairs,
 
 		qp = dev->data->queue_pairs;
 
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_pair_release,
-				-ENOTSUP);
+		if (*dev->dev_ops->queue_pair_release == NULL)
+			return -ENOTSUP;
 
 		for (i = nb_qpairs; i < old_nb_queues; i++) {
 			ret = (*dev->dev_ops->queue_pair_release)(dev, i);
@@ -1034,7 +1160,8 @@ rte_cryptodev_configure(uint8_t dev_id, struct rte_cryptodev_config *config)
 		return -EBUSY;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_configure, -ENOTSUP);
+	if (*dev->dev_ops->dev_configure == NULL)
+		return -ENOTSUP;
 
 	rte_spinlock_lock(&rte_cryptodev_callback_lock);
 	cryptodev_cb_cleanup(dev);
@@ -1076,7 +1203,8 @@ rte_cryptodev_start(uint8_t dev_id)
 
 	dev = &rte_crypto_devices[dev_id];
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_start, -ENOTSUP);
+	if (*dev->dev_ops->dev_start == NULL)
+		return -ENOTSUP;
 
 	if (dev->data->dev_started != 0) {
 		CDEV_LOG_ERR("Device with dev_id=%" PRIu8 " already started",
@@ -1109,7 +1237,8 @@ rte_cryptodev_stop(uint8_t dev_id)
 
 	dev = &rte_crypto_devices[dev_id];
 
-	RTE_FUNC_PTR_OR_RET(*dev->dev_ops->dev_stop);
+	if (*dev->dev_ops->dev_stop == NULL)
+		return;
 
 	if (dev->data->dev_started == 0) {
 		CDEV_LOG_ERR("Device with dev_id=%" PRIu8 " already stopped",
@@ -1156,7 +1285,8 @@ rte_cryptodev_close(uint8_t dev_id)
 		}
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_close, -ENOTSUP);
+	if (*dev->dev_ops->dev_close == NULL)
+		return -ENOTSUP;
 	retval = (*dev->dev_ops->dev_close)(dev);
 	rte_cryptodev_trace_close(dev_id, retval);
 
@@ -1170,29 +1300,36 @@ int
 rte_cryptodev_get_qp_status(uint8_t dev_id, uint16_t queue_pair_id)
 {
 	struct rte_cryptodev *dev;
+	int ret = 0;
 
 	if (!rte_cryptodev_is_valid_dev(dev_id)) {
 		CDEV_LOG_ERR("Invalid dev_id=%" PRIu8, dev_id);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto done;
 	}
 
 	dev = &rte_crypto_devices[dev_id];
 	if (queue_pair_id >= dev->data->nb_queue_pairs) {
 		CDEV_LOG_ERR("Invalid queue_pair_id=%d", queue_pair_id);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto done;
 	}
 	void **qps = dev->data->queue_pairs;
 
 	if (qps[queue_pair_id])	{
 		CDEV_LOG_DEBUG("qp %d on dev %d is initialised",
 			queue_pair_id, dev_id);
-		return 1;
+		ret = 1;
+		goto done;
 	}
 
 	CDEV_LOG_DEBUG("qp %d on dev %d is not initialised",
 		queue_pair_id, dev_id);
 
-	return 0;
+done:
+	rte_cryptodev_trace_get_qp_status(dev_id, queue_pair_id, ret);
+
+	return ret;
 }
 
 int
@@ -1214,13 +1351,13 @@ rte_cryptodev_queue_pair_setup(uint8_t dev_id, uint16_t queue_pair_id,
 	}
 
 	if (!qp_conf) {
-		CDEV_LOG_ERR("qp_conf cannot be NULL\n");
+		CDEV_LOG_ERR("qp_conf cannot be NULL");
 		return -EINVAL;
 	}
 
 	if ((qp_conf->mp_session && !qp_conf->mp_session_private) ||
 			(!qp_conf->mp_session && qp_conf->mp_session_private)) {
-		CDEV_LOG_ERR("Invalid mempools\n");
+		CDEV_LOG_ERR("Invalid mempools");
 		return -EINVAL;
 	}
 
@@ -1233,7 +1370,7 @@ rte_cryptodev_queue_pair_setup(uint8_t dev_id, uint16_t queue_pair_id,
 		pool_priv = rte_mempool_get_priv(qp_conf->mp_session);
 		if (!pool_priv || qp_conf->mp_session->private_data_size <
 				sizeof(*pool_priv)) {
-			CDEV_LOG_ERR("Invalid mempool\n");
+			CDEV_LOG_ERR("Invalid mempool");
 			return -EINVAL;
 		}
 
@@ -1244,7 +1381,7 @@ rte_cryptodev_queue_pair_setup(uint8_t dev_id, uint16_t queue_pair_id,
 			obj_size) || (s.nb_drivers <= dev->driver_id) ||
 			rte_cryptodev_sym_get_private_session_size(dev_id) >
 				obj_priv_size) {
-			CDEV_LOG_ERR("Invalid mempool\n");
+			CDEV_LOG_ERR("Invalid mempool");
 			return -EINVAL;
 		}
 	}
@@ -1255,7 +1392,8 @@ rte_cryptodev_queue_pair_setup(uint8_t dev_id, uint16_t queue_pair_id,
 		return -EBUSY;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_pair_setup, -ENOTSUP);
+	if (*dev->dev_ops->queue_pair_setup == NULL)
+		return -ENOTSUP;
 
 	rte_cryptodev_trace_queue_pair_setup(dev_id, queue_pair_id, qp_conf);
 	return (*dev->dev_ops->queue_pair_setup)(dev, queue_pair_id, qp_conf,
@@ -1324,6 +1462,7 @@ rte_cryptodev_add_enq_callback(uint8_t dev_id,
 
 	rte_spinlock_unlock(&rte_cryptodev_callback_lock);
 
+	rte_cryptodev_trace_add_enq_callback(dev_id, qp_id, cb_fn);
 	return cb;
 }
 
@@ -1348,6 +1487,8 @@ rte_cryptodev_remove_enq_callback(uint8_t dev_id,
 		CDEV_LOG_ERR("Invalid dev_id=%d", dev_id);
 		return -ENODEV;
 	}
+
+	rte_cryptodev_trace_remove_enq_callback(dev_id, qp_id, cb->fn);
 
 	dev = &rte_crypto_devices[dev_id];
 	if (qp_id >= dev->data->nb_queue_pairs) {
@@ -1459,6 +1600,8 @@ rte_cryptodev_add_deq_callback(uint8_t dev_id,
 
 	rte_spinlock_unlock(&rte_cryptodev_callback_lock);
 
+	rte_cryptodev_trace_add_deq_callback(dev_id, qp_id, cb_fn);
+
 	return cb;
 }
 
@@ -1483,6 +1626,8 @@ rte_cryptodev_remove_deq_callback(uint8_t dev_id,
 		CDEV_LOG_ERR("Invalid dev_id=%d", dev_id);
 		return -ENODEV;
 	}
+
+	rte_cryptodev_trace_remove_deq_callback(dev_id, qp_id, cb->fn);
 
 	dev = &rte_crypto_devices[dev_id];
 	if (qp_id >= dev->data->nb_queue_pairs) {
@@ -1550,8 +1695,11 @@ rte_cryptodev_stats_get(uint8_t dev_id, struct rte_cryptodev_stats *stats)
 	dev = &rte_crypto_devices[dev_id];
 	memset(stats, 0, sizeof(*stats));
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->stats_get, -ENOTSUP);
+	if (*dev->dev_ops->stats_get == NULL)
+		return -ENOTSUP;
 	(*dev->dev_ops->stats_get)(dev, stats);
+
+	rte_cryptodev_trace_stats_get(dev_id, stats);
 	return 0;
 }
 
@@ -1560,6 +1708,8 @@ rte_cryptodev_stats_reset(uint8_t dev_id)
 {
 	struct rte_cryptodev *dev;
 
+	rte_cryptodev_trace_stats_reset(dev_id);
+
 	if (!rte_cryptodev_is_valid_dev(dev_id)) {
 		CDEV_LOG_ERR("Invalid dev_id=%" PRIu8, dev_id);
 		return;
@@ -1567,7 +1717,8 @@ rte_cryptodev_stats_reset(uint8_t dev_id)
 
 	dev = &rte_crypto_devices[dev_id];
 
-	RTE_FUNC_PTR_OR_RET(*dev->dev_ops->stats_reset);
+	if (*dev->dev_ops->stats_reset == NULL)
+		return;
 	(*dev->dev_ops->stats_reset)(dev);
 }
 
@@ -1585,11 +1736,15 @@ rte_cryptodev_info_get(uint8_t dev_id, struct rte_cryptodev_info *dev_info)
 
 	memset(dev_info, 0, sizeof(struct rte_cryptodev_info));
 
-	RTE_FUNC_PTR_OR_RET(*dev->dev_ops->dev_infos_get);
+	if (*dev->dev_ops->dev_infos_get == NULL)
+		return;
 	(*dev->dev_ops->dev_infos_get)(dev, dev_info);
 
 	dev_info->driver_name = dev->device->driver->name;
 	dev_info->device = dev->device;
+
+	rte_cryptodev_trace_info_get(dev_id, dev_info->driver_name);
+
 }
 
 int
@@ -1632,6 +1787,8 @@ rte_cryptodev_callback_register(uint8_t dev_id,
 	}
 
 	rte_spinlock_unlock(&rte_cryptodev_cb_lock);
+
+	rte_cryptodev_trace_callback_register(dev_id, event, cb_fn);
 	return (user_cb == NULL) ? -ENOMEM : 0;
 }
 
@@ -1678,6 +1835,8 @@ rte_cryptodev_callback_unregister(uint8_t dev_id,
 	}
 
 	rte_spinlock_unlock(&rte_cryptodev_cb_lock);
+
+	rte_cryptodev_trace_callback_unregister(dev_id, event, cb_fn);
 	return ret;
 }
 
@@ -1732,7 +1891,8 @@ rte_cryptodev_sym_session_init(uint8_t dev_id,
 	if (index >= sess->nb_drivers)
 		return -EINVAL;
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->sym_session_configure, -ENOTSUP);
+	if (*dev->dev_ops->sym_session_configure == NULL)
+		return -ENOTSUP;
 
 	if (sess->sess_data[index].refcnt == 0) {
 		ret = dev->dev_ops->sym_session_configure(dev, xforms,
@@ -1761,7 +1921,7 @@ rte_cryptodev_sym_session_pool_create(const char *name, uint32_t nb_elts,
 
 	obj_sz = rte_cryptodev_sym_get_header_session_size() + user_data_size;
 	if (obj_sz > elt_size)
-		CDEV_LOG_INFO("elt_size %u is expanded to %u\n", elt_size,
+		CDEV_LOG_INFO("elt_size %u is expanded to %u", elt_size,
 				obj_sz);
 	else
 		obj_sz = elt_size;
@@ -1771,14 +1931,14 @@ rte_cryptodev_sym_session_pool_create(const char *name, uint32_t nb_elts,
 			NULL, NULL, NULL, NULL,
 			socket_id, 0);
 	if (mp == NULL) {
-		CDEV_LOG_ERR("%s(name=%s) failed, rte_errno=%d\n",
+		CDEV_LOG_ERR("%s(name=%s) failed, rte_errno=%d",
 			__func__, name, rte_errno);
 		return NULL;
 	}
 
 	pool_priv = rte_mempool_get_priv(mp);
 	if (!pool_priv) {
-		CDEV_LOG_ERR("%s(name=%s) failed to get private data\n",
+		CDEV_LOG_ERR("%s(name=%s) failed to get private data",
 			__func__, name);
 		rte_mempool_free(mp);
 		return NULL;
@@ -1809,7 +1969,7 @@ rte_cryptodev_asym_session_pool_create(const char *name, uint32_t nb_elts,
 				max_priv_sz = priv_sz;
 		}
 	if (max_priv_sz == 0) {
-		CDEV_LOG_INFO("Could not set max private session size\n");
+		CDEV_LOG_INFO("Could not set max private session size");
 		return NULL;
 	}
 
@@ -1822,14 +1982,14 @@ rte_cryptodev_asym_session_pool_create(const char *name, uint32_t nb_elts,
 			NULL, NULL, NULL, NULL,
 			socket_id, 0);
 	if (mp == NULL) {
-		CDEV_LOG_ERR("%s(name=%s) failed, rte_errno=%d\n",
+		CDEV_LOG_ERR("%s(name=%s) failed, rte_errno=%d",
 			__func__, name, rte_errno);
 		return NULL;
 	}
 
 	pool_priv = rte_mempool_get_priv(mp);
 	if (!pool_priv) {
-		CDEV_LOG_ERR("%s(name=%s) failed to get private data\n",
+		CDEV_LOG_ERR("%s(name=%s) failed to get private data",
 			__func__, name);
 		rte_mempool_free(mp);
 		return NULL;
@@ -1876,7 +2036,7 @@ rte_cryptodev_sym_session_create(struct rte_mempool *mp)
 	struct rte_cryptodev_sym_session_pool_private_data *pool_priv;
 
 	if (!rte_cryptodev_sym_is_valid_session_pool(mp)) {
-		CDEV_LOG_ERR("Invalid mempool\n");
+		CDEV_LOG_ERR("Invalid mempool");
 		return NULL;
 	}
 
@@ -1926,7 +2086,7 @@ rte_cryptodev_asym_session_create(uint8_t dev_id,
 		return -EINVAL;
 
 	if (!mp) {
-		CDEV_LOG_ERR("invalid mempool\n");
+		CDEV_LOG_ERR("invalid mempool");
 		return -EINVAL;
 	}
 
@@ -1961,7 +2121,8 @@ rte_cryptodev_asym_session_create(uint8_t dev_id,
 	/* Clear device session pointer.*/
 	memset(sess->sess_private_data, 0, session_priv_data_sz + sess->user_data_sz);
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->asym_session_configure, -ENOTSUP);
+	if (*dev->dev_ops->asym_session_configure == NULL)
+		return -ENOTSUP;
 
 	if (sess->sess_private_data[0] == 0) {
 		ret = dev->dev_ops->asym_session_configure(dev, xforms, sess);
@@ -2000,7 +2161,8 @@ rte_cryptodev_sym_session_clear(uint8_t dev_id,
 	if (--sess->sess_data[driver_id].refcnt != 0)
 		return -EBUSY;
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->sym_session_clear, -ENOTSUP);
+	if (*dev->dev_ops->sym_session_clear == NULL)
+		return -ENOTSUP;
 
 	dev->dev_ops->sym_session_clear(dev, sess);
 
@@ -2047,9 +2209,12 @@ rte_cryptodev_asym_session_free(uint8_t dev_id, void *sess)
 	if (dev == NULL || sess == NULL)
 		return -EINVAL;
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->asym_session_clear, -ENOTSUP);
+	if (*dev->dev_ops->asym_session_clear == NULL)
+		return -ENOTSUP;
 
 	dev->dev_ops->asym_session_clear(dev, sess);
+
+	rte_free(((struct rte_cryptodev_asym_session *)sess)->event_mdata);
 
 	/* Return session to mempool */
 	sess_mp = rte_mempool_from_obj(sess);
@@ -2108,6 +2273,9 @@ rte_cryptodev_sym_get_private_session_size(uint8_t dev_id)
 
 	priv_sess_size = (*dev->dev_ops->sym_session_get_size)(dev);
 
+	rte_cryptodev_trace_sym_get_private_session_size(dev_id,
+		priv_sess_size);
+
 	return priv_sess_size;
 }
 
@@ -2127,6 +2295,9 @@ rte_cryptodev_asym_get_private_session_size(uint8_t dev_id)
 
 	priv_sess_size = (*dev->dev_ops->asym_session_get_size)(dev);
 
+	rte_cryptodev_trace_asym_get_private_session_size(dev_id,
+		priv_sess_size);
+
 	return priv_sess_size;
 }
 
@@ -2143,6 +2314,9 @@ rte_cryptodev_sym_session_set_user_data(
 		return -ENOMEM;
 
 	rte_memcpy(sess->sess_data + sess->nb_drivers, data, size);
+
+	rte_cryptodev_trace_sym_session_set_user_data(sess, data, size);
+
 	return 0;
 }
 
@@ -2150,10 +2324,16 @@ void *
 rte_cryptodev_sym_session_get_user_data(
 					struct rte_cryptodev_sym_session *sess)
 {
+	void *data = NULL;
+
 	if (sess == NULL || sess->user_data_sz == 0)
 		return NULL;
 
-	return (void *)(sess->sess_data + sess->nb_drivers);
+	data = (void *)(sess->sess_data + sess->nb_drivers);
+
+	rte_cryptodev_trace_sym_session_get_user_data(sess, data);
+
+	return data;
 }
 
 int
@@ -2169,6 +2349,9 @@ rte_cryptodev_asym_session_set_user_data(void *session, void *data, uint16_t siz
 	rte_memcpy(sess->sess_private_data +
 			sess->max_priv_data_sz,
 			data, size);
+
+	rte_cryptodev_trace_asym_session_set_user_data(sess, data, size);
+
 	return 0;
 }
 
@@ -2176,11 +2359,16 @@ void *
 rte_cryptodev_asym_session_get_user_data(void *session)
 {
 	struct rte_cryptodev_asym_session *sess = session;
+	void *data = NULL;
+
 	if (sess == NULL || sess->user_data_sz == 0)
 		return NULL;
 
-	return (void *)(sess->sess_private_data +
-			sess->max_priv_data_sz);
+	data = (void *)(sess->sess_private_data + sess->max_priv_data_sz);
+
+	rte_cryptodev_trace_asym_session_get_user_data(sess, data);
+
+	return data;
 }
 
 static inline void
@@ -2211,6 +2399,8 @@ rte_cryptodev_sym_cpu_crypto_process(uint8_t dev_id,
 		return 0;
 	}
 
+	rte_cryptodev_trace_sym_cpu_crypto_process(dev_id, sess);
+
 	return dev->dev_ops->sym_cpu_process(dev, sess, ofs, vec);
 }
 
@@ -2235,6 +2425,8 @@ rte_cryptodev_get_raw_dp_ctx_size(uint8_t dev_id)
 	if (priv_size < 0)
 		return -ENOTSUP;
 
+	rte_cryptodev_trace_get_raw_dp_ctx_size(dev_id);
+
 	return RTE_ALIGN_CEIL((size + priv_size), 8);
 }
 
@@ -2255,8 +2447,54 @@ rte_cryptodev_configure_raw_dp_ctx(uint8_t dev_id, uint16_t qp_id,
 			|| dev->dev_ops->sym_configure_raw_dp_ctx == NULL)
 		return -ENOTSUP;
 
+	rte_cryptodev_trace_configure_raw_dp_ctx(dev_id, qp_id, sess_type);
+
 	return (*dev->dev_ops->sym_configure_raw_dp_ctx)(dev, qp_id, ctx,
 			sess_type, session_ctx, is_update);
+}
+
+int
+rte_cryptodev_session_event_mdata_set(uint8_t dev_id, void *sess,
+	enum rte_crypto_op_type op_type,
+	enum rte_crypto_op_sess_type sess_type,
+	void *ev_mdata,
+	uint16_t size)
+{
+	struct rte_cryptodev *dev;
+
+	if (sess == NULL || ev_mdata == NULL)
+		return -EINVAL;
+
+	if (!rte_cryptodev_is_valid_dev(dev_id))
+		goto skip_pmd_op;
+
+	dev = rte_cryptodev_pmd_get_dev(dev_id);
+	if (dev->dev_ops->session_ev_mdata_set == NULL)
+		goto skip_pmd_op;
+
+	rte_cryptodev_trace_session_event_mdata_set(dev_id, sess, op_type,
+		sess_type, ev_mdata, size);
+
+	return (*dev->dev_ops->session_ev_mdata_set)(dev, sess, op_type,
+			sess_type, ev_mdata);
+
+skip_pmd_op:
+	if (op_type == RTE_CRYPTO_OP_TYPE_SYMMETRIC)
+		return rte_cryptodev_sym_session_set_user_data(sess, ev_mdata,
+				size);
+	else if (op_type == RTE_CRYPTO_OP_TYPE_ASYMMETRIC) {
+		struct rte_cryptodev_asym_session *s = sess;
+
+		if (s->event_mdata == NULL) {
+			s->event_mdata = rte_malloc(NULL, size, 0);
+			if (s->event_mdata == NULL)
+				return -ENOMEM;
+		}
+		rte_memcpy(s->event_mdata, ev_mdata, size);
+
+		return 0;
+	} else
+		return -ENOTSUP;
 }
 
 uint32_t
@@ -2332,7 +2570,7 @@ rte_crypto_op_pool_create(const char *name, enum rte_crypto_op_type type,
 		elt_size += RTE_MAX(sizeof(struct rte_crypto_sym_op),
 		                    sizeof(struct rte_crypto_asym_op));
 	} else {
-		CDEV_LOG_ERR("Invalid op_type\n");
+		CDEV_LOG_ERR("Invalid op_type");
 		return NULL;
 	}
 
@@ -2379,6 +2617,7 @@ rte_crypto_op_pool_create(const char *name, enum rte_crypto_op_type type,
 	priv->priv_size = priv_size;
 	priv->type = type;
 
+	rte_cryptodev_trace_op_pool_create(name, socket_id, type, nb_elts, mp);
 	return mp;
 }
 
@@ -2416,6 +2655,7 @@ rte_cryptodev_driver_id_get(const char *name)
 {
 	struct cryptodev_driver *driver;
 	const char *driver_name;
+	int driver_id = -1;
 
 	if (name == NULL) {
 		RTE_LOG(DEBUG, CRYPTODEV, "name pointer NULL");
@@ -2424,10 +2664,15 @@ rte_cryptodev_driver_id_get(const char *name)
 
 	TAILQ_FOREACH(driver, &cryptodev_driver_list, next) {
 		driver_name = driver->driver->name;
-		if (strncmp(driver_name, name, strlen(driver_name) + 1) == 0)
-			return driver->id;
+		if (strncmp(driver_name, name, strlen(driver_name) + 1) == 0) {
+			driver_id = driver->id;
+			break;
+		}
 	}
-	return -1;
+
+	rte_cryptodev_trace_driver_id_get(name, driver_id);
+
+	return driver_id;
 }
 
 const char *
@@ -2444,6 +2689,8 @@ rte_cryptodev_name_get(uint8_t dev_id)
 	if (dev == NULL)
 		return NULL;
 
+	rte_cryptodev_trace_name_get(dev_id, dev->data->name);
+
 	return dev->data->name;
 }
 
@@ -2452,9 +2699,13 @@ rte_cryptodev_driver_name_get(uint8_t driver_id)
 {
 	struct cryptodev_driver *driver;
 
-	TAILQ_FOREACH(driver, &cryptodev_driver_list, next)
-		if (driver->id == driver_id)
+	TAILQ_FOREACH(driver, &cryptodev_driver_list, next) {
+		if (driver->id == driver_id) {
+			rte_cryptodev_trace_driver_name_get(driver_id,
+				driver->driver->name);
 			return driver->driver->name;
+		}
+	}
 	return NULL;
 }
 
@@ -2466,6 +2717,8 @@ rte_cryptodev_allocate_driver(struct cryptodev_driver *crypto_drv,
 	crypto_drv->id = nb_drivers;
 
 	TAILQ_INSERT_TAIL(&cryptodev_driver_list, crypto_drv, next);
+
+	rte_cryptodev_trace_allocate_driver(drv->name);
 
 	return nb_drivers++;
 }

@@ -15,6 +15,7 @@ enum roc_npc_item_type {
 	ROC_NPC_ITEM_TYPE_E_TAG,
 	ROC_NPC_ITEM_TYPE_IPV4,
 	ROC_NPC_ITEM_TYPE_IPV6,
+	ROC_NPC_ITEM_TYPE_IPV6_FRAG_EXT,
 	ROC_NPC_ITEM_TYPE_ARP_ETH_IPV4,
 	ROC_NPC_ITEM_TYPE_MPLS,
 	ROC_NPC_ITEM_TYPE_ICMP,
@@ -37,6 +38,7 @@ enum roc_npc_item_type {
 	ROC_NPC_ITEM_TYPE_L3_CUSTOM,
 	ROC_NPC_ITEM_TYPE_QINQ,
 	ROC_NPC_ITEM_TYPE_RAW,
+	ROC_NPC_ITEM_TYPE_MARK,
 	ROC_NPC_ITEM_TYPE_END,
 };
 
@@ -60,7 +62,7 @@ struct roc_npc_flow_item_raw {
 
 struct roc_ether_addr {
 	uint8_t addr_bytes[PLT_ETHER_ADDR_LEN]; /**< Addr bytes in tx order */
-} plt_aligned(2);
+} __plt_aligned(2);
 
 struct roc_ether_hdr {
 	struct roc_ether_addr d_addr; /**< Destination address. */
@@ -72,7 +74,7 @@ struct roc_ether_hdr {
 		} S_un; /**< Do not use directly; use s_addr instead.*/
 	};
 	uint16_t ether_type; /**< Frame type. */
-} plt_aligned(2);
+} __plt_aligned(2);
 
 PLT_STD_C11
 struct roc_npc_flow_item_eth {
@@ -209,6 +211,25 @@ struct roc_npc_action_meter {
 	uint32_t mtr_id; /**< Meter id to be applied. > */
 };
 
+enum roc_npc_sec_action_alg {
+	ROC_NPC_SEC_ACTION_ALG0,
+	ROC_NPC_SEC_ACTION_ALG1,
+	ROC_NPC_SEC_ACTION_ALG2,
+	ROC_NPC_SEC_ACTION_ALG3,
+};
+
+struct roc_npc_sec_action {
+	/* Used as lookup result for ALG3 */
+	uint32_t sa_index;
+	/* When true XOR initial SA_INDEX with SA_HI/SA_LO to get SA_MCAM */
+	bool sa_xor;
+	uint16_t sa_hi, sa_lo;
+	/* Determines alg to be applied post SA_MCAM computation with/without
+	 * XOR
+	 */
+	enum roc_npc_sec_action_alg alg;
+};
+
 struct roc_npc_attr {
 	uint32_t priority;	/**< Rule priority level within group. */
 	uint32_t ingress : 1;	/**< Rule applies to ingress traffic. */
@@ -225,6 +246,7 @@ struct roc_npc_flow {
 	uint8_t nix_intf;
 	uint8_t enable;
 	uint32_t mcam_id;
+	uint8_t use_ctr;
 	int32_t ctr_id;
 	uint32_t priority;
 	uint32_t mtr_id;
@@ -254,7 +276,7 @@ enum roc_npc_rss_hash_function {
 struct roc_npc_action_rss {
 	enum roc_npc_rss_hash_function func;
 	uint32_t level;
-	uint64_t types;	       /**< Specific RSS hash types (see RTE_ETH_RSS_*). */
+	uint64_t types;	       /**< Specific RSS hash types (see ETH_RSS_*). */
 	uint32_t key_len;      /**< Hash key length in bytes. */
 	uint32_t queue_num;    /**< Number of entries in @p queue. */
 	const uint8_t *key;    /**< Hash key. */
@@ -308,6 +330,8 @@ roc_npc_flow_create(struct roc_npc *roc_npc, const struct roc_npc_attr *attr,
 		    const struct roc_npc_action actions[], int *errcode);
 int __roc_api roc_npc_flow_destroy(struct roc_npc *roc_npc,
 				   struct roc_npc_flow *flow);
+int __roc_api roc_npc_mcam_free(struct roc_npc *roc_npc,
+				struct roc_npc_flow *mcam);
 int __roc_api roc_npc_mcam_free_entry(struct roc_npc *roc_npc, uint32_t entry);
 int __roc_api roc_npc_mcam_enable_all_entries(struct roc_npc *roc_npc,
 					      bool enable);
@@ -346,4 +370,8 @@ int __roc_api roc_npc_mcam_merge_base_steering_rule(struct roc_npc *roc_npc,
 						    struct roc_npc_flow *flow);
 int __roc_api roc_npc_validate_portid_action(struct roc_npc *roc_npc_src,
 					     struct roc_npc *roc_npc_dst);
+int __roc_api roc_npc_mcam_init(struct roc_npc *roc_npc,
+				struct roc_npc_flow *flow, int mcam_id);
+int __roc_api roc_npc_mcam_move(struct roc_npc *roc_npc, uint16_t old_ent,
+				uint16_t new_ent);
 #endif /* _ROC_NPC_H_ */

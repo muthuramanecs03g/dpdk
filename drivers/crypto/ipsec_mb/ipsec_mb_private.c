@@ -2,7 +2,7 @@
  * Copyright(c) 2021 Intel Corporation
  */
 
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_common.h>
 #include <rte_cryptodev.h>
 
@@ -53,6 +53,15 @@ ipsec_mb_create(struct rte_vdev_device *vdev,
 	const char *name, *args;
 	int retval;
 
+#if defined(RTE_ARCH_ARM)
+	if ((pmd_type != IPSEC_MB_PMD_TYPE_SNOW3G) &&
+		(pmd_type != IPSEC_MB_PMD_TYPE_ZUC))
+		return -ENOTSUP;
+#endif
+
+#if defined(RTE_ARCH_ARM64)
+	vector_mode = IPSEC_MB_ARM64;
+#elif defined(RTE_ARCH_X86_64)
 	if (vector_mode == IPSEC_MB_NOT_SUPPORTED) {
 		/* Check CPU for supported vector instruction set */
 		if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_AVX512F))
@@ -64,6 +73,10 @@ ipsec_mb_create(struct rte_vdev_device *vdev,
 		else
 			vector_mode = IPSEC_MB_SSE;
 	}
+#else
+	/* Unsupported architecture */
+	return -ENOTSUP;
+#endif
 
 	init_params.private_data_size = sizeof(struct ipsec_mb_dev_private) +
 		pmd_data->internals_priv_size;

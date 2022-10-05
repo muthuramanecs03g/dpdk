@@ -2,6 +2,8 @@
  * Copyright (c) 2021 NVIDIA Corporation & Affiliates
  */
 
+#include <stdlib.h>
+
 #include <rte_eal.h>
 #include <rte_tailq.h>
 #include <rte_string_fns.h>
@@ -9,7 +11,6 @@
 #include <rte_malloc.h>
 #include <rte_errno.h>
 #include <rte_log.h>
-#include <rte_eal_paging.h>
 
 #include "rte_gpudev.h"
 #include "gpudev_driver.h"
@@ -820,6 +821,7 @@ rte_gpu_comm_create_list(uint16_t dev_id,
 	uint32_t idx_l;
 	int ret;
 	struct rte_gpu *dev;
+	struct rte_gpu_info info;
 
 	if (num_comm_items == 0) {
 		rte_errno = EINVAL;
@@ -829,6 +831,12 @@ rte_gpu_comm_create_list(uint16_t dev_id,
 	dev = gpu_get_by_id(dev_id);
 	if (dev == NULL) {
 		GPU_LOG(ERR, "memory barrier for invalid device ID %d", dev_id);
+		rte_errno = ENODEV;
+		return NULL;
+	}
+
+	ret = rte_gpu_info_get(dev_id, &info);
+	if (ret < 0) {
 		rte_errno = ENODEV;
 		return NULL;
 	}
@@ -855,7 +863,7 @@ rte_gpu_comm_create_list(uint16_t dev_id,
 	 */
 	comm_list[0].status_d = rte_gpu_mem_alloc(dev_id,
 			sizeof(enum rte_gpu_comm_list_status) * num_comm_items,
-			rte_mem_page_size());
+			info.page_size);
 	if (ret < 0) {
 		rte_errno = ENOMEM;
 		return NULL;

@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 #include <getopt.h>
@@ -38,6 +39,7 @@ evt_options_default(struct evt_options *opt)
 	opt->eth_queues = 1;
 	opt->vector_size = 64;
 	opt->vector_tmo_nsec = 100E3;
+	opt->crypto_op_type = RTE_CRYPTO_OP_TYPE_SYMMETRIC;
 }
 
 typedef int (*option_parser_t)(struct evt_options *opt,
@@ -107,6 +109,26 @@ evt_parse_eth_prod_type(struct evt_options *opt, const char *arg __rte_unused)
 }
 
 static int
+evt_parse_tx_first(struct evt_options *opt, const char *arg __rte_unused)
+{
+	int ret;
+
+	ret = parser_read_uint32(&(opt->tx_first), arg);
+
+	return ret;
+}
+
+static int
+evt_parse_tx_pkt_sz(struct evt_options *opt, const char *arg __rte_unused)
+{
+	int ret;
+
+	ret = parser_read_uint16(&(opt->tx_pkt_sz), arg);
+
+	return ret;
+}
+
+static int
 evt_parse_timer_prod_type(struct evt_options *opt, const char *arg __rte_unused)
 {
 	opt->prod_type = EVT_PROD_TYPE_EVENT_TIMER_ADPTR;
@@ -139,6 +161,18 @@ evt_parse_crypto_adptr_mode(struct evt_options *opt, const char *arg)
 	ret = parser_read_uint8(&mode, arg);
 	opt->crypto_adptr_mode = mode ? RTE_EVENT_CRYPTO_ADAPTER_OP_FORWARD :
 					RTE_EVENT_CRYPTO_ADAPTER_OP_NEW;
+	return ret;
+}
+
+static int
+evt_parse_crypto_op_type(struct evt_options *opt, const char *arg)
+{
+	uint8_t op_type;
+	int ret;
+
+	ret = parser_read_uint8(&op_type, arg);
+	opt->crypto_op_type = op_type ? RTE_CRYPTO_OP_TYPE_ASYMMETRIC :
+					RTE_CRYPTO_OP_TYPE_SYMMETRIC;
 	return ret;
 }
 
@@ -368,6 +402,8 @@ usage(char *program)
 		"\t--expiry_nsec      : event timer expiry ns.\n"
 		"\t--crypto_adptr_mode : 0 for OP_NEW mode (default) and\n"
 		"\t                      1 for OP_FORWARD mode.\n"
+		"\t--crypto_op_type   : 0 for SYM ops (default) and\n"
+		"\t                     1 for ASYM ops.\n"
 		"\t--mbuf_sz          : packet mbuf size.\n"
 		"\t--max_pkt_sz       : max packet size.\n"
 		"\t--prod_enq_burst_sz : producer enqueue burst size.\n"
@@ -376,6 +412,10 @@ usage(char *program)
 		"\t--vector_size      : Max vector size.\n"
 		"\t--vector_tmo_ns    : Max vector timeout in nanoseconds\n"
 		"\t--per_port_pool    : Configure unique pool per ethdev port\n"
+		"\t--tx_first         : Transmit given number of packets\n"
+		"                       across all the ethernet devices before\n"
+		"                       event workers start.\n"
+		"\t--tx_pkt_sz        : Packet size to use with Tx first."
 		);
 	printf("available tests:\n");
 	evt_test_dump_names();
@@ -442,6 +482,7 @@ static struct option lgopts[] = {
 	{ EVT_PROD_TIMERDEV,       0, 0, 0 },
 	{ EVT_PROD_TIMERDEV_BURST, 0, 0, 0 },
 	{ EVT_CRYPTO_ADPTR_MODE,   1, 0, 0 },
+	{ EVT_CRYPTO_OP_TYPE,	   1, 0, 0 },
 	{ EVT_NB_TIMERS,           1, 0, 0 },
 	{ EVT_NB_TIMER_ADPTRS,     1, 0, 0 },
 	{ EVT_TIMER_TICK_NSEC,     1, 0, 0 },
@@ -456,6 +497,8 @@ static struct option lgopts[] = {
 	{ EVT_VECTOR_TMO,          1, 0, 0 },
 	{ EVT_PER_PORT_POOL,       0, 0, 0 },
 	{ EVT_HELP,                0, 0, 0 },
+	{ EVT_TX_FIRST,            1, 0, 0 },
+	{ EVT_TX_PKT_SZ,           1, 0, 0 },
 	{ NULL,                    0, 0, 0 }
 };
 
@@ -484,6 +527,7 @@ evt_opts_parse_long(int opt_idx, struct evt_options *opt)
 		{ EVT_PROD_TIMERDEV, evt_parse_timer_prod_type},
 		{ EVT_PROD_TIMERDEV_BURST, evt_parse_timer_prod_type_burst},
 		{ EVT_CRYPTO_ADPTR_MODE, evt_parse_crypto_adptr_mode},
+		{ EVT_CRYPTO_OP_TYPE, evt_parse_crypto_op_type},
 		{ EVT_NB_TIMERS, evt_parse_nb_timers},
 		{ EVT_NB_TIMER_ADPTRS, evt_parse_nb_timer_adptrs},
 		{ EVT_TIMER_TICK_NSEC, evt_parse_timer_tick_nsec},
@@ -497,6 +541,8 @@ evt_opts_parse_long(int opt_idx, struct evt_options *opt)
 		{ EVT_VECTOR_SZ, evt_parse_vector_size},
 		{ EVT_VECTOR_TMO, evt_parse_vector_tmo_ns},
 		{ EVT_PER_PORT_POOL, evt_parse_per_port_pool},
+		{ EVT_TX_FIRST, evt_parse_tx_first},
+		{ EVT_TX_PKT_SZ, evt_parse_tx_pkt_sz},
 	};
 
 	for (i = 0; i < RTE_DIM(parsermap); i++) {

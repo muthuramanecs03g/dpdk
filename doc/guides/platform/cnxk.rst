@@ -18,6 +18,7 @@ Supported OCTEON cnxk SoCs
 - CN98xx
 - CN106xx
 - CNF105xx
+- CN103XX
 
 Resource Virtualization Unit architecture
 -----------------------------------------
@@ -578,9 +579,20 @@ an x86 based platform.
 Native Compilation
 ~~~~~~~~~~~~~~~~~~
 
+Refer to :doc:`../linux_gsg/build_dpdk` for generic native builds.
+
+CN9K:
+
 .. code-block:: console
 
-        meson build
+        meson -Dplatform=cn9k build
+        ninja -C build
+
+CN10K:
+
+.. code-block:: console
+
+        meson -Dplatform=cn10k build
         ninja -C build
 
 Cross Compilation
@@ -608,3 +620,18 @@ CN10K:
    if Marvell toolchain is available then it can be used by overriding the
    c, cpp, ar, strip ``binaries`` attributes to respective Marvell
    toolchain binaries in ``config/arm/arm64_cn10k_linux_gcc`` file.
+
+Environment Variables
+~~~~~~~~~~~~~~~~~~~~~
+
+* ``BPHY_INTR_MLOCK_DISABLE``
+   When defined disables memory locking in
+   BPHY environment.
+
+* ``ROC_CN10K_MBOX_TIMEOUT``, ``ROC_MBOX_TIMEOUT``
+   When set, overrides MBOX timeout by value in milli seconds.
+
+* ``ETH_SEC_IV_OVR``
+   When set, overrides outbound inline SA IV. By default IV is generated
+   by HW. Format of variable is string of comma separated one byte values as
+   for ex: "0x0, 0x10, 0x20, ..."

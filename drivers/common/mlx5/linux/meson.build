@@ -45,6 +45,13 @@ if static_ibverbs
     ext_deps += declare_dependency(link_args:ibv_ldflags.split())
 endif
 
+libmtcr_ul_found = false
+lib = cc.find_library('mtcr_ul', required:false)
+if lib.found() and run_command('meson', '--version').stdout().version_compare('>= 0.49.2')
+    libmtcr_ul_found = true
+    ext_deps += lib
+endif
+
 sources += files('mlx5_nl.c')
 sources += files('mlx5_common_auxiliary.c')
 sources += files('mlx5_common_os.c')
@@ -72,6 +79,8 @@ has_member_args = [
 # [ "MACRO to define if found", "header for the search",
 #   "symbol to search" ]
 has_sym_args = [
+        [ 'HAVE_IBV_RX_HASH_IPSEC_SPI', 'infiniband/verbs.h',
+            'IBV_RX_HASH_IPSEC_SPI' ],
         [ 'HAVE_IBV_RELAXED_ORDERING', 'infiniband/verbs.h',
             'IBV_ACCESS_RELAXED_ORDERING ' ],
         [ 'HAVE_IBV_DEVICE_STRIDING_RQ_SUPPORT', 'infiniband/mlx5dv.h',
@@ -205,6 +214,11 @@ has_sym_args = [
         [ 'HAVE_MLX5_IBV_IMPORT_CTX_PD_AND_MR', 'infiniband/verbs.h',
             'ibv_import_device' ],
 ]
+if  libmtcr_ul_found
+    has_sym_args += [
+        [ 'HAVE_MLX5_MSTFLINT', 'mstflint/mtcr.h', 'mopen' ],
+    ]
+endif
 config = configuration_data()
 foreach arg:has_sym_args
     config.set(arg[0], cc.has_header_symbol(arg[1], arg[2], dependencies: libs))

@@ -141,7 +141,7 @@ hns3vf_enable_msix(const struct rte_pci_device *device, bool op)
 	pos = hns3vf_find_pci_capability(device, PCI_CAP_ID_MSIX);
 	if (pos) {
 		ret = rte_pci_read_config(device, &control, sizeof(control),
-				    (pos + PCI_MSIX_FLAGS));
+					  (pos + PCI_MSIX_FLAGS));
 		if (ret < 0) {
 			PMD_INIT_LOG(ERR, "Failed to read PCI offset 0x%x",
 				     (pos + PCI_MSIX_FLAGS));
@@ -153,10 +153,10 @@ hns3vf_enable_msix(const struct rte_pci_device *device, bool op)
 		else
 			control &= ~PCI_MSIX_FLAGS_ENABLE;
 		ret = rte_pci_write_config(device, &control, sizeof(control),
-					  (pos + PCI_MSIX_FLAGS));
+					   (pos + PCI_MSIX_FLAGS));
 		if (ret < 0) {
 			PMD_INIT_LOG(ERR, "failed to write PCI offset 0x%x",
-				    (pos + PCI_MSIX_FLAGS));
+				     (pos + PCI_MSIX_FLAGS));
 			return -ENXIO;
 		}
 
@@ -198,7 +198,7 @@ hns3vf_remove_uc_mac_addr(struct hns3_hw *hw, struct rte_ether_addr *mac_addr)
 				false, NULL, 0);
 	if (ret) {
 		hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
-				      mac_addr);
+				       mac_addr);
 		hns3_err(hw, "failed to add uc mac addr(%s), ret = %d",
 			 mac_str, ret);
 	}
@@ -240,12 +240,12 @@ hns3vf_set_default_mac_addr(struct rte_eth_dev *dev,
 		 */
 		if (ret == -EPERM) {
 			hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
-					      old_addr);
+					       old_addr);
 			hns3_warn(hw, "Has permanent mac addr(%s) for vf",
 				  mac_str);
 		} else {
 			hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
-					      mac_addr);
+					       mac_addr);
 			hns3_err(hw, "Failed to set mac addr(%s) for vf: %d",
 				 mac_str, ret);
 		}
@@ -292,7 +292,7 @@ hns3vf_remove_mc_mac_addr(struct hns3_hw *hw,
 				NULL, 0);
 	if (ret) {
 		hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
-				      mac_addr);
+				       mac_addr);
 		hns3_err(hw, "Failed to remove mc mac addr(%s) for vf: %d",
 			 mac_str, ret);
 	}
@@ -495,7 +495,6 @@ hns3vf_dev_configure(struct rte_eth_dev *dev)
 	/* When RSS is not configured, redirect the packet queue 0 */
 	if ((uint32_t)mq_mode & RTE_ETH_MQ_RX_RSS_FLAG) {
 		conf->rxmode.offloads |= RTE_ETH_RX_OFFLOAD_RSS_HASH;
-		hw->rss_dis_flag = false;
 		rss_conf = conf->rx_adv_conf.rss_conf;
 		ret = hns3_dev_rss_hash_update(dev, &rss_conf);
 		if (ret)
@@ -715,9 +714,8 @@ hns3vf_check_dev_specifications(struct hns3_hw *hw)
 {
 	if (hw->rss_ind_tbl_size == 0 ||
 	    hw->rss_ind_tbl_size > HNS3_RSS_IND_TBL_SIZE_MAX) {
-		hns3_warn(hw, "the size of hash lookup table configured (%u)"
-			      " exceeds the maximum(%u)", hw->rss_ind_tbl_size,
-			      HNS3_RSS_IND_TBL_SIZE_MAX);
+		hns3_warn(hw, "the size of hash lookup table configured (%u) exceeds the maximum(%u)",
+			  hw->rss_ind_tbl_size, HNS3_RSS_IND_TBL_SIZE_MAX);
 		return -EINVAL;
 	}
 
@@ -779,6 +777,14 @@ hns3vf_get_push_lsc_cap(struct hns3_hw *hw)
 
 	while (remain_ms > 0) {
 		rte_delay_ms(HNS3_POLL_RESPONE_MS);
+		/*
+		 * The probe process may perform in interrupt thread context.
+		 * For example, users attach a device in the secondary process.
+		 * At the moment, the handling mailbox task will be blocked. So
+		 * driver has to actively handle the HNS3_MBX_LINK_STAT_CHANGE
+		 * mailbox from PF driver to get this capability.
+		 */
+		hns3_dev_handle_mbx_msg(hw);
 		if (__atomic_load_n(&vf->pf_push_lsc_cap, __ATOMIC_ACQUIRE) !=
 			HNS3_PF_PUSH_LSC_CAP_UNKNOWN)
 			break;
@@ -997,7 +1003,6 @@ hns3vf_get_configuration(struct hns3_hw *hw)
 	int ret;
 
 	hw->mac.media_type = HNS3_MEDIA_TYPE_NONE;
-	hw->rss_dis_flag = false;
 
 	/* Get device capability */
 	ret = hns3vf_get_capability(hw);
@@ -1169,8 +1174,8 @@ hns3vf_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 	int ret = 0;
 
 	if (__atomic_load_n(&hw->reset.resetting, __ATOMIC_RELAXED)) {
-		hns3_err(hw, "vf set vlan offload failed during resetting, "
-			     "mask = 0x%x", mask);
+		hns3_err(hw, "vf set vlan offload failed during resetting, mask = 0x%x",
+			 mask);
 		return -EIO;
 	}
 
@@ -1337,10 +1342,12 @@ hns3vf_service_handler(void *param)
 	 * Before querying the link status, check whether there is a reset
 	 * pending, and if so, abandon the query.
 	 */
-	if (!hns3vf_is_reset_pending(hns))
+	if (!hns3vf_is_reset_pending(hns)) {
 		hns3vf_request_link_info(hw);
-	else
+		hns3_update_hw_stats(hw);
+	} else {
 		hns3_warn(hw, "Cancel the query when reset is pending");
+	}
 
 	rte_eal_alarm_set(HNS3VF_SERVICE_INTERVAL, hns3vf_service_handler,
 			  eth_dev);
@@ -1510,16 +1517,9 @@ hns3vf_init_vf(struct rte_eth_dev *eth_dev)
 		goto err_get_config;
 	}
 
-	ret = hns3_tqp_stats_init(hw);
+	ret = hns3_stats_init(hw);
 	if (ret)
 		goto err_get_config;
-
-	/* Hardware statistics of imissed registers cleared. */
-	ret = hns3_update_imissed_stats(hw, true);
-	if (ret) {
-		hns3_err(hw, "clear imissed stats failed, ret = %d", ret);
-		goto err_set_tc_queue;
-	}
 
 	ret = hns3_queue_to_tc_mapping(hw, hw->tqps_num, hw->tqps_num);
 	if (ret) {
@@ -1548,7 +1548,7 @@ hns3vf_init_vf(struct rte_eth_dev *eth_dev)
 	return 0;
 
 err_set_tc_queue:
-	hns3_tqp_stats_uninit(hw);
+	hns3_stats_uninit(hw);
 
 err_get_config:
 	hns3vf_disable_irq0(hw);
@@ -1579,7 +1579,7 @@ hns3vf_uninit_vf(struct rte_eth_dev *eth_dev)
 	(void)hns3vf_set_alive(hw, false);
 	(void)hns3vf_set_promisc_mode(hw, false, false, false);
 	hns3_flow_uninit(eth_dev);
-	hns3_tqp_stats_uninit(hw);
+	hns3_stats_uninit(hw);
 	hns3vf_disable_irq0(hw);
 	rte_intr_disable(pci_dev->intr_handle);
 	hns3_intr_unregister(pci_dev->intr_handle, hns3vf_interrupt_handler,
@@ -1877,6 +1877,7 @@ hns3vf_is_reset_pending(struct hns3_adapter *hns)
 static int
 hns3vf_wait_hardware_ready(struct hns3_adapter *hns)
 {
+#define HNS3_WAIT_PF_RESET_READY_TIME 5
 	struct hns3_hw *hw = &hns->hw;
 	struct hns3_wait_data *wait_data = hw->reset.wait_data;
 	struct timeval tv;
@@ -1897,12 +1898,14 @@ hns3vf_wait_hardware_ready(struct hns3_adapter *hns)
 			return 0;
 
 		wait_data->check_completion = NULL;
-		wait_data->interval = 1 * MSEC_PER_SEC * USEC_PER_MSEC;
+		wait_data->interval = HNS3_WAIT_PF_RESET_READY_TIME *
+			MSEC_PER_SEC * USEC_PER_MSEC;
 		wait_data->count = 1;
 		wait_data->result = HNS3_WAIT_REQUEST;
 		rte_eal_alarm_set(wait_data->interval, hns3_wait_callback,
 				  wait_data);
-		hns3_warn(hw, "hardware is ready, delay 1 sec for PF reset complete");
+		hns3_warn(hw, "hardware is ready, delay %d sec for PF reset complete",
+				HNS3_WAIT_PF_RESET_READY_TIME);
 		return -EAGAIN;
 	} else if (wait_data->result == HNS3_WAIT_TIMEOUT) {
 		hns3_clock_gettime(&tv);
@@ -1973,6 +1976,8 @@ hns3vf_stop_service(struct hns3_adapter *hns)
 	} else
 		hw->reset.mbuf_deferred_free = false;
 
+	rte_eal_alarm_cancel(hns3vf_keep_alive_handler, eth_dev);
+
 	/*
 	 * It is cumbersome for hardware to pick-and-choose entries for deletion
 	 * from table space. Hence, for function reset software intervention is
@@ -1994,6 +1999,10 @@ hns3vf_start_service(struct hns3_adapter *hns)
 	eth_dev = &rte_eth_devices[hw->data->port_id];
 	hns3_set_rxtx_function(eth_dev);
 	hns3_mp_req_start_rxtx(eth_dev);
+
+	rte_eal_alarm_set(HNS3VF_KEEP_ALIVE_INTERVAL, hns3vf_keep_alive_handler,
+			  eth_dev);
+
 	if (hw->adapter_state == HNS3_NIC_STARTED) {
 		hns3vf_start_poll_job(eth_dev);
 

@@ -5,6 +5,10 @@
 #ifndef _FIPS_VALIDATION_H_
 #define _FIPS_VALIDATION_H_
 
+#ifdef USE_JANSSON
+#include <jansson.h>
+#endif /* USE_JANSSON */
+
 #define FIPS_PARSE_ERR(fmt, args)					\
 	RTE_LOG(ERR, USER1, "FIPS parse error" ## fmt ## "\n", ## args)
 
@@ -21,26 +25,31 @@
 #define POSITIVE_TEST		0
 #define NEGATIVE_TEST		-1
 
-#define REQ_FILE_PERFIX		"req"
-#define RSP_FILE_PERFIX		"rsp"
-#define FAX_FILE_PERFIX		"fax"
+#define REQ_FILE_PREFIX		"req"
+#define RSP_FILE_PREFIX		"rsp"
+#define FAX_FILE_PREFIX		"fax"
+#define JSON_FILE_PREFIX	"json"
+
+#define ACVVERSION			"1.0"
 
 enum fips_test_algorithms {
 		FIPS_TEST_ALGO_AES = 0,
+		FIPS_TEST_ALGO_AES_CBC,
 		FIPS_TEST_ALGO_AES_GCM,
 		FIPS_TEST_ALGO_AES_CMAC,
 		FIPS_TEST_ALGO_AES_CCM,
+		FIPS_TEST_ALGO_AES_XTS,
 		FIPS_TEST_ALGO_HMAC,
 		FIPS_TEST_ALGO_TDES,
 		FIPS_TEST_ALGO_SHA,
-		FIPS_TEST_ALGO_AES_XTS,
 		FIPS_TEST_ALGO_MAX
 };
 
 enum file_types {
 	FIPS_TYPE_REQ = 1,
 	FIPS_TYPE_FAX,
-	FIPS_TYPE_RSP
+	FIPS_TYPE_RSP,
+	FIPS_TYPE_JSON,
 };
 
 enum fips_test_op {
@@ -95,6 +104,7 @@ enum fips_aesavs_test_types {
 	AESAVS_TYPE_VARTXT,
 	AESAVS_TYPE_MMT,
 	AESAVS_TYPE_MCT,
+	AESAVS_TYPE_AFT,
 };
 
 enum fips_tdes_test_types {
@@ -123,6 +133,7 @@ enum fips_ccm_test_types {
 
 enum fips_sha_test_types {
 	SHA_KAT = 0,
+	SHA_AFT,
 	SHA_MCT
 };
 
@@ -161,6 +172,32 @@ struct gcm_interim_data {
 	uint8_t gen_iv;
 };
 
+enum xts_tweak_modes {
+	XTS_TWEAK_MODE_HEX = 0,
+	XTS_TWEAK_MODE_NUMBER
+};
+
+struct xts_interim_data {
+	enum xts_tweak_modes tweak_mode;
+};
+
+#ifdef USE_JANSSON
+struct fips_test_json_info {
+	/* Information used for reading from json */
+	json_t *json_root;
+	json_t *json_vector_set;
+	json_t *json_test_group;
+	json_t *json_test_case;
+	/* Location of json write output */
+	json_t *json_write_root;
+	json_t *json_write_group;
+	json_t *json_write_set;
+	json_t *json_write_case;
+	/* Other info */
+	uint8_t is_sample;
+};
+#endif /* USE_JANSSON */
+
 struct fips_test_interim_info {
 	FILE *fp_rd;
 	FILE *fp_wr;
@@ -181,6 +218,7 @@ struct fips_test_interim_info {
 		struct ccm_interim_data ccm_data;
 		struct sha_interim_data sha_data;
 		struct gcm_interim_data gcm_data;
+		struct xts_interim_data xts_data;
 	} interim_info;
 
 	enum fips_test_op op;
@@ -195,6 +233,10 @@ struct fips_test_interim_info {
 
 extern struct fips_test_vector vec;
 extern struct fips_test_interim_info info;
+
+#ifdef USE_JANSSON
+extern struct fips_test_json_info json_info;
+#endif /* USE_JANSSON */
 
 int
 fips_test_init(const char *req_file_path, const char *rsp_file_path,
@@ -211,6 +253,44 @@ fips_test_parse_one_case(void);
 
 void
 fips_test_write_one_case(void);
+
+#ifdef USE_JANSSON
+int
+fips_test_parse_one_json_vector_set(void);
+
+int
+fips_test_parse_one_json_group(void);
+
+int
+fips_test_parse_one_json_case(void);
+
+int
+parse_test_gcm_json_init(void);
+
+int
+parse_test_hmac_json_init(void);
+
+int
+parse_test_hmac_json_algorithm(void);
+
+int
+parse_test_cmac_json_init(void);
+
+int
+parse_test_aes_json_init(void);
+
+int
+parse_test_xts_json_init(void);
+
+int
+parse_test_sha_json_init(void);
+
+int
+parse_test_sha_json_algorithm(void);
+
+int
+parse_test_sha_json_test_type(void);
+#endif /* USE_JANSSON */
 
 int
 parse_test_aes_init(void);

@@ -103,6 +103,7 @@ eal_long_options[] = {
 	{OPT_TELEMETRY,         0, NULL, OPT_TELEMETRY_NUM        },
 	{OPT_NO_TELEMETRY,      0, NULL, OPT_NO_TELEMETRY_NUM     },
 	{OPT_FORCE_MAX_SIMD_BITWIDTH, 1, NULL, OPT_FORCE_MAX_SIMD_BITWIDTH_NUM},
+	{OPT_HUGE_WORKER_STACK, 2, NULL, OPT_HUGE_WORKER_STACK_NUM     },
 
 	{0,                     0, NULL, 0                        }
 };
@@ -741,8 +742,8 @@ check_core_list(int *lcores, unsigned int count)
 	return -1;
 }
 
-static int
-eal_parse_coremask(const char *coremask, int *cores)
+int
+rte_eal_parse_coremask(const char *coremask, int *cores)
 {
 	const char *coremask_orig = coremask;
 	int lcores[RTE_MAX_LCORE];
@@ -1648,7 +1649,7 @@ eal_parse_common_option(int opt, const char *optarg,
 		if (eal_service_cores_parsed())
 			RTE_LOG(WARNING, EAL,
 				"Service cores parsed before dataplane cores. Please ensure -c is before -s or -S\n");
-		if (eal_parse_coremask(optarg, lcore_indexes) < 0) {
+		if (rte_eal_parse_coremask(optarg, lcore_indexes) < 0) {
 			RTE_LOG(ERR, EAL, "invalid coremask syntax\n");
 			return -1;
 		}
@@ -2076,6 +2077,12 @@ eal_check_common_options(struct internal_config *internal_cfg)
 			internal_cfg->hugepage_file.unlink_before_mapping &&
 			!internal_cfg->in_memory) {
 		RTE_LOG(ERR, EAL, "Option --"OPT_HUGE_UNLINK" cannot "
+			"be specified together with --"OPT_NO_HUGE"\n");
+		return -1;
+	}
+	if (internal_cfg->no_hugetlbfs &&
+			internal_cfg->huge_worker_stack_size != 0) {
+		RTE_LOG(ERR, EAL, "Option --"OPT_HUGE_WORKER_STACK" cannot "
 			"be specified together with --"OPT_NO_HUGE"\n");
 		return -1;
 	}

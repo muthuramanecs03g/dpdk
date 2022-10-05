@@ -4,7 +4,7 @@
 #ifndef _QAT_DEVICE_H_
 #define _QAT_DEVICE_H_
 
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 
 #include "qat_common.h"
 #include "qat_logs.h"
@@ -16,6 +16,7 @@
 
 #define QAT_DEV_NAME_MAX_LEN	64
 
+#define QAT_IPSEC_MB_LIB "qat_ipsec_mb_lib"
 #define SYM_ENQ_THRESHOLD_NAME "qat_sym_enq_threshold"
 #define ASYM_ENQ_THRESHOLD_NAME "qat_asym_enq_threshold"
 #define COMP_ENQ_THRESHOLD_NAME "qat_comp_enq_threshold"

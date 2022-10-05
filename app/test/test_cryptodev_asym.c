@@ -3,8 +3,6 @@
  * Copyright (c) 2019 Intel Corporation
  */
 
-#ifndef RTE_EXEC_ENV_WINDOWS
-
 #include <rte_bus_vdev.h>
 #include <rte_common.h>
 #include <rte_hexdump.h>
@@ -94,7 +92,7 @@ queue_ops_rsa_sign_verify(void *sess)
 	asym_op->rsa.message.length = rsaplaintext.len;
 	asym_op->rsa.sign.length = 0;
 	asym_op->rsa.sign.data = output_buf;
-	asym_op->rsa.pad = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
+	asym_op->rsa.padding.type = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
 
 	debug_hexdump(stdout, "message", asym_op->rsa.message.data,
 		      asym_op->rsa.message.length);
@@ -126,7 +124,7 @@ queue_ops_rsa_sign_verify(void *sess)
 
 	/* Verify sign */
 	asym_op->rsa.op_type = RTE_CRYPTO_ASYM_OP_VERIFY;
-	asym_op->rsa.pad = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
+	asym_op->rsa.padding.type = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
 
 	/* Process crypto operation */
 	if (rte_cryptodev_enqueue_burst(dev_id, 0, &op, 1) != 1) {
@@ -185,7 +183,7 @@ queue_ops_rsa_enc_dec(void *sess)
 	asym_op->rsa.cipher.data = cipher_buf;
 	asym_op->rsa.cipher.length = 0;
 	asym_op->rsa.message.length = rsaplaintext.len;
-	asym_op->rsa.pad = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
+	asym_op->rsa.padding.type = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
 
 	debug_hexdump(stdout, "message", asym_op->rsa.message.data,
 		      asym_op->rsa.message.length);
@@ -210,14 +208,14 @@ queue_ops_rsa_enc_dec(void *sess)
 		status = TEST_FAILED;
 		goto error_exit;
 	}
-	debug_hexdump(stdout, "encrypted message", asym_op->rsa.message.data,
-		      asym_op->rsa.message.length);
+	debug_hexdump(stdout, "encrypted message", asym_op->rsa.cipher.data,
+		      asym_op->rsa.cipher.length);
 
 	/* Use the resulted output as decryption Input vector*/
 	asym_op = result_op->asym;
 	asym_op->rsa.message.length = 0;
 	asym_op->rsa.op_type = RTE_CRYPTO_ASYM_OP_DECRYPT;
-	asym_op->rsa.pad = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
+	asym_op->rsa.padding.type = RTE_CRYPTO_RSA_PADDING_PKCS1_5;
 
 	/* Process crypto operation */
 	if (rte_cryptodev_enqueue_burst(dev_id, 0, &op, 1) != 1) {
@@ -414,7 +412,7 @@ test_cryptodev_asym_op(struct crypto_testsuite_params_asym *ts_params,
 		}
 
 		xform_tc.rsa.key_type = key_type;
-		op->asym->rsa.pad = data_tc->rsa_data.padding;
+		op->asym->rsa.padding.type = data_tc->rsa_data.padding;
 
 		if (op->asym->rsa.op_type == RTE_CRYPTO_ASYM_OP_ENCRYPT) {
 			asym_op->rsa.message.data = data_tc->rsa_data.pt.data;
@@ -507,8 +505,7 @@ error_exit:
 		if (sess != NULL)
 			rte_cryptodev_asym_session_free(dev_id, sess);
 
-		if (op != NULL)
-			rte_crypto_op_free(op);
+		rte_crypto_op_free(op);
 
 		rte_free(result);
 
@@ -976,27 +973,30 @@ static inline void print_asym_capa(
 
 	for (i = 0; i < RTE_CRYPTO_ASYM_OP_LIST_END; i++) {
 		/* check supported operations */
-		if (rte_cryptodev_asym_xform_capability_check_optype(capa, i))
-			printf(" %s",
-					rte_crypto_asym_op_strings[i]);
+		if (rte_cryptodev_asym_xform_capability_check_optype(capa, i)) {
+			if (capa->xform_type == RTE_CRYPTO_ASYM_XFORM_DH)
+				printf(" %s", rte_crypto_asym_ke_strings[i]);
+			else
+				printf(" %s", rte_crypto_asym_op_strings[i]);
 		}
-		switch (capa->xform_type) {
-		case RTE_CRYPTO_ASYM_XFORM_RSA:
-		case RTE_CRYPTO_ASYM_XFORM_MODINV:
-		case RTE_CRYPTO_ASYM_XFORM_MODEX:
-		case RTE_CRYPTO_ASYM_XFORM_DH:
-		case RTE_CRYPTO_ASYM_XFORM_DSA:
-			printf(" modlen: min %d max %d increment %d",
-					capa->modlen.min,
-					capa->modlen.max,
-					capa->modlen.increment);
+	}
+	switch (capa->xform_type) {
+	case RTE_CRYPTO_ASYM_XFORM_RSA:
+	case RTE_CRYPTO_ASYM_XFORM_MODINV:
+	case RTE_CRYPTO_ASYM_XFORM_MODEX:
+	case RTE_CRYPTO_ASYM_XFORM_DH:
+	case RTE_CRYPTO_ASYM_XFORM_DSA:
+		printf(" modlen: min %d max %d increment %d",
+				capa->modlen.min,
+				capa->modlen.max,
+				capa->modlen.increment);
+	break;
+	case RTE_CRYPTO_ASYM_XFORM_ECDSA:
+	case RTE_CRYPTO_ASYM_XFORM_ECPM:
+	default:
 		break;
-		case RTE_CRYPTO_ASYM_XFORM_ECDSA:
-		case RTE_CRYPTO_ASYM_XFORM_ECPM:
-		default:
-			break;
-		}
-		printf("\n");
+	}
+	printf("\n");
 }
 
 static int
@@ -1064,8 +1064,8 @@ test_dh_gen_shared_sec(struct rte_crypto_asym_xform *xfrm)
 	asym_op = op->asym;
 
 	/* Setup a xform and op to generate private key only */
-	xform.dh.type = RTE_CRYPTO_ASYM_OP_SHARED_SECRET_COMPUTE;
 	xform.next = NULL;
+	asym_op->dh.ke_type = RTE_CRYPTO_ASYM_KE_SHARED_SECRET_COMPUTE;
 	asym_op->dh.priv_key.data = dh_test_params.priv_key.data;
 	asym_op->dh.priv_key.length = dh_test_params.priv_key.length;
 	asym_op->dh.pub_key.data = (uint8_t *)peer;
@@ -1114,8 +1114,7 @@ test_dh_gen_shared_sec(struct rte_crypto_asym_xform *xfrm)
 error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 	return status;
 }
 
@@ -1146,8 +1145,8 @@ test_dh_gen_priv_key(struct rte_crypto_asym_xform *xfrm)
 	asym_op = op->asym;
 
 	/* Setup a xform and op to generate private key only */
-	xform.dh.type = RTE_CRYPTO_ASYM_OP_PRIVATE_KEY_GENERATE;
 	xform.next = NULL;
+	asym_op->dh.ke_type = RTE_CRYPTO_ASYM_KE_PRIV_KEY_GENERATE;
 	asym_op->dh.priv_key.data = output;
 	asym_op->dh.priv_key.length = sizeof(output);
 
@@ -1193,8 +1192,7 @@ test_dh_gen_priv_key(struct rte_crypto_asym_xform *xfrm)
 error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	return status;
 }
@@ -1229,9 +1227,9 @@ test_dh_gen_pub_key(struct rte_crypto_asym_xform *xfrm)
 	 * using test private key
 	 *
 	 */
-	xform.dh.type = RTE_CRYPTO_ASYM_OP_PUBLIC_KEY_GENERATE;
 	xform.next = NULL;
 
+	asym_op->dh.ke_type = RTE_CRYPTO_ASYM_KE_PUB_KEY_GENERATE;
 	asym_op->dh.pub_key.data = output;
 	asym_op->dh.pub_key.length = sizeof(output);
 	/* load pre-defined private key */
@@ -1283,8 +1281,7 @@ test_dh_gen_pub_key(struct rte_crypto_asym_xform *xfrm)
 error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	return status;
 }
@@ -1319,15 +1316,15 @@ test_dh_gen_kp(struct rte_crypto_asym_xform *xfrm)
 	/* Setup a xform chain to generate
 	 * private key first followed by
 	 * public key
-	 */xform.dh.type = RTE_CRYPTO_ASYM_OP_PRIVATE_KEY_GENERATE;
+	 */
 	pub_key_xform.xform_type = RTE_CRYPTO_ASYM_XFORM_DH;
-	pub_key_xform.dh.type = RTE_CRYPTO_ASYM_OP_PUBLIC_KEY_GENERATE;
 	xform.next = &pub_key_xform;
 
+	asym_op->dh.ke_type = RTE_CRYPTO_ASYM_KE_PUB_KEY_GENERATE;
 	asym_op->dh.pub_key.data = out_pub_key;
 	asym_op->dh.pub_key.length = sizeof(out_pub_key);
 	asym_op->dh.priv_key.data = out_prv_key;
-	asym_op->dh.priv_key.length = sizeof(out_prv_key);
+	asym_op->dh.priv_key.length = 0;
 
 	ret = rte_cryptodev_asym_session_create(dev_id, &xform, sess_mpool, &sess);
 	if (ret < 0) {
@@ -1370,8 +1367,7 @@ test_dh_gen_kp(struct rte_crypto_asym_xform *xfrm)
 error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	return status;
 }
@@ -1481,8 +1477,7 @@ error_exit:
 	if (sess)
 		rte_cryptodev_asym_session_free(dev_id, sess);
 
-	if (op)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	TEST_ASSERT_EQUAL(status, 0, "Test failed");
 
@@ -1593,8 +1588,7 @@ error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
 
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	TEST_ASSERT_EQUAL(status, 0, "Test failed");
 
@@ -1639,7 +1633,7 @@ test_dh_keygenration(void)
 }
 
 static int
-test_dsa_sign(void)
+test_dsa_sign(struct rte_crypto_dsa_op_param *dsa_op)
 {
 	struct crypto_testsuite_params_asym *ts_params = &testsuite_params;
 	struct rte_mempool *op_mpool = ts_params->op_mpool;
@@ -1649,9 +1643,6 @@ test_dsa_sign(void)
 	struct rte_crypto_op *op = NULL, *result_op = NULL;
 	void *sess = NULL;
 	int status = TEST_SUCCESS;
-	uint8_t r[TEST_DH_MOD_LEN];
-	uint8_t s[TEST_DH_MOD_LEN];
-	uint8_t dgst[] = "35d81554afaad2cf18f3a1770d5fedc4ea5be344";
 	int ret;
 
 	ret = rte_cryptodev_asym_session_create(dev_id, &dsa_xform, sess_mpool, &sess);
@@ -1673,6 +1664,7 @@ test_dsa_sign(void)
 		goto error_exit;
 	}
 	asym_op = op->asym;
+	asym_op->dsa = *dsa_op;
 
 	debug_hexdump(stdout, "p: ", dsa_xform.dsa.p.data,
 			dsa_xform.dsa.p.length);
@@ -1686,13 +1678,6 @@ test_dsa_sign(void)
 	/* attach asymmetric crypto session to crypto operations */
 	rte_crypto_op_attach_asym_session(op, sess);
 	asym_op->dsa.op_type = RTE_CRYPTO_ASYM_OP_SIGN;
-	asym_op->dsa.message.data = dgst;
-	asym_op->dsa.message.length = sizeof(dgst);
-	asym_op->dsa.r.length = sizeof(r);
-	asym_op->dsa.r.data = r;
-	asym_op->dsa.s.length = sizeof(s);
-	asym_op->dsa.s.data = s;
-
 	RTE_LOG(DEBUG, USER1, "Process ASYM operation");
 
 	/* Process crypto operation */
@@ -1716,12 +1701,70 @@ test_dsa_sign(void)
 	}
 
 	asym_op = result_op->asym;
+	dsa_op->r.length = asym_op->dsa.r.length;
+	dsa_op->s.length = asym_op->dsa.s.length;
+
+	debug_hexdump(stdout, "r:",
+			asym_op->dsa.r.data, asym_op->dsa.r.length);
+	debug_hexdump(stdout, "s:",
+			asym_op->dsa.s.data, asym_op->dsa.s.length);
+error_exit:
+	if (sess != NULL)
+		rte_cryptodev_asym_session_free(dev_id, sess);
+	rte_crypto_op_free(op);
+	return status;
+}
+
+static int
+test_dsa_verify(struct rte_crypto_dsa_op_param *dsa_op)
+{
+	struct crypto_testsuite_params_asym *ts_params = &testsuite_params;
+	struct rte_mempool *op_mpool = ts_params->op_mpool;
+	struct rte_mempool *sess_mpool = ts_params->session_mpool;
+	uint8_t dev_id = ts_params->valid_devs[0];
+	struct rte_crypto_asym_op *asym_op = NULL;
+	struct rte_crypto_op *op = NULL, *result_op = NULL;
+	void *sess = NULL;
+	int status = TEST_SUCCESS;
+	int ret;
+
+	ret = rte_cryptodev_asym_session_create(dev_id, &dsa_xform, sess_mpool, &sess);
+	if (ret < 0) {
+		RTE_LOG(ERR, USER1,
+				 "line %u FAILED: %s", __LINE__,
+				"Session creation failed");
+		status = (ret == -ENOTSUP) ? TEST_SKIPPED : TEST_FAILED;
+		goto error_exit;
+	}
+	/* set up crypto op data structure */
+	op = rte_crypto_op_alloc(op_mpool, RTE_CRYPTO_OP_TYPE_ASYMMETRIC);
+	if (!op) {
+		RTE_LOG(ERR, USER1,
+			"line %u FAILED: %s",
+			__LINE__, "Failed to allocate asymmetric crypto "
+			"operation struct");
+		status = TEST_FAILED;
+		goto error_exit;
+	}
+	asym_op = op->asym;
+	asym_op->dsa = *dsa_op;
+
+	debug_hexdump(stdout, "p: ", dsa_xform.dsa.p.data,
+			dsa_xform.dsa.p.length);
+	debug_hexdump(stdout, "q: ", dsa_xform.dsa.q.data,
+			dsa_xform.dsa.q.length);
+	debug_hexdump(stdout, "g: ", dsa_xform.dsa.g.data,
+			dsa_xform.dsa.g.length);
+
+	/* attach asymmetric crypto session to crypto operations */
+	rte_crypto_op_attach_asym_session(op, sess);
 
 	debug_hexdump(stdout, "r:",
 			asym_op->dsa.r.data, asym_op->dsa.r.length);
 	debug_hexdump(stdout, "s:",
 			asym_op->dsa.s.data, asym_op->dsa.s.length);
 
+	RTE_LOG(DEBUG, USER1, "Process ASYM verify operation");
 	/* Test PMD DSA sign verification using signer public key */
 	asym_op->dsa.op_type = RTE_CRYPTO_ASYM_OP_VERIFY;
 
@@ -1758,8 +1801,7 @@ test_dsa_sign(void)
 error_exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 	return status;
 }
 
@@ -1767,8 +1809,22 @@ static int
 test_dsa(void)
 {
 	int status;
-	status = test_dsa_sign();
-	TEST_ASSERT_EQUAL(status, 0, "Test failed");
+	uint8_t r[TEST_DH_MOD_LEN];
+	uint8_t s[TEST_DH_MOD_LEN];
+	struct rte_crypto_dsa_op_param dsa_op;
+	uint8_t dgst[] = "35d81554afaad2cf18f3a1770d5fedc4ea5be344";
+
+	dsa_op.message.data = dgst;
+	dsa_op.message.length = sizeof(dgst);
+	dsa_op.r.data = r;
+	dsa_op.s.data = s;
+	dsa_op.r.length = sizeof(r);
+	dsa_op.s.length = sizeof(s);
+
+	status = test_dsa_sign(&dsa_op);
+	TEST_ASSERT_EQUAL(status, 0, "DSA sign test failed");
+	status = test_dsa_verify(&dsa_op);
+	TEST_ASSERT_EQUAL(status, 0, "DSA verify test failed");
 	return status;
 }
 
@@ -1947,8 +2003,7 @@ test_ecdsa_sign_verify(enum curve curve_id)
 exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 	return status;
 };
 
@@ -2109,8 +2164,7 @@ test_ecpm(enum curve curve_id)
 exit:
 	if (sess != NULL)
 		rte_cryptodev_asym_session_free(dev_id, sess);
-	if (op != NULL)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 	return status;
 }
 
@@ -2265,5 +2319,3 @@ REGISTER_TEST_COMMAND(cryptodev_octeontx_asym_autotest,
 					  test_cryptodev_octeontx_asym);
 REGISTER_TEST_COMMAND(cryptodev_cn9k_asym_autotest, test_cryptodev_cn9k_asym);
 REGISTER_TEST_COMMAND(cryptodev_cn10k_asym_autotest, test_cryptodev_cn10k_asym);
-
-#endif /* !RTE_EXEC_ENV_WINDOWS */

@@ -7,7 +7,7 @@
 
 #include <rte_string_fns.h>
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
 #include <rte_malloc.h>
@@ -96,7 +96,14 @@ static const struct rte_pci_id pci_id_igc_map[] = {
 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_LM) },
 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_V)  },
 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_I)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_IT)  },
 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_K)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_K)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_LMVP)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_LM)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_V)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_IT)  },
+	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_BLANK_NVM)  },
 	{ .vendor_id = 0, /* sentinel */ },
 };
 
@@ -1234,8 +1241,15 @@ eth_igc_dev_init(struct rte_eth_dev *dev)
 	 * has already done this work. Only check we don't need a different
 	 * RX function.
 	 */
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
+		dev->rx_pkt_burst = igc_recv_pkts;
+		if (dev->data->scattered_rx)
+			dev->rx_pkt_burst = igc_recv_scattered_pkts;
+
+		dev->tx_pkt_burst = igc_xmit_pkts;
+		dev->tx_pkt_prepare = eth_igc_prep_pkts;
 		return 0;
+	}
 
 	rte_eth_copy_pci_info(dev, pci_dev);
 	dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;

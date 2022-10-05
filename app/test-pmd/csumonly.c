@@ -28,7 +28,6 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_ip.h>
@@ -223,15 +222,14 @@ parse_gtp(struct rte_udp_hdr *udp_hdr,
 
 	gtp_hdr = (struct rte_gtp_hdr *)((char *)udp_hdr +
 		  sizeof(struct rte_udp_hdr));
-
+	if (gtp_hdr->e || gtp_hdr->s || gtp_hdr->pn)
+		gtp_len += sizeof(struct rte_gtp_hdr_ext_word);
 	/*
 	 * Check message type. If message type is 0xff, it is
 	 * a GTP data packet. If not, it is a GTP control packet
 	 */
 	if (gtp_hdr->msg_type == 0xff) {
-		ip_ver = *(uint8_t *)((char *)udp_hdr +
-			 sizeof(struct rte_udp_hdr) +
-			 sizeof(struct rte_gtp_hdr));
+		ip_ver = *(uint8_t *)((char *)gtp_hdr + gtp_len);
 		ip_ver = (ip_ver) & 0xf0;
 
 		if (ip_ver == RTE_GTP_TYPE_IPV4) {
@@ -511,7 +509,7 @@ process_inner_cksums(void *l3_hdr, const struct testpmd_offload_info *info,
 				ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
 			} else {
 				if (info->is_tunnel)
-					l4_off = info->l2_len +
+					l4_off = info->outer_l2_len +
 						 info->outer_l3_len +
 						 info->l2_len + info->l3_len;
 				else
@@ -534,7 +532,7 @@ process_inner_cksums(void *l3_hdr, const struct testpmd_offload_info *info,
 			ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
 		} else {
 			if (info->is_tunnel)
-				l4_off = info->l2_len + info->outer_l3_len +
+				l4_off = info->outer_l2_len + info->outer_l3_len +
 					 info->l2_len + info->l3_len;
 			else
 				l4_off = info->l2_len + info->l3_len;
@@ -623,7 +621,7 @@ process_outer_cksums(void *outer_l3_hdr, struct testpmd_offload_info *info,
 	if (udp_hdr->dgram_cksum != 0) {
 		udp_hdr->dgram_cksum = 0;
 		udp_hdr->dgram_cksum = get_udptcp_checksum(m, outer_l3_hdr,
-					info->l2_len + info->outer_l3_len,
+					info->outer_l2_len + info->outer_l3_len,
 					info->outer_ethertype);
 	}
 
@@ -779,6 +777,28 @@ pkt_copy_split(const struct rte_mbuf *pkt)
 	return md[0];
 }
 
+#if defined(RTE_LIB_GRO) || defined(RTE_LIB_GSO)
+/*
+ * Re-calculate IP checksum for merged/fragmented packets.
+ */
+static void
+pkts_ip_csum_recalc(struct rte_mbuf **pkts_burst, const uint16_t nb_pkts, uint64_t tx_offloads)
+{
+	int i;
+	struct rte_ipv4_hdr *ipv4_hdr;
+	for (i = 0; i < nb_pkts; i++) {
+		if ((pkts_burst[i]->ol_flags & RTE_MBUF_F_TX_IPV4) &&
+			(tx_offloads & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM) == 0) {
+			ipv4_hdr = rte_pktmbuf_mtod_offset(pkts_burst[i],
+						struct rte_ipv4_hdr *,
+						pkts_burst[i]->l2_len);
+			ipv4_hdr->hdr_checksum = 0;
+			ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
+		}
+	}
+}
+#endif
+
 /*
  * Receive a burst of packets, and for each packet:
  *  - parse packet, and try to recognize a supported packet type (1)
@@ -895,10 +915,6 @@ pkt_burst_checksum_forward(struct fwd_stream *fs)
 		 * and inner headers */
 
 		eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-		rte_ether_addr_copy(&peer_eth_addrs[fs->peer_addr],
-				&eth_hdr->dst_addr);
-		rte_ether_addr_copy(&ports[fs->tx_port].eth_addr,
-				&eth_hdr->src_addr);
 		parse_ethernet(eth_hdr, &info);
 		l3_hdr = (char *)eth_hdr + info.l2_len;
 
@@ -1103,6 +1119,8 @@ tunnel_update:
 				fs->gro_times = 0;
 			}
 		}
+
+		pkts_ip_csum_recalc(pkts_burst, nb_rx, tx_offloads);
 	}
 #endif
 
@@ -1136,6 +1154,8 @@ tunnel_update:
 
 		tx_pkts_burst = gso_segments;
 		nb_rx = nb_segments;
+
+		pkts_ip_csum_recalc(tx_pkts_burst, nb_rx, tx_offloads);
 	} else
 #endif
 		tx_pkts_burst = pkts_burst;
@@ -1178,9 +1198,22 @@ tunnel_update:
 	get_end_cycles(fs, start_tsc);
 }
 
+static void
+stream_init_checksum_forward(struct fwd_stream *fs)
+{
+	bool rx_stopped, tx_stopped;
+
+	rx_stopped = ports[fs->rx_port].rxq[fs->rx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	tx_stopped = ports[fs->tx_port].txq[fs->tx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	fs->disabled = rx_stopped || tx_stopped;
+}
+
 struct fwd_engine csum_fwd_engine = {
 	.fwd_mode_name  = "csum",
 	.port_fwd_begin = NULL,
 	.port_fwd_end   = NULL,
+	.stream_init    = stream_init_checksum_forward,
 	.packet_fwd     = pkt_burst_checksum_forward,
 };

@@ -1826,7 +1826,6 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 	struct ice_fdir_v4 *p_v4 = NULL;
 	struct ice_fdir_v6 *p_v6 = NULL;
 	struct ice_parser_result rslt;
-	struct ice_parser *psr;
 	uint8_t item_num = 0;
 
 	for (item = pattern; item->type != RTE_FLOW_ITEM_TYPE_END; item++) {
@@ -1861,6 +1860,9 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 
 		switch (item_type) {
 		case RTE_FLOW_ITEM_TYPE_RAW: {
+			if (ad->psr == NULL)
+				return -rte_errno;
+
 			raw_spec = item->spec;
 			raw_mask = item->mask;
 
@@ -1868,11 +1870,11 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 				break;
 
 			/* convert raw spec & mask from byte string to int */
-			unsigned char *tmp_spec =
+			unsigned char *spec_pattern =
 				(uint8_t *)(uintptr_t)raw_spec->pattern;
-			unsigned char *tmp_mask =
+			unsigned char *mask_pattern =
 				(uint8_t *)(uintptr_t)raw_mask->pattern;
-			uint16_t udp_port = 0;
+			uint8_t *tmp_spec, *tmp_mask;
 			uint16_t tmp_val = 0;
 			uint8_t pkt_len = 0;
 			uint8_t tmp = 0;
@@ -1883,8 +1885,18 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 				pkt_len)
 				return -rte_errno;
 
+			tmp_spec = rte_zmalloc(NULL, pkt_len / 2, 0);
+			if (!tmp_spec)
+				return -rte_errno;
+
+			tmp_mask = rte_zmalloc(NULL, pkt_len / 2, 0);
+			if (!tmp_mask) {
+				rte_free(tmp_spec);
+				return -rte_errno;
+			}
+
 			for (i = 0, j = 0; i < pkt_len; i += 2, j++) {
-				tmp = tmp_spec[i];
+				tmp = spec_pattern[i];
 				if (tmp >= 'a' && tmp <= 'f')
 					tmp_val = tmp - 'a' + 10;
 				if (tmp >= 'A' && tmp <= 'F')
@@ -1893,7 +1905,7 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 					tmp_val = tmp - '0';
 
 				tmp_val *= 16;
-				tmp = tmp_spec[i + 1];
+				tmp = spec_pattern[i + 1];
 				if (tmp >= 'a' && tmp <= 'f')
 					tmp_spec[j] = tmp_val + tmp - 'a' + 10;
 				if (tmp >= 'A' && tmp <= 'F')
@@ -1901,7 +1913,7 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 				if (tmp >= '0' && tmp <= '9')
 					tmp_spec[j] = tmp_val + tmp - '0';
 
-				tmp = tmp_mask[i];
+				tmp = mask_pattern[i];
 				if (tmp >= 'a' && tmp <= 'f')
 					tmp_val = tmp - 'a' + 10;
 				if (tmp >= 'A' && tmp <= 'F')
@@ -1910,7 +1922,7 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 					tmp_val = tmp - '0';
 
 				tmp_val *= 16;
-				tmp = tmp_mask[i + 1];
+				tmp = mask_pattern[i + 1];
 				if (tmp >= 'a' && tmp <= 'f')
 					tmp_mask[j] = tmp_val + tmp - 'a' + 10;
 				if (tmp >= 'A' && tmp <= 'F')
@@ -1921,15 +1933,8 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 
 			pkt_len /= 2;
 
-			if (ice_parser_create(&ad->hw, &psr))
+			if (ice_parser_run(ad->psr, tmp_spec, pkt_len, &rslt))
 				return -rte_errno;
-			if (ice_get_open_tunnel_port(&ad->hw, TNL_VXLAN,
-						     &udp_port))
-				ice_parser_vxlan_tunnel_set(psr, udp_port,
-							    true);
-			if (ice_parser_run(psr, tmp_spec, pkt_len, &rslt))
-				return -rte_errno;
-			ice_parser_destroy(psr);
 
 			if (!tmp_mask)
 				return -rte_errno;
@@ -1953,6 +1958,8 @@ ice_fdir_parse_pattern(__rte_unused struct ice_adapter *ad,
 
 			filter->parser_ena = true;
 
+			rte_free(tmp_spec);
+			rte_free(tmp_mask);
 			break;
 		}
 

@@ -7,6 +7,7 @@
 
 #include <rte_ethdev.h>
 #include <rte_vect.h>
+#include <rte_acl.h>
 
 #define DO_RFC_1812_CHECKS
 
@@ -43,8 +44,6 @@
 /* Used to mark destination port as 'invalid'. */
 #define	BAD_PORT ((uint16_t)-1)
 
-#define FWDSTEP	4
-
 /* replace first 12B of the ethernet header. */
 #define	MASK_ETH 0x3f
 
@@ -57,6 +56,17 @@
 #define L3FWD_HASH_ENTRIES		(1024*1024*1)
 #endif
 #define HASH_ENTRY_NUMBER_DEFAULT	16
+
+struct parm_cfg {
+	const char *rule_ipv4_name;
+	const char *rule_ipv6_name;
+	enum rte_acl_classify_alg alg;
+};
+
+struct acl_algorithms {
+	const char *name;
+	enum rte_acl_classify_alg alg;
+};
 
 struct mbuf_table {
 	uint16_t len;
@@ -81,6 +91,10 @@ struct lcore_conf {
 
 extern volatile bool force_quit;
 
+/* RX and TX queue depths */
+extern uint16_t nb_rxd;
+extern uint16_t nb_txd;
+
 /* ethernet addresses of ports */
 extern uint64_t dest_eth_addr[RTE_MAX_ETHPORTS];
 extern struct rte_ether_addr ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -95,6 +109,10 @@ extern uint32_t hash_entry_number;
 extern xmm_t val_eth[RTE_MAX_ETHPORTS];
 
 extern struct lcore_conf lcore_conf[RTE_MAX_LCORE];
+
+extern struct parm_cfg parm_config;
+
+extern struct acl_algorithms acl_alg[];
 
 /* Send burst of packets on an output interface */
 static inline int
@@ -179,10 +197,19 @@ is_valid_ipv4_pkt(struct rte_ipv4_hdr *pkt, uint32_t link_len)
 }
 #endif /* DO_RFC_1812_CHECKS */
 
+enum rte_acl_classify_alg
+parse_acl_alg(const char *alg);
+
+int
+usage_acl_alg(char *buf, size_t sz);
+
 int
 init_mem(uint16_t portid, unsigned int nb_mbuf);
 
-/* Function pointers for LPM, EM or FIB functionality. */
+/* Function pointers for ACL, LPM, EM or FIB functionality. */
+void
+setup_acl(const int socketid);
+
 void
 setup_lpm(const int socketid);
 
@@ -205,6 +232,9 @@ em_cb_parse_ptype(uint16_t port, uint16_t queue, struct rte_mbuf *pkts[],
 uint16_t
 lpm_cb_parse_ptype(uint16_t port, uint16_t queue, struct rte_mbuf *pkts[],
 		   uint16_t nb_pkts, uint16_t max_pkts, void *user_param);
+
+int
+acl_main_loop(__rte_unused void *dummy);
 
 int
 em_main_loop(__rte_unused void *dummy);
@@ -267,7 +297,13 @@ int
 fib_event_main_loop_tx_q_burst_vector(__rte_unused void *dummy);
 
 
-/* Return ipv4/ipv6 fwd lookup struct for LPM, EM or FIB. */
+/* Return ipv4/ipv6 fwd lookup struct for ACL, LPM, EM or FIB. */
+void *
+acl_get_ipv4_l3fwd_lookup_struct(const int socketid);
+
+void *
+acl_get_ipv6_l3fwd_lookup_struct(const int socketid);
+
 void *
 em_get_ipv4_l3fwd_lookup_struct(const int socketid);
 

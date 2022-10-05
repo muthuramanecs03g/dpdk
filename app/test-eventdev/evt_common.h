@@ -6,6 +6,7 @@
 #define _EVT_COMMON_
 
 #include <rte_common.h>
+#include <rte_crypto.h>
 #include <rte_debug.h>
 #include <rte_event_crypto_adapter.h>
 #include <rte_eventdev.h>
@@ -65,6 +66,7 @@ struct evt_options {
 	uint16_t eth_queues;
 	uint32_t nb_flows;
 	uint32_t tx_first;
+	uint16_t tx_pkt_sz;
 	uint32_t max_pkt_sz;
 	uint32_t prod_enq_burst_sz;
 	uint32_t deq_tmo_nsec;
@@ -80,6 +82,7 @@ struct evt_options {
 	uint64_t optm_timer_tick_nsec;
 	enum evt_prod_type prod_type;
 	enum rte_event_crypto_adapter_mode crypto_adptr_mode;
+	enum rte_crypto_op_type crypto_op_type;
 };
 
 static inline bool

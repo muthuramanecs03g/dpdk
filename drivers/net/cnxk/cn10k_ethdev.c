@@ -204,6 +204,9 @@ cn10k_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 
 		txq->cpt_io_addr = inl_lf->io_addr;
 		txq->cpt_fc = inl_lf->fc_addr;
+		txq->cpt_fc_sw = (int32_t *)((uintptr_t)dev->outb.fc_sw_mem +
+					     crypto_qid * RTE_CACHE_LINE_SIZE);
+
 		txq->cpt_desc = inl_lf->nb_desc * 0.7;
 		txq->sa_base = (uint64_t)dev->outb.sa_base;
 		txq->sa_base |= eth_dev->data->port_id;
@@ -245,6 +248,17 @@ cn10k_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	if (rc)
 		return rc;
 
+	/* Do initial mtu setup for RQ0 before device start */
+	if (!qid) {
+		rc = nix_recalc_mtu(eth_dev);
+		if (rc)
+			return rc;
+
+		/* Update offload flags */
+		dev->rx_offload_flags = nix_rx_offload_flags(eth_dev);
+		dev->tx_offload_flags = nix_tx_offload_flags(eth_dev);
+	}
+
 	rq = &dev->rqs[qid];
 	cq = &dev->cqs[qid];
 
@@ -268,9 +282,13 @@ cn10k_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 		rxq->lmt_base = dev->nix.lmt_base;
 		rxq->sa_base = roc_nix_inl_inb_sa_base_get(&dev->nix,
 							   dev->inb.inl_dev);
+		rxq->meta_aura = rq->meta_aura_handle;
+		rxq_sp = cnxk_eth_rxq_to_sp(rxq);
+		/* Assume meta packet from normal aura if meta aura is not setup
+		 */
+		if (!rxq->meta_aura)
+			rxq->meta_aura = rxq_sp->qconf.mp->pool_id;
 	}
-	rxq_sp = cnxk_eth_rxq_to_sp(rxq);
-	rxq->aura_handle = rxq_sp->qconf.mp->pool_id;
 
 	/* Lookup mem */
 	rxq->lookup_mem = cnxk_nix_fastpath_lookup_mem_get();
@@ -547,6 +565,12 @@ cn10k_nix_reassembly_conf_set(struct rte_eth_dev *eth_dev,
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	int rc = 0;
 
+	if (!conf->flags) {
+		/* Clear offload flags on disable */
+		dev->rx_offload_flags &= ~NIX_RX_REAS_F;
+		return 0;
+	}
+
 	rc = roc_nix_reassembly_configure(conf->timeout_ms,
 				conf->max_frags);
 	if (!rc && dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY)
@@ -739,11 +763,6 @@ cn10k_nix_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 	struct cnxk_eth_dev *dev;
 	int rc;
 
-	if (RTE_CACHE_LINE_SIZE != 64) {
-		plt_err("Driver not compiled for CN10K");
-		return -EFAULT;
-	}
-
 	rc = roc_plt_init();
 	if (rc) {
 		plt_err("Failed to initialize platform model, rc=%d", rc);
@@ -763,8 +782,12 @@ cn10k_nix_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 
 	/* Find eth dev allocated */
 	eth_dev = rte_eth_dev_allocated(pci_dev->device.name);
-	if (!eth_dev)
+	if (!eth_dev) {
+		/* Ignore if ethdev is in mid of detach state in secondary */
+		if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+			return 0;
 		return -ENOENT;
+	}
 
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
 		/* Setup callbacks for secondary process */
@@ -778,9 +801,7 @@ cn10k_nix_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 	/* DROP_RE is not supported with inline IPSec for CN10K A0 and
 	 * when vector mode is enabled.
 	 */
-	if ((roc_model_is_cn10ka_a0() || roc_model_is_cnf10ka_a0() ||
-	     roc_model_is_cnf10kb_a0()) &&
-	    !roc_env_is_asim()) {
+	if (roc_errata_nix_has_no_drop_re() && !roc_env_is_asim()) {
 		dev->ipsecd_drop_re_dis = 1;
 		dev->vec_drop_re_dis = 1;
 	}
@@ -795,12 +816,23 @@ static const struct rte_pci_id cn10k_pci_nix_map[] = {
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KA, PCI_DEVID_CNXK_RVU_PF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KAS, PCI_DEVID_CNXK_RVU_PF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KA, PCI_DEVID_CNXK_RVU_PF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KB, PCI_DEVID_CNXK_RVU_PF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KB, PCI_DEVID_CNXK_RVU_PF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KA, PCI_DEVID_CNXK_RVU_VF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KAS, PCI_DEVID_CNXK_RVU_VF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KA, PCI_DEVID_CNXK_RVU_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KB, PCI_DEVID_CNXK_RVU_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KB, PCI_DEVID_CNXK_RVU_VF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KA, PCI_DEVID_CNXK_RVU_AF_VF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KAS, PCI_DEVID_CNXK_RVU_AF_VF),
 	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KA, PCI_DEVID_CNXK_RVU_AF_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KB, PCI_DEVID_CNXK_RVU_AF_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KB, PCI_DEVID_CNXK_RVU_AF_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KA, PCI_DEVID_CNXK_RVU_SDP_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KAS, PCI_DEVID_CNXK_RVU_SDP_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KA, PCI_DEVID_CNXK_RVU_SDP_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CN10KB, PCI_DEVID_CNXK_RVU_SDP_VF),
+	CNXK_PCI_ID(PCI_SUBSYSTEM_DEVID_CNF10KB, PCI_DEVID_CNXK_RVU_SDP_VF),
 	{
 		.vendor_id = 0,
 	},

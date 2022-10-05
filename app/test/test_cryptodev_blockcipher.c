@@ -2,8 +2,6 @@
  * Copyright(c) 2015-2017 Intel Corporation
  */
 
-#ifndef RTE_EXEC_ENV_WINDOWS
-
 #include <rte_common.h>
 #include <rte_hexdump.h>
 #include <rte_mbuf.h>
@@ -811,8 +809,7 @@ error_exit:
 		rte_free(auth_xform);
 	}
 
-	if (op)
-		rte_crypto_op_free(op);
+	rte_crypto_op_free(op);
 
 	rte_pktmbuf_free(obuf);
 
@@ -1219,5 +1216,3 @@ free_blockcipher_test_suite(struct unit_test_suite *ts)
 {
 	free(ts);
 }
-
-#endif /* !RTE_EXEC_ENV_WINDOWS */

@@ -15,6 +15,9 @@
 #include "mlx5.h"
 #include "mlx5_flow.h"
 
+static int mlx5_flow_meter_disable(struct rte_eth_dev *dev,
+		uint32_t meter_id, struct rte_mtr_error *error);
+
 /**
  * Create the meter action.
  *
@@ -609,6 +612,36 @@ mlx5_flow_meter_policy_find(struct rte_eth_dev *dev,
 }
 
 /**
+ * Get the next meter from one meter's policy in hierarchy chain.
+ * Lock free, mutex should be acquired by caller.
+ *
+ * @param[in] priv
+ *   Pointer to mlx5_priv.
+ * @param[in] policy
+ *   Pointer to flow meter policy.
+ * @param[out] mtr_idx
+ *   Pointer to Meter index.
+ *
+ * @return
+ *   Pointer to the next meter, or NULL when fail.
+ */
+struct mlx5_flow_meter_info *
+mlx5_flow_meter_hierarchy_next_meter(struct mlx5_priv *priv,
+				     struct mlx5_flow_meter_policy *policy,
+				     uint32_t *mtr_idx)
+{
+	int i;
+
+	for (i = 0; i < MLX5_MTR_RTE_COLORS; i++) {
+		if (policy->act_cnt[i].fate_action == MLX5_FLOW_FATE_MTR)
+			return mlx5_flow_meter_find(priv,
+						    policy->act_cnt[i].next_mtr_id,
+						    mtr_idx);
+	}
+	return NULL;
+}
+
+/**
  * Get the last meter's policy from one meter's policy in hierarchy.
  *
  * @param[in] dev
@@ -628,8 +661,9 @@ mlx5_flow_meter_hierarchy_get_final_policy(struct rte_eth_dev *dev,
 	struct mlx5_flow_meter_policy *next_policy = policy;
 
 	while (next_policy->is_hierarchy) {
-		next_fm = mlx5_flow_meter_find(priv,
-		       next_policy->act_cnt[RTE_COLOR_GREEN].next_mtr_id, NULL);
+		rte_spinlock_lock(&next_policy->sl);
+		next_fm = mlx5_flow_meter_hierarchy_next_meter(priv, next_policy, NULL);
+		rte_spinlock_unlock(&next_policy->sl);
 		if (!next_fm || next_fm->def_policy)
 			return NULL;
 		next_policy = mlx5_flow_meter_policy_find(dev,
@@ -882,7 +916,7 @@ mlx5_flow_meter_policy_add(struct rte_eth_dev *dev,
 	}
 	rte_spinlock_init(&mtr_policy->sl);
 	ret = mlx5_flow_create_mtr_acts(dev, mtr_policy,
-					policy->actions, error);
+					policy->actions, &attr, error);
 	if (ret)
 		goto policy_add_err;
 	if (mtr_policy->is_hierarchy) {
@@ -1002,7 +1036,7 @@ mlx5_flow_meter_validate(struct mlx5_priv *priv, uint32_t meter_id,
 					  RTE_MTR_ERROR_TYPE_MTR_PARAMS,
 					  NULL, "Meter object params null.");
 	/* Previous meter color is not supported. */
-	if (params->use_prev_mtr_color)
+	if (params->use_prev_mtr_color && !priv->sh->meter_aso_en)
 		return -rte_mtr_error_set(error, ENOTSUP,
 					  RTE_MTR_ERROR_TYPE_MTR_PARAMS,
 					  NULL,
@@ -1102,9 +1136,9 @@ mlx5_flow_meter_action_modify(struct mlx5_priv *priv,
 				ebs_mantissa, val);
 		}
 		/* Apply modifications to meter only if it was created. */
-		if (fm->meter_action) {
+		if (fm->meter_action_g) {
 			ret = mlx5_glue->dv_modify_flow_action_meter
-					(fm->meter_action, &mod_attr,
+					(fm->meter_action_g, &mod_attr,
 					rte_cpu_to_be_64(modify_bits));
 			if (ret)
 				return ret;
@@ -1288,8 +1322,9 @@ mlx5_flow_meter_create(struct rte_eth_dev *dev, uint32_t meter_id,
 	}
 	/* Add to the flow meter list. */
 	fm->active_state = 1; /* Config meter starts as active. */
-	fm->is_enable = 1;
+	fm->is_enable = params->meter_enable;
 	fm->shared = !!shared;
+	fm->color_aware = !!params->use_prev_mtr_color;
 	__atomic_add_fetch(&fm->profile->ref_cnt, 1, __ATOMIC_RELAXED);
 	if (params->meter_policy_id == priv->sh->mtrmng->def_policy_id) {
 		fm->def_policy = 1;
@@ -1313,7 +1348,10 @@ mlx5_flow_meter_create(struct rte_eth_dev *dev, uint32_t meter_id,
 		data.dword = mtr_idx;
 		if (mlx5_l3t_set_entry(priv->mtr_idx_tbl, meter_id, &data))
 			goto error;
+	} else if (!params->meter_enable && mlx5_flow_meter_disable(dev, meter_id, error)) {
+		goto error;
 	}
+	fm->active_state = params->meter_enable;
 	if (mtr_policy)
 		__atomic_add_fetch(&mtr_policy->ref_cnt, 1, __ATOMIC_RELAXED);
 	return 0;
@@ -1618,7 +1656,7 @@ mlx5_flow_meter_profile_update(struct rte_eth_dev *dev,
 	fm->profile = fmp;
 	/* Update meter params in HW (if not disabled). */
 	if (fm->active_state == MLX5_FLOW_METER_DISABLE)
-		return 0;
+		goto dec_ref_cnt;
 	ret = mlx5_flow_meter_action_modify(priv, fm, &fm->profile->srtcm_prm,
 					      modify_bits, fm->active_state, 1);
 	if (ret) {
@@ -1628,6 +1666,7 @@ mlx5_flow_meter_profile_update(struct rte_eth_dev *dev,
 					  NULL, "Failed to update meter"
 					  " parameters in hardware.");
 	}
+dec_ref_cnt:
 	old_fmp->ref_cnt--;
 	fmp->ref_cnt++;
 	return 0;
@@ -1901,7 +1940,7 @@ mlx5_flow_meter_attach(struct mlx5_priv *priv,
 		rte_spinlock_unlock(&fm->sl);
 	} else {
 		rte_spinlock_lock(&fm->sl);
-		if (fm->meter_action) {
+		if (fm->meter_action_g) {
 			if (fm->shared &&
 			    attr->transfer == fm->transfer &&
 			    attr->ingress == fm->ingress &&
@@ -1921,9 +1960,9 @@ mlx5_flow_meter_attach(struct mlx5_priv *priv,
 			fm->transfer = attr->transfer;
 			fm->ref_cnt = 1;
 			/* This also creates the meter object. */
-			fm->meter_action = mlx5_flow_meter_action_create(priv,
+			fm->meter_action_g = mlx5_flow_meter_action_create(priv,
 									 fm);
-			if (!fm->meter_action) {
+			if (!fm->meter_action_g) {
 				fm->ref_cnt = 0;
 				fm->ingress = 0;
 				fm->egress = 0;
@@ -1955,8 +1994,8 @@ mlx5_flow_meter_detach(struct mlx5_priv *priv,
 	rte_spinlock_lock(&fm->sl);
 	MLX5_ASSERT(fm->ref_cnt);
 	if (--fm->ref_cnt == 0 && !priv->sh->meter_aso_en) {
-		mlx5_glue->destroy_flow_action(fm->meter_action);
-		fm->meter_action = NULL;
+		mlx5_glue->destroy_flow_action(fm->meter_action_g);
+		fm->meter_action_g = NULL;
 		fm->ingress = 0;
 		fm->egress = 0;
 		fm->transfer = 0;
@@ -2033,9 +2072,7 @@ mlx5_flow_meter_flush_hierarchy(struct rte_eth_dev *dev,
 	MLX5_ASSERT(policy);
 	while (!fm->ref_cnt && policy->is_hierarchy) {
 		policy_id = fm->policy_id;
-		next_fm = mlx5_flow_meter_find(priv,
-				policy->act_cnt[RTE_COLOR_GREEN].next_mtr_id,
-				&next_mtr_idx);
+		next_fm = mlx5_flow_meter_hierarchy_next_meter(priv, policy, &next_mtr_idx);
 		if (next_fm) {
 			next_policy = mlx5_flow_meter_policy_find(dev,
 							next_fm->policy_id,
@@ -2113,9 +2150,7 @@ mlx5_flow_meter_flush_all_hierarchies(struct rte_eth_dev *dev,
 		policy = sub_policy->main_policy;
 		if (!policy || !policy->is_hierarchy || policy->ref_cnt)
 			continue;
-		next_fm = mlx5_flow_meter_find(priv,
-				policy->act_cnt[RTE_COLOR_GREEN].next_mtr_id,
-				&mtr_idx);
+		next_fm = mlx5_flow_meter_hierarchy_next_meter(priv, policy, &mtr_idx);
 		if (__mlx5_flow_meter_policy_delete(dev, i, policy,
 						    error, true))
 			return -rte_mtr_error_set(error,

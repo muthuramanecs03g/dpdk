@@ -12,7 +12,7 @@
 
 #include <rte_string_fns.h>
 #include <rte_log.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_memzone.h>
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -92,7 +92,8 @@ rte_event_dev_info_get(uint8_t dev_id, struct rte_event_dev_info *dev_info)
 
 	memset(dev_info, 0, sizeof(struct rte_event_dev_info));
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_infos_get, -ENOTSUP);
+	if (*dev->dev_ops->dev_infos_get == NULL)
+		return -ENOTSUP;
 	(*dev->dev_ops->dev_infos_get)(dev, dev_info);
 
 	dev_info->dequeue_timeout_ns = dev->data->dev_conf.dequeue_timeout_ns;
@@ -139,7 +140,11 @@ rte_event_timer_adapter_caps_get(uint8_t dev_id, uint32_t *caps)
 
 	if (caps == NULL)
 		return -EINVAL;
-	*caps = 0;
+
+	if (dev->dev_ops->timer_adapter_caps_get == NULL)
+		*caps = RTE_EVENT_TIMER_ADAPTER_SW_CAP;
+	else
+		*caps = 0;
 
 	return dev->dev_ops->timer_adapter_caps_get ?
 				(*dev->dev_ops->timer_adapter_caps_get)(dev,
@@ -216,7 +221,8 @@ event_dev_queue_config(struct rte_eventdev *dev, uint8_t nb_queues)
 
 	if (nb_queues != 0) {
 		queues_cfg = dev->data->queues_cfg;
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_release, -ENOTSUP);
+		if (*dev->dev_ops->queue_release == NULL)
+			return -ENOTSUP;
 
 		for (i = nb_queues; i < old_nb_queues; i++)
 			(*dev->dev_ops->queue_release)(dev, i);
@@ -229,7 +235,8 @@ event_dev_queue_config(struct rte_eventdev *dev, uint8_t nb_queues)
 				sizeof(queues_cfg[0]) * new_qs);
 		}
 	} else {
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_release, -ENOTSUP);
+		if (*dev->dev_ops->queue_release == NULL)
+			return -ENOTSUP;
 
 		for (i = nb_queues; i < old_nb_queues; i++)
 			(*dev->dev_ops->queue_release)(dev, i);
@@ -254,7 +261,8 @@ event_dev_port_config(struct rte_eventdev *dev, uint8_t nb_ports)
 			 dev->data->dev_id);
 
 	if (nb_ports != 0) { /* re-config */
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_release, -ENOTSUP);
+		if (*dev->dev_ops->port_release == NULL)
+			return -ENOTSUP;
 
 		ports = dev->data->ports;
 		ports_cfg = dev->data->ports_cfg;
@@ -279,7 +287,8 @@ event_dev_port_config(struct rte_eventdev *dev, uint8_t nb_ports)
 					EVENT_QUEUE_SERVICE_PRIORITY_INVALID;
 		}
 	} else {
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_release, -ENOTSUP);
+		if (*dev->dev_ops->port_release == NULL)
+			return -ENOTSUP;
 
 		ports = dev->data->ports;
 		for (i = nb_ports; i < old_nb_ports; i++) {
@@ -303,8 +312,10 @@ rte_event_dev_configure(uint8_t dev_id,
 	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
 	dev = &rte_eventdevs[dev_id];
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_infos_get, -ENOTSUP);
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_configure, -ENOTSUP);
+	if (*dev->dev_ops->dev_infos_get == NULL)
+		return -ENOTSUP;
+	if (*dev->dev_ops->dev_configure == NULL)
+		return -ENOTSUP;
 
 	if (dev->data->dev_started) {
 		RTE_EDEV_LOG_ERR(
@@ -509,7 +520,8 @@ rte_event_queue_default_conf_get(uint8_t dev_id, uint8_t queue_id,
 		return -EINVAL;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_def_conf, -ENOTSUP);
+	if (*dev->dev_ops->queue_def_conf == NULL)
+		return -ENOTSUP;
 	memset(queue_conf, 0, sizeof(struct rte_event_queue_conf));
 	(*dev->dev_ops->queue_def_conf)(dev, queue_id, queue_conf);
 	return 0;
@@ -595,11 +607,12 @@ rte_event_queue_setup(uint8_t dev_id, uint8_t queue_id,
 		return -EBUSY;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_setup, -ENOTSUP);
+	if (*dev->dev_ops->queue_setup == NULL)
+		return -ENOTSUP;
 
 	if (queue_conf == NULL) {
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->queue_def_conf,
-					-ENOTSUP);
+		if (*dev->dev_ops->queue_def_conf == NULL)
+			return -ENOTSUP;
 		(*dev->dev_ops->queue_def_conf)(dev, queue_id, &def_conf);
 		queue_conf = &def_conf;
 	}
@@ -635,7 +648,8 @@ rte_event_port_default_conf_get(uint8_t dev_id, uint8_t port_id,
 		return -EINVAL;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_def_conf, -ENOTSUP);
+	if (*dev->dev_ops->port_def_conf == NULL)
+		return -ENOTSUP;
 	memset(port_conf, 0, sizeof(struct rte_event_port_conf));
 	(*dev->dev_ops->port_def_conf)(dev, port_id, port_conf);
 	return 0;
@@ -706,11 +720,12 @@ rte_event_port_setup(uint8_t dev_id, uint8_t port_id,
 		return -EBUSY;
 	}
 
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_setup, -ENOTSUP);
+	if (*dev->dev_ops->port_setup == NULL)
+		return -ENOTSUP;
 
 	if (port_conf == NULL) {
-		RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_def_conf,
-					-ENOTSUP);
+		if (*dev->dev_ops->port_def_conf == NULL)
+			return -ENOTSUP;
 		(*dev->dev_ops->port_def_conf)(dev, port_id, &def_conf);
 		port_conf = &def_conf;
 	}
@@ -728,6 +743,25 @@ rte_event_port_setup(uint8_t dev_id, uint8_t port_id,
 		return diag;
 
 	return 0;
+}
+
+void
+rte_event_port_quiesce(uint8_t dev_id, uint8_t port_id,
+		       rte_eventdev_port_flush_t release_cb, void *args)
+{
+	struct rte_eventdev *dev;
+
+	RTE_EVENTDEV_VALID_DEVID_OR_RET(dev_id);
+	dev = &rte_eventdevs[dev_id];
+
+	if (!is_valid_port(dev, port_id)) {
+		RTE_EDEV_LOG_ERR("Invalid port_id=%" PRIu8, port_id);
+		return;
+	}
+
+	if (dev->dev_ops->port_quiesce)
+		(*dev->dev_ops->port_quiesce)(dev, dev->data->ports[port_id],
+					      release_cb, args);
 }
 
 int
@@ -838,10 +872,47 @@ rte_event_queue_attr_get(uint8_t dev_id, uint8_t queue_id, uint32_t attr_id,
 
 		*attr_value = conf->schedule_type;
 		break;
+	case RTE_EVENT_QUEUE_ATTR_WEIGHT:
+		*attr_value = RTE_EVENT_QUEUE_WEIGHT_LOWEST;
+		if (dev->data->event_dev_cap & RTE_EVENT_DEV_CAP_QUEUE_QOS)
+			*attr_value = conf->weight;
+		break;
+	case RTE_EVENT_QUEUE_ATTR_AFFINITY:
+		*attr_value = RTE_EVENT_QUEUE_AFFINITY_LOWEST;
+		if (dev->data->event_dev_cap & RTE_EVENT_DEV_CAP_QUEUE_QOS)
+			*attr_value = conf->affinity;
+		break;
 	default:
 		return -EINVAL;
 	};
 	return 0;
+}
+
+int
+rte_event_queue_attr_set(uint8_t dev_id, uint8_t queue_id, uint32_t attr_id,
+			 uint64_t attr_value)
+{
+	struct rte_eventdev *dev;
+
+	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
+	dev = &rte_eventdevs[dev_id];
+	if (!is_valid_queue(dev, queue_id)) {
+		RTE_EDEV_LOG_ERR("Invalid queue_id=%" PRIu8, queue_id);
+		return -EINVAL;
+	}
+
+	if (!(dev->data->event_dev_cap &
+	      RTE_EVENT_DEV_CAP_RUNTIME_QUEUE_ATTR)) {
+		RTE_EDEV_LOG_ERR(
+			"Device %" PRIu8 "does not support changing queue attributes at runtime",
+			dev_id);
+		return -ENOTSUP;
+	}
+
+	if (*dev->dev_ops->queue_attr_set == NULL)
+		return -ENOTSUP;
+	return (*dev->dev_ops->queue_attr_set)(dev, queue_id, attr_id,
+					       attr_value);
 }
 
 int
@@ -988,7 +1059,8 @@ rte_event_port_unlinks_in_progress(uint8_t dev_id, uint8_t port_id)
 	 * This allows PMDs which handle unlink synchronously to not implement
 	 * this function at all.
 	 */
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->port_unlinks_in_progress, 0);
+	if (*dev->dev_ops->port_unlinks_in_progress == NULL)
+		return 0;
 
 	return (*dev->dev_ops->port_unlinks_in_progress)(dev,
 			dev->data->ports[port_id]);
@@ -1030,7 +1102,8 @@ rte_event_dequeue_timeout_ticks(uint8_t dev_id, uint64_t ns,
 
 	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
 	dev = &rte_eventdevs[dev_id];
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->timeout_ticks, -ENOTSUP);
+	if (*dev->dev_ops->timeout_ticks == NULL)
+		return -ENOTSUP;
 
 	if (timeout_ticks == NULL)
 		return -EINVAL;
@@ -1062,7 +1135,8 @@ rte_event_dev_dump(uint8_t dev_id, FILE *f)
 
 	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
 	dev = &rte_eventdevs[dev_id];
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dump, -ENOTSUP);
+	if (*dev->dev_ops->dump == NULL)
+		return -ENOTSUP;
 	if (f == NULL)
 		return -EINVAL;
 
@@ -1228,7 +1302,8 @@ rte_event_dev_start(uint8_t dev_id)
 
 	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
 	dev = &rte_eventdevs[dev_id];
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_start, -ENOTSUP);
+	if (*dev->dev_ops->dev_start == NULL)
+		return -ENOTSUP;
 
 	if (dev->data->dev_started != 0) {
 		RTE_EDEV_LOG_ERR("Device with dev_id=%" PRIu8 "already started",
@@ -1250,7 +1325,8 @@ rte_event_dev_start(uint8_t dev_id)
 
 int
 rte_event_dev_stop_flush_callback_register(uint8_t dev_id,
-		eventdev_stop_flush_t callback, void *userdata)
+					   rte_eventdev_stop_flush_t callback,
+					   void *userdata)
 {
 	struct rte_eventdev *dev;
 
@@ -1274,7 +1350,8 @@ rte_event_dev_stop(uint8_t dev_id)
 
 	RTE_EVENTDEV_VALID_DEVID_OR_RET(dev_id);
 	dev = &rte_eventdevs[dev_id];
-	RTE_FUNC_PTR_OR_RET(*dev->dev_ops->dev_stop);
+	if (*dev->dev_ops->dev_stop == NULL)
+		return;
 
 	if (dev->data->dev_started == 0) {
 		RTE_EDEV_LOG_ERR("Device with dev_id=%" PRIu8 "already stopped",
@@ -1295,7 +1372,8 @@ rte_event_dev_close(uint8_t dev_id)
 
 	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
 	dev = &rte_eventdevs[dev_id];
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dev_ops->dev_close, -ENOTSUP);
+	if (*dev->dev_ops->dev_close == NULL)
+		return -ENOTSUP;
 
 	/* Device must be stopped before it can be closed */
 	if (dev->data->dev_started == 1) {
@@ -1734,6 +1812,47 @@ handle_queue_xstats(const char *cmd __rte_unused,
 	return eventdev_build_telemetry_data(dev_id, mode, port_queue_id, d);
 }
 
+static int
+handle_dev_dump(const char *cmd __rte_unused,
+		const char *params,
+		struct rte_tel_data *d)
+{
+	char *buf, *end_param;
+	int dev_id, ret;
+	FILE *f;
+
+	if (params == NULL || strlen(params) == 0 || !isdigit(*params))
+		return -1;
+
+	/* Get dev ID from parameter string */
+	dev_id = strtoul(params, &end_param, 10);
+	if (*end_param != '\0')
+		RTE_EDEV_LOG_DEBUG(
+			"Extra parameters passed to eventdev telemetry command, ignoring");
+
+	RTE_EVENTDEV_VALID_DEVID_OR_ERR_RET(dev_id, -EINVAL);
+
+	buf = calloc(sizeof(char), RTE_TEL_MAX_SINGLE_STRING_LEN);
+	if (buf == NULL)
+		return -ENOMEM;
+
+	f = fmemopen(buf, RTE_TEL_MAX_SINGLE_STRING_LEN - 1, "w+");
+	if (f == NULL) {
+		free(buf);
+		return -EINVAL;
+	}
+
+	ret = rte_event_dev_dump(dev_id, f);
+	fclose(f);
+	if (ret == 0) {
+		rte_tel_data_start_dict(d);
+		rte_tel_data_string(d, buf);
+	}
+
+	free(buf);
+	return ret;
+}
+
 RTE_INIT(eventdev_init_telemetry)
 {
 	rte_telemetry_register_cmd("/eventdev/dev_list", handle_dev_list,
@@ -1750,6 +1869,8 @@ RTE_INIT(eventdev_init_telemetry)
 	rte_telemetry_register_cmd("/eventdev/queue_xstats",
 			handle_queue_xstats,
 			"Returns stats for an eventdev queue. Params: DevID,QueueID");
+	rte_telemetry_register_cmd("/eventdev/dev_dump", handle_dev_dump,
+			"Returns dump information for an eventdev. Parameter: DevID");
 	rte_telemetry_register_cmd("/eventdev/queue_links", handle_queue_links,
 			"Returns links for an eventdev port. Params: DevID,QueueID");
 }

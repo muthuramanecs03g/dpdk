@@ -592,10 +592,16 @@ testsuite_teardown(void)
 static int
 test_libipsec_perf(void)
 {
-	struct ipsec_sa sa_out;
-	struct ipsec_sa sa_in;
+	struct ipsec_sa sa_out = { .sa_prm = { 0 } };
+	struct ipsec_sa sa_in = { .sa_prm = { 0 } };
 	uint32_t i;
 	int ret;
+
+	ret = rte_cryptodev_count();
+	if (ret < 1) {
+		RTE_LOG(WARNING, USER1, "No crypto devices found?\n");
+		return TEST_SKIPPED;
+	}
 
 	if (testsuite_setup() < 0) {
 		testsuite_teardown();

@@ -49,15 +49,17 @@ These are divided into sections and can be accessed using help, help section or 
 .. code-block:: console
 
    testpmd> help
+       Help is available for the following sections:
 
-       help control    : Start and stop forwarding.
-       help display    : Displaying port, stats and config information.
-       help config     : Configuration information.
-       help ports      : Configuring ports.
-       help registers  : Reading and setting port registers.
-       help filters    : Filters configuration help.
-       help all        : All of the above sections.
-
+           help control                    : Start and stop forwarding.
+           help display                    : Displaying port, stats and config information.
+           help config                     : Configuration information.
+           help ports                      : Configuring ports.
+           help filters                    : Filters configuration help.
+           help traffic_management         : Traffic Management commands.
+           help devices                    : Device related commands.
+           help drivers                    : Driver specific commands.
+           help all                        : All of the above sections.
 
 Command File Functions
 ----------------------
@@ -428,20 +430,6 @@ For example::
    testpmd> read txd 0 0 4
         0x00000001 - 0x24C3C440 / 0x000F0000 - 0x2330003C
 
-ddp get list
-~~~~~~~~~~~~
-
-Get loaded dynamic device personalization (DDP) package info list::
-
-   testpmd> ddp get list (port_id)
-
-ddp get info
-~~~~~~~~~~~~
-
-Display information about dynamic device personalization (DDP) profile::
-
-   testpmd> ddp get info (profile_path)
-
 show vf stats
 ~~~~~~~~~~~~~
 
@@ -455,13 +443,6 @@ clear vf stats
 Reset VF statistics::
 
    testpmd> clear vf stats (port_id) (vf_id)
-
-show port pctype mapping
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-List all items from the pctype mapping table::
-
-   testpmd> show port (port_id) pctype mapping
 
 show rx offloading capabilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -948,58 +929,12 @@ set drop enable bit for all queues::
 
    testpmd> set all queues drop (port_id) (on|off)
 
-set split drop enable (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-set split drop enable bit for VF from PF::
-
-   testpmd> set vf split drop (port_id) (vf_id) (on|off)
-
 set mac antispoof (for VF)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Set mac antispoof for a VF from the PF::
 
    testpmd> set vf mac antispoof  (port_id) (vf_id) (on|off)
-
-set macsec offload
-~~~~~~~~~~~~~~~~~~
-
-Enable/disable MACsec offload::
-
-   testpmd> set macsec offload (port_id) on encrypt (on|off) replay-protect (on|off)
-   testpmd> set macsec offload (port_id) off
-
-set macsec sc
-~~~~~~~~~~~~~
-
-Configure MACsec secure connection (SC)::
-
-   testpmd> set macsec sc (tx|rx) (port_id) (mac) (pi)
-
-.. note::
-
-   The pi argument is ignored for tx.
-   Check the NIC Datasheet for hardware limits.
-
-set macsec sa
-~~~~~~~~~~~~~
-
-Configure MACsec secure association (SA)::
-
-   testpmd> set macsec sa (tx|rx) (port_id) (idx) (an) (pn) (key)
-
-.. note::
-
-   The IDX value must be 0 or 1.
-   Check the NIC Datasheet for hardware limits.
-
-set broadcast mode (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set broadcast mode for a VF from the PF::
-
-   testpmd> set vf broadcast (port_id) (vf_id) (on|off)
 
 vlan set stripq
 ~~~~~~~~~~~~~~~
@@ -1021,13 +956,6 @@ vlan set insert (for VF)
 Set VLAN insert for a VF from the PF::
 
    testpmd> set vf vlan insert (port_id) (vf_id) (vlan_id)
-
-vlan set tag (for VF)
-~~~~~~~~~~~~~~~~~~~~~
-
-Set VLAN tag for a VF from the PF::
-
-   testpmd> set vf vlan tag (port_id) (vf_id) (on|off)
 
 vlan set antispoof (for VF)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1154,50 +1082,6 @@ Where:
 .. note::
 
    Check the NIC Datasheet for hardware limits.
-
-RSS queue region
-~~~~~~~~~~~~~~~~
-
-Set RSS queue region span on a port::
-
-   testpmd> set port (port_id) queue-region region_id (value) \
-		queue_start_index (value) queue_num (value)
-
-Set flowtype mapping on a RSS queue region on a port::
-
-   testpmd> set port (port_id) queue-region region_id (value) flowtype (value)
-
-where:
-
-* For the flowtype(pctype) of packet,the specific index for each type has
-  been defined in file i40e_type.h as enum i40e_filter_pctype.
-
-Set user priority mapping on a RSS queue region on a port::
-
-   testpmd> set port (port_id) queue-region UP (value) region_id (value)
-
-Flush all queue region related configuration on a port::
-
-   testpmd> set port (port_id) queue-region flush (on|off)
-
-where:
-
-* ``on``: is just an enable function which server for other configuration,
-  it is for all configuration about queue region from up layer,
-  at first will only keep in DPDK software stored in driver,
-  only after "flush on", it commit all configuration to HW.
-
-* ``"off``: is just clean all configuration about queue region just now,
-  and restore all to DPDK i40e driver default config when start up.
-
-Show all queue region related configuration info on a port::
-
-   testpmd> show port (port_id) queue-region
-
-.. note::
-
-  Queue region only support on PF by now, so these command is
-  only for configuration of queue region on PF port.
 
 csum parse-tunnel
 ~~~~~~~~~~~~~~~~~
@@ -1460,59 +1344,6 @@ Set the allmulti mode for a port or for all ports::
 
 Same as the ifconfig (8) option. Controls how multicast packets are handled.
 
-set promisc (for VF)
-~~~~~~~~~~~~~~~~~~~~
-
-Set the unicast promiscuous mode for a VF from PF.
-It's supported by Intel i40e NICs now.
-In promiscuous mode packets are not dropped if they aren't for the specified MAC address::
-
-   testpmd> set vf promisc (port_id) (vf_id) (on|off)
-
-set allmulticast (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set the multicast promiscuous mode for a VF from PF.
-It's supported by Intel i40e NICs now.
-In promiscuous mode packets are not dropped if they aren't for the specified MAC address::
-
-   testpmd> set vf allmulti (port_id) (vf_id) (on|off)
-
-set tx max bandwidth (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set TX max absolute bandwidth (Mbps) for a VF from PF::
-
-   testpmd> set vf tx max-bandwidth (port_id) (vf_id) (max_bandwidth)
-
-set tc tx min bandwidth (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set all TCs' TX min relative bandwidth (%) for a VF from PF::
-
-   testpmd> set vf tc tx min-bandwidth (port_id) (vf_id) (bw1, bw2, ...)
-
-set tc tx max bandwidth (for VF)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set a TC's TX max absolute bandwidth (Mbps) for a VF from PF::
-
-   testpmd> set vf tc tx max-bandwidth (port_id) (vf_id) (tc_no) (max_bandwidth)
-
-set tc strict link priority mode
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set some TCs' strict link priority mode on a physical port::
-
-   testpmd> set tx strict-link-priority (port_id) (tc_bitmap)
-
-set tc tx min bandwidth
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Set all TCs' TX min relative bandwidth (%) globally for all PF and VFs::
-
-   testpmd> set tc tx min-bandwidth (port_id) (bw1, bw2, ...)
-
 set flow_ctrl rx
 ~~~~~~~~~~~~~~~~
 
@@ -1584,6 +1415,15 @@ Where:
 * ``pause_time`` (integer): Pause quanta filled in the PFC frame for which
   interval, remote Tx will be paused. Valid only if Tx pause is on.
 
+Set Rx queue available descriptors threshold
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set available descriptors threshold for a specific Rx queue of port::
+
+  testpmd> set port (port_id) rxq (queue_id) avail_thresh (0..99)
+
+Use 0 value to disable the threshold and corresponding event.
+
 set stat_qmap
 ~~~~~~~~~~~~~
 
@@ -1654,48 +1494,6 @@ Mainly used with PCAP drivers to turn off the default behavior of flushing the f
 
    testpmd> set flush_rx off
 
-set bypass mode
-~~~~~~~~~~~~~~~
-
-Set the bypass mode for the lowest port on bypass enabled NIC::
-
-   testpmd> set bypass mode (normal|bypass|isolate) (port_id)
-
-set bypass event
-~~~~~~~~~~~~~~~~
-
-Set the event required to initiate specified bypass mode for the lowest port on a bypass enabled::
-
-   testpmd> set bypass event (timeout|os_on|os_off|power_on|power_off) \
-            mode (normal|bypass|isolate) (port_id)
-
-Where:
-
-* ``timeout``: Enable bypass after watchdog timeout.
-
-* ``os_on``: Enable bypass when OS/board is powered on.
-
-* ``os_off``: Enable bypass when OS/board is powered off.
-
-* ``power_on``: Enable bypass when power supply is turned on.
-
-* ``power_off``: Enable bypass when power supply is turned off.
-
-
-set bypass timeout
-~~~~~~~~~~~~~~~~~~
-
-Set the bypass watchdog timeout to ``n`` seconds where 0 = instant::
-
-   testpmd> set bypass timeout (0|1.5|2|3|4|8|16|32)
-
-show bypass config
-~~~~~~~~~~~~~~~~~~
-
-Show the bypass configuration for a bypass enabled NIC using the lowest port on the NIC::
-
-   testpmd> show bypass config (port_id)
-
 set link up
 ~~~~~~~~~~~
 
@@ -1728,57 +1526,6 @@ Enable/disable E-tag stripping on a port::
 Enable/disable E-tag based forwarding on a port::
 
    testpmd> E-tag set forwarding (on|off) port (port_id)
-
-ddp add
-~~~~~~~
-
-Load a dynamic device personalization (DDP) profile and store backup profile::
-
-   testpmd> ddp add (port_id) (profile_path[,backup_profile_path])
-
-ddp del
-~~~~~~~
-
-Delete a dynamic device personalization profile and restore backup profile::
-
-   testpmd> ddp del (port_id) (backup_profile_path)
-
-ptype mapping
-~~~~~~~~~~~~~
-
-List all items from the ptype mapping table::
-
-   testpmd> ptype mapping get (port_id) (valid_only)
-
-Where:
-
-* ``valid_only``: A flag indicates if only list valid items(=1) or all items(=0).
-
-Replace a specific or a group of software defined ptype with a new one::
-
-   testpmd> ptype mapping replace  (port_id) (target) (mask) (pkt_type)
-
-where:
-
-* ``target``: A specific software ptype or a mask to represent a group of software ptypes.
-
-* ``mask``: A flag indicate if "target" is a specific software ptype(=0) or a ptype mask(=1).
-
-* ``pkt_type``: The new software ptype to replace the old ones.
-
-Update hardware defined ptype to software defined packet type mapping table::
-
-   testpmd> ptype mapping update (port_id) (hw_ptype) (sw_ptype)
-
-where:
-
-* ``hw_ptype``: hardware ptype as the index of the ptype mapping table.
-
-* ``sw_ptype``: software ptype as the value of the ptype mapping table.
-
-Reset ptype mapping table::
-
-   testpmd> ptype mapping reset (port_id)
 
 config per port Rx offloading
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2046,6 +1793,8 @@ The following sections show functions for configuring ports.
 
    Port configuration changes only become active when forwarding is started/restarted.
 
+.. _port_attach:
+
 port attach
 ~~~~~~~~~~~
 
@@ -2307,8 +2056,15 @@ port config - RSS
 ~~~~~~~~~~~~~~~~~
 
 Set the RSS (Receive Side Scaling) mode on or off::
-
-   testpmd> port config all rss (all|default|eth|vlan|ip|tcp|udp|sctp|ether|port|vxlan|geneve|nvgre|vxlan-gpe|l2tpv3|esp|ah|pfcp|ecpri|mpls|l2tpv2|none)
+   testpmd> port config all rss (all|default|level-default|level-outer|level-inner| \
+                                 ip|tcp|udp|sctp|tunnel|vlan|none| \
+                                 ipv4|ipv4-frag|ipv4-tcp|ipv4-udp|ipv4-sctp|ipv4-other| \
+                                 ipv6|ipv6-frag|ipv6-tcp|ipv6-udp|ipv6-sctp| \
+                                 ipv6-other|ipv6-ex|ipv6-tcp-ex|ipv6-udp-ex| \
+                                 l2-payload|port|vxlan|geneve|nvgre|gtpu|eth|s-vlan|c-vlan| \
+                                 esp|ah|l2tpv3|pfcp|pppoe|ecpri|mpls|ipv4-chksum|l4-chksum| \
+                                 l2tpv2|l3-pre96|l3-pre64|l3-pre56|l3-pre48|l3-pre40|l3-pre32| \
+                                 l2-dst-only|l2-src-only|l4-dst-only|l4-src-only|l3-dst-only|l3-src-only|<rsstype_id>)
 
 RSS is on by default.
 
@@ -2509,223 +2265,7 @@ Link Bonding Functions
 The Link Bonding functions make it possible to dynamically create and
 manage link bonding devices from within testpmd interactive prompt.
 
-create bonded device
-~~~~~~~~~~~~~~~~~~~~
-
-Create a new bonding device::
-
-   testpmd> create bonded device (mode) (socket)
-
-For example, to create a bonded device in mode 1 on socket 0::
-
-   testpmd> create bonded device 1 0
-   created new bonded device (port X)
-
-add bonding slave
-~~~~~~~~~~~~~~~~~
-
-Adds Ethernet device to a Link Bonding device::
-
-   testpmd> add bonding slave (slave id) (port id)
-
-For example, to add Ethernet device (port 6) to a Link Bonding device (port 10)::
-
-   testpmd> add bonding slave 6 10
-
-
-remove bonding slave
-~~~~~~~~~~~~~~~~~~~~
-
-Removes an Ethernet slave device from a Link Bonding device::
-
-   testpmd> remove bonding slave (slave id) (port id)
-
-For example, to remove Ethernet slave device (port 6) to a Link Bonding device (port 10)::
-
-   testpmd> remove bonding slave 6 10
-
-set bonding mode
-~~~~~~~~~~~~~~~~
-
-Set the Link Bonding mode of a Link Bonding device::
-
-   testpmd> set bonding mode (value) (port id)
-
-For example, to set the bonding mode of a Link Bonding device (port 10) to broadcast (mode 3)::
-
-   testpmd> set bonding mode 3 10
-
-set bonding primary
-~~~~~~~~~~~~~~~~~~~
-
-Set an Ethernet slave device as the primary device on a Link Bonding device::
-
-   testpmd> set bonding primary (slave id) (port id)
-
-For example, to set the Ethernet slave device (port 6) as the primary port of a Link Bonding device (port 10)::
-
-   testpmd> set bonding primary 6 10
-
-set bonding mac
-~~~~~~~~~~~~~~~
-
-Set the MAC address of a Link Bonding device::
-
-   testpmd> set bonding mac (port id) (mac)
-
-For example, to set the MAC address of a Link Bonding device (port 10) to 00:00:00:00:00:01::
-
-   testpmd> set bonding mac 10 00:00:00:00:00:01
-
-set bonding balance_xmit_policy
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set the transmission policy for a Link Bonding device when it is in Balance XOR mode::
-
-   testpmd> set bonding balance_xmit_policy (port_id) (l2|l23|l34)
-
-For example, set a Link Bonding device (port 10) to use a balance policy of layer 3+4 (IP addresses & UDP ports)::
-
-   testpmd> set bonding balance_xmit_policy 10 l34
-
-
-set bonding mon_period
-~~~~~~~~~~~~~~~~~~~~~~
-
-Set the link status monitoring polling period in milliseconds for a bonding device.
-
-This adds support for PMD slave devices which do not support link status interrupts.
-When the mon_period is set to a value greater than 0 then all PMD's which do not support
-link status ISR will be queried every polling interval to check if their link status has changed::
-
-   testpmd> set bonding mon_period (port_id) (value)
-
-For example, to set the link status monitoring polling period of bonded device (port 5) to 150ms::
-
-   testpmd> set bonding mon_period 5 150
-
-
-set bonding lacp dedicated_queue
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Enable dedicated tx/rx queues on bonding devices slaves to handle LACP control plane traffic
-when in mode 4 (link-aggregation-802.3ad)::
-
-   testpmd> set bonding lacp dedicated_queues (port_id) (enable|disable)
-
-
-set bonding agg_mode
-~~~~~~~~~~~~~~~~~~~~
-
-Enable one of the specific aggregators mode when in mode 4 (link-aggregation-802.3ad)::
-
-   testpmd> set bonding agg_mode (port_id) (bandwidth|count|stable)
-
-
-show bonding config
-~~~~~~~~~~~~~~~~~~~
-
-Show the current configuration of a Link Bonding device::
-
-   testpmd> show bonding config (port id)
-
-For example,
-to show the configuration a Link Bonding device (port 9) with 3 slave devices (1, 3, 4)
-in balance mode with a transmission policy of layer 2+3::
-
-   testpmd> show bonding config 9
-        Bonding mode: 2
-        Balance Xmit Policy: BALANCE_XMIT_POLICY_LAYER23
-        Slaves (3): [1 3 4]
-        Active Slaves (3): [1 3 4]
-        Primary: [3]
-
-show bonding lacp info
-~~~~~~~~~~~~~~~~~~~~~~
-
-Show information about the Link Bonding device in mode 4 (link-aggregation-802.3ad)::
-
-   testpmd> show bonding lacp info (port_id)
-
-Register Functions
-------------------
-
-The Register Functions can be used to read from and write to registers on the network card referenced by a port number.
-This is mainly useful for debugging purposes.
-Reference should be made to the appropriate datasheet for the network card for details on the register addresses
-and fields that can be accessed.
-
-read reg
-~~~~~~~~
-
-Display the value of a port register::
-
-   testpmd> read reg (port_id) (address)
-
-For example, to examine the Flow Director control register (FDIRCTL, 0x0000EE000) on an Intel 82599 10 GbE Controller::
-
-   testpmd> read reg 0 0xEE00
-   port 0 PCI register at offset 0xEE00: 0x4A060029 (1241907241)
-
-read regfield
-~~~~~~~~~~~~~
-
-Display a port register bit field::
-
-   testpmd> read regfield (port_id) (address) (bit_x) (bit_y)
-
-For example, reading the lowest two bits from the register in the example above::
-
-   testpmd> read regfield 0 0xEE00 0 1
-   port 0 PCI register at offset 0xEE00: bits[0, 1]=0x1 (1)
-
-read regbit
-~~~~~~~~~~~
-
-Display a single port register bit::
-
-   testpmd> read regbit (port_id) (address) (bit_x)
-
-For example, reading the lowest bit from the register in the example above::
-
-   testpmd> read regbit 0 0xEE00 0
-   port 0 PCI register at offset 0xEE00: bit 0=1
-
-write reg
-~~~~~~~~~
-
-Set the value of a port register::
-
-   testpmd> write reg (port_id) (address) (value)
-
-For example, to clear a register::
-
-   testpmd> write reg 0 0xEE00 0x0
-   port 0 PCI register at offset 0xEE00: 0x00000000 (0)
-
-write regfield
-~~~~~~~~~~~~~~
-
-Set bit field of a port register::
-
-   testpmd> write regfield (port_id) (address) (bit_x) (bit_y) (value)
-
-For example, writing to the register cleared in the example above::
-
-   testpmd> write regfield 0 0xEE00 0 1 2
-   port 0 PCI register at offset 0xEE00: 0x00000002 (2)
-
-write regbit
-~~~~~~~~~~~~
-
-Set single bit value of a port register::
-
-   testpmd> write regbit (port_id) (address) (bit_x) (value)
-
-For example, to set the high bit in the register from the example above::
-
-   testpmd> write regbit 0 0xEE00 31 1
-   port 0 PCI register at offset 0xEE00: 0x8000000A (2147483658)
+See :doc:`../prog_guide/link_bonding_poll_mode_drv_lib` for more information.
 
 Traffic Metering and Policing
 -----------------------------
@@ -2827,9 +2367,10 @@ create port meter
 Create new meter object for the ethernet device::
 
    testpmd> create port meter (port_id) (mtr_id) (profile_id) \
-   (policy_id) (meter_enable) (stats_mask) (shared) \
+   (policy_id) (meter_enable) (stats_mask) (shared) (default_input_color) \
    (use_pre_meter_color) [(dscp_tbl_entry0) (dscp_tbl_entry1)...\
-   (dscp_tbl_entry63)]
+   (dscp_tbl_entry63)] [(vlan_tbl_entry0) (vlan_tbl_entry1) ... \
+   (vlan_tbl_entry15)]
 
 where:
 
@@ -2842,12 +2383,17 @@ where:
   meter object.
 * ``shared``:  When this parameter has a non-zero value, the meter object is
   shared by multiple flows. Otherwise, meter object is used by single flow.
+* ``default_input_color``:  Default input color for incoming packets.
+  If incoming packet misses DSCP or VLAN input color table then it will be used
+  as input color.
 * ``use_pre_meter_color``: When this parameter has a non-zero value, the
   input color for the current meter object is determined by the latest meter
   object in the same flow. Otherwise, the current meter object uses the
   *dscp_table* to determine the input color.
 * ``dscp_tbl_entryx``: DSCP table entry x providing meter providing input
   color, 0 <= x <= 63.
+* ``vlan_tbl_entryx``: VLAN table entry x providing meter input color,
+  0 <= x <= 15.
 
 enable port meter
 ~~~~~~~~~~~~~~~~~
@@ -2884,6 +2430,31 @@ Set meter dscp table for the ethernet device::
 
    testpmd> set port meter dscp table (port_id) (mtr_id) [(dscp_tbl_entry0) \
    (dscp_tbl_entry1)...(dscp_tbl_entry63)]
+
+set port meter vlan table
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Set meter VLAN table for the Ethernet device::
+
+   testpmd> set port meter vlan table (port_id) (mtr_id) [(vlan_tbl_entry0) \
+   (vlan_tbl_entry1)...(vlan_tbl_entry15)]
+
+set port meter protocol
+~~~~~~~~~~~~~~~~~~~~~~~
+Set meter protocol and corresponding priority::
+
+   testpmd> set port meter proto (port_id) (mtr_id) (proto) (prio)
+
+get port meter protocol
+~~~~~~~~~~~~~~~~~~~~~~~
+Get meter protocol::
+
+   testpmd> get port meter proto (port_id) (mtr_id)
+
+get port meter protocol priority
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Get priority associated to meter protocol::
+
+   testpmd> get port meter proto_prio (port_id) (mtr_id) (proto)
 
 set port meter stats mask
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -3263,44 +2834,6 @@ This section details the available filter functions that are available.
 
 Note these functions interface the deprecated legacy filtering framework,
 superseded by *rte_flow*. See `Flow rules management`_.
-
-.. _testpmd_flow_director:
-
-flow_director_mask
-~~~~~~~~~~~~~~~~~~
-
-Set flow director's input masks::
-
-   flow_director_mask (port_id) mode IP vlan (vlan_value) \
-                      src_mask (ipv4_src) (ipv6_src) (src_port) \
-                      dst_mask (ipv4_dst) (ipv6_dst) (dst_port)
-
-   flow_director_mask (port_id) mode MAC-VLAN vlan (vlan_value)
-
-   flow_director_mask (port_id) mode Tunnel vlan (vlan_value) \
-                      mac (mac_value) tunnel-type (tunnel_type_value) \
-                      tunnel-id (tunnel_id_value)
-
-Example, to set flow director mask on port 0::
-
-   testpmd> flow_director_mask 0 mode IP vlan 0xefff \
-            src_mask 255.255.255.255 \
-                FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF 0xFFFF \
-            dst_mask 255.255.255.255 \
-                FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF 0xFFFF
-
-flow_director_flex_payload
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Configure flexible payload selection::
-
-   flow_director_flex_payload (port_id) (raw|l2|l3|l4) (config)
-
-For example, to select the first 16 bytes from the offset 4 (bytes) of packet's payload as flexible payload::
-
-   testpmd> flow_director_flex_payload 0 l4 \
-            (4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
-
 
 .. _testpmd_rte_flow:
 
@@ -3925,16 +3458,6 @@ This section lists supported pattern items and their attributes, if any.
 
   - ``num {unsigned}``: number of layers covered.
 
-- ``pf``: match traffic from/to the physical function.
-
-- ``vf``: match traffic from/to a virtual function ID.
-
-  - ``id {unsigned}``: VF ID.
-
-- ``phy_port``: match traffic from/to a specific physical port.
-
-  - ``index {unsigned}``: physical port index.
-
 - ``port_id``: match traffic from/to a given DPDK port ID.
 
   - ``id {unsigned}``: DPDK port ID.
@@ -4283,11 +3806,6 @@ This section lists supported actions and their attributes, if any.
 
   - ``original {boolean}``: use original VF ID if possible.
   - ``id {unsigned}``: VF ID.
-
-- ``phy_port``: direct packets to physical port index.
-
-  - ``original {boolean}``: use original port index if possible.
-  - ``index {unsigned}``: physical port index.
 
 - ``port_id``: direct matching traffic to a given DPDK port ID.
 
@@ -4936,6 +4454,25 @@ Query indirect action having id 100::
 
    testpmd> flow indirect_action 0 query 100
 
+Enqueueing query of indirect actions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``flow queue indirect_action query`` adds query operation for an indirect
+action to a queue. It is bound to ``rte_flow_async_action_handle_query()``::
+
+   flow queue {port_id} indirect_action {queue_id} query
+      {indirect_action_id} [postpone {boolean}]
+
+If successful, it will show::
+
+   Indirect action #[...] query queued
+
+Otherwise it will show an error message of the form::
+
+   Caught error type [...] ([...]): [...]
+
+``flow queue pull`` must be called to retrieve the operation status.
+
 Sample QinQ flow rules
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -5358,49 +4895,23 @@ and 50% packets are duplicated and marked with 0x1234 and sent to queue 0.
  testpmd> flow create 0 ingress group 1 pattern eth / end actions
         sample ratio 2 index 0 / queue index 1 / end
 
-Mirroring rule with port representors (with "transfer" attribute), the matched
-ingress packets with encapsulation header are sent to port id 0, and also
-mirrored the packets and sent to port id 2.
+Match packets coming from a VM which is referred to by means of
+its representor ethdev (port 1), mirror 50% of them to the
+said representor (for bookkeeping) as well as encapsulate
+all the packets and steer them to the physical port:
 
 ::
 
- testpmd> set sample_actions 0 port_id id 2 / end
- testpmd> flow create 1 ingress transfer pattern eth / end actions
-        sample ratio 1 index 0  / raw_encap / port_id id 0 / end
+   testpmd> set sample_actions 0 port_representor ethdev_port_id 1 / end
 
-Mirroring rule with port representors (with "transfer" attribute), the matched
-ingress packets are sent to port id 2, and also mirrored the packets with
-encapsulation header and sent to port id 0.
+   testpmd> set vxlan ip-version ipv4 vni 4 udp-src 32 udp-dst 4789 ip-src 127.0.0.1
+      ip-dst 127.0.0.2 eth-src 11:11:11:11:11:11 eth-dst 22:22:22:22:22:22
 
-::
+   testpmd> flow create 0 transfer pattern represented_port ethdev_port_id is 1 / end
+      actions sample ratio 2 index 0 / vxlan_encap /
+      represented_port ethdev_port_id 0 / end
 
- testpmd> set sample_actions 0 raw_encap / port_id id 0 / end
- testpmd> flow create 0 ingress transfer pattern eth / end actions
-        sample ratio 1 index 0  / port_id id 2 / end
-
-Mirroring rule with port representors (with "transfer" attribute), the matched
-ingress packets are sent to port id 2, and also mirrored the packets with
-VXLAN encapsulation header and sent to port id 0.
-
-::
-
- testpmd> set vxlan ip-version ipv4 vni 4 udp-src 4 udp-dst 4 ip-src 127.0.0.1
-        ip-dst 128.0.0.1 eth-src 11:11:11:11:11:11 eth-dst 22:22:22:22:22:22
- testpmd> set sample_actions 0 vxlan_encap / port_id id 0 / end
- testpmd> flow create 0 ingress transfer pattern eth / end actions
-        sample ratio 1 index 0  / port_id id 2 / end
-
-Mirroring rule with port representors (with "transfer" attribute), the matched
-ingress packets are sent to port id 2, and also mirrored the packets with
-NVGRE encapsulation header and sent to port id 0.
-
-::
-
- testpmd> set nvgre ip-version ipv4 tni 4 ip-src 127.0.0.1 ip-dst 128.0.0.1
-        eth-src 11:11:11:11:11:11 eth-dst 22:22:22:22:22:22
- testpmd> set sample_actions 0 nvgre_encap / port_id id 0 / end
- testpmd> flow create 0 ingress transfer pattern eth / end actions
-        sample ratio 1 index 0  / port_id id 2 / end
+The rule is inserted via port 0 (assumed to have "transfer" privilege).
 
 Sample integrity rules
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -5702,3 +5213,13 @@ Flex pattern can be shared between ports.
 
    testpmd> flow create 0 ingress pattern eth / ipv4 / udp / flex item is 3 pattern is 2 / end actions mark id 1 / queue index 0 / end
    Flow rule #0 created
+
+Driver specific commands
+------------------------
+
+Some drivers provide specific features.
+See:
+
+- :ref:`net/bonding testpmd driver specific commands <bonding_testpmd_commands>`
+- :ref:`net/i40e testpmd driver specific commands <net_i40e_testpmd_commands>`
+- :ref:`net/ixgbe testpmd driver specific commands <net_ixgbe_testpmd_commands>`

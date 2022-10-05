@@ -20,7 +20,7 @@ developer_mode = false
 if get_option('developer_mode').auto()
     if meson.version().version_compare('>=0.53') # fs module available
         fs = import('fs')
-        developer_mode = fs.is_dir('.git')
+        developer_mode = fs.exists('.git')
     endif
 else
     developer_mode = get_option('developer_mode').enabled()
@@ -36,12 +36,16 @@ dpdk_build_root = meson.current_build_dir()
 dpdk_conf = configuration_data()
 dpdk_libraries = []
 dpdk_static_libraries = []
+dpdk_shared_lib_deps = []
+dpdk_static_lib_deps = []
 dpdk_chkinc_headers = []
 dpdk_driver_classes = []
 dpdk_drivers = []
 dpdk_extra_ldflags = []
 dpdk_libs_disabled = []
 dpdk_drvs_disabled = []
+testpmd_drivers_sources = []
+testpmd_drivers_deps = []
 abi_version_file = files('ABI_VERSION')
 
 if host_machine.cpu_family().startswith('x86')
@@ -50,6 +54,8 @@ elif host_machine.cpu_family().startswith('arm') or host_machine.cpu_family().st
     arch_subdir = 'arm'
 elif host_machine.cpu_family().startswith('ppc')
     arch_subdir = 'ppc'
+elif host_machine.cpu_family().startswith('riscv')
+    arch_subdir = 'riscv'
 endif
 
 # configure the build, and make sure configs here and in config folder are
@@ -102,6 +108,10 @@ configure_file(output: build_cfg,
 
 # build pkg-config files for dpdk
 subdir('buildtools/pkg-config')
+
+if meson.is_subproject()
+    subdir('buildtools/subproject')
+endif
 
 # final output, list all the libs and drivers to be built
 # this does not affect any part of the build, for information only.

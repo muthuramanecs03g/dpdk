@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <math.h>
 
@@ -50,7 +51,6 @@
 #define DL_5G_BANDWIDTH 3
 #define UL_5G_LOAD_BALANCE 128
 #define DL_5G_LOAD_BALANCE 128
-#define FLR_5G_TIMEOUT 610
 #endif
 
 #ifdef RTE_BASEBAND_ACC100
@@ -699,9 +699,6 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 		conf.ul_load_balance = UL_5G_LOAD_BALANCE;
 		conf.dl_load_balance = DL_5G_LOAD_BALANCE;
 
-		/**< FLR timeout value */
-		conf.flr_time_out = FLR_5G_TIMEOUT;
-
 		/* setup FPGA PF with configuration information */
 		ret = rte_fpga_5gnr_fec_configure(info->dev_name, &conf);
 		TEST_ASSERT_SUCCESS(ret,
@@ -711,11 +708,11 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 #endif
 #ifdef RTE_BASEBAND_ACC100
 	if ((get_init_device() == true) &&
-		(!strcmp(info->drv.driver_name, ACC100PF_DRIVER_NAME))) {
+			(!strcmp(info->drv.driver_name, ACC100PF_DRIVER_NAME))) {
 		struct rte_acc100_conf conf;
 		unsigned int i;
 
-		printf("Configure ACC100 FEC Driver %s with default values\n",
+		printf("Configure ACC100/ACC101 FEC Driver %s with default values\n",
 				info->drv.driver_name);
 
 		/* clear default configuration before initialization */
@@ -760,7 +757,7 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 		conf.q_dl_5g.aq_depth_log2 = ACC100_QMGR_AQ_DEPTH;
 
 		/* setup PF with configuration information */
-		ret = rte_acc100_configure(info->dev_name, &conf);
+		ret = rte_acc10x_configure(info->dev_name, &conf);
 		TEST_ASSERT_SUCCESS(ret,
 				"Failed to configure ACC100 PF for bbdev %s",
 				info->dev_name);

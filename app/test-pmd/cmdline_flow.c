@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -145,6 +146,7 @@ enum index {
 	QUEUE_INDIRECT_ACTION_CREATE,
 	QUEUE_INDIRECT_ACTION_UPDATE,
 	QUEUE_INDIRECT_ACTION_DESTROY,
+	QUEUE_INDIRECT_ACTION_QUERY,
 
 	/* Queue indirect action create arguments */
 	QUEUE_INDIRECT_ACTION_CREATE_ID,
@@ -160,6 +162,9 @@ enum index {
 	/* Queue indirect action destroy arguments */
 	QUEUE_INDIRECT_ACTION_DESTROY_ID,
 	QUEUE_INDIRECT_ACTION_DESTROY_POSTPONE,
+
+	/* Queue indirect action query arguments */
+	QUEUE_INDIRECT_ACTION_QUERY_POSTPONE,
 
 	/* Push arguments. */
 	PUSH_QUEUE,
@@ -219,6 +224,7 @@ enum index {
 	CONFIG_COUNTERS_NUMBER,
 	CONFIG_AGING_OBJECTS_NUMBER,
 	CONFIG_METERS_NUMBER,
+	CONFIG_CONN_TRACK_NUMBER,
 
 	/* Indirect action arguments */
 	INDIRECT_ACTION_CREATE,
@@ -249,11 +255,6 @@ enum index {
 	ITEM_INVERT,
 	ITEM_ANY,
 	ITEM_ANY_NUM,
-	ITEM_PF,
-	ITEM_VF,
-	ITEM_VF_ID,
-	ITEM_PHY_PORT,
-	ITEM_PHY_PORT_INDEX,
 	ITEM_PORT_ID,
 	ITEM_PORT_ID_ID,
 	ITEM_MARK,
@@ -492,9 +493,6 @@ enum index {
 	ACTION_VF,
 	ACTION_VF_ORIGINAL,
 	ACTION_VF_ID,
-	ACTION_PHY_PORT,
-	ACTION_PHY_PORT_ORIGINAL,
-	ACTION_PHY_PORT_INDEX,
 	ACTION_PORT_ID,
 	ACTION_PORT_ID_ORIGINAL,
 	ACTION_PORT_ID_ID,
@@ -781,6 +779,8 @@ struct action_vxlan_encap_data sample_vxlan_encap[RAW_SAMPLE_CONFS_MAX_NUM];
 struct action_nvgre_encap_data sample_nvgre_encap[RAW_SAMPLE_CONFS_MAX_NUM];
 struct action_rss_data sample_rss_data[RAW_SAMPLE_CONFS_MAX_NUM];
 struct rte_flow_action_vf sample_vf[RAW_SAMPLE_CONFS_MAX_NUM];
+struct rte_flow_action_ethdev sample_port_representor[RAW_SAMPLE_CONFS_MAX_NUM];
+struct rte_flow_action_ethdev sample_represented_port[RAW_SAMPLE_CONFS_MAX_NUM];
 
 static const char *const modify_field_ops[] = {
 	"set", "add", "sub", NULL
@@ -795,7 +795,8 @@ static const char *const modify_field_ids[] = {
 	"tcp_seq_num", "tcp_ack_num", "tcp_flags",
 	"udp_port_src", "udp_port_dst",
 	"vxlan_vni", "geneve_vni", "gtp_teid",
-	"tag", "mark", "meta", "pointer", "value", NULL
+	"tag", "mark", "meta", "pointer", "value",
+	"ipv4_ecn", "ipv6_ecn", "gtp_psc_qfi", NULL
 };
 
 /** Maximum number of subsequent tokens and arguments on the stack. */
@@ -1080,6 +1081,7 @@ static const enum index next_config_attr[] = {
 	CONFIG_COUNTERS_NUMBER,
 	CONFIG_AGING_OBJECTS_NUMBER,
 	CONFIG_METERS_NUMBER,
+	CONFIG_CONN_TRACK_NUMBER,
 	END,
 	ZERO,
 };
@@ -1170,6 +1172,7 @@ static const enum index next_qia_subcmd[] = {
 	QUEUE_INDIRECT_ACTION_CREATE,
 	QUEUE_INDIRECT_ACTION_UPDATE,
 	QUEUE_INDIRECT_ACTION_DESTROY,
+	QUEUE_INDIRECT_ACTION_QUERY,
 	ZERO,
 };
 
@@ -1192,6 +1195,12 @@ static const enum index next_qia_update_attr[] = {
 static const enum index next_qia_destroy_attr[] = {
 	QUEUE_INDIRECT_ACTION_DESTROY_POSTPONE,
 	QUEUE_INDIRECT_ACTION_DESTROY_ID,
+	END,
+	ZERO,
+};
+
+static const enum index next_qia_query_attr[] = {
+	QUEUE_INDIRECT_ACTION_QUERY_POSTPONE,
 	END,
 	ZERO,
 };
@@ -1275,9 +1284,6 @@ static const enum index next_item[] = {
 	ITEM_VOID,
 	ITEM_INVERT,
 	ITEM_ANY,
-	ITEM_PF,
-	ITEM_VF,
-	ITEM_PHY_PORT,
 	ITEM_PORT_ID,
 	ITEM_MARK,
 	ITEM_RAW,
@@ -1343,18 +1349,6 @@ static const enum index item_fuzzy[] = {
 
 static const enum index item_any[] = {
 	ITEM_ANY_NUM,
-	ITEM_NEXT,
-	ZERO,
-};
-
-static const enum index item_vf[] = {
-	ITEM_VF_ID,
-	ITEM_NEXT,
-	ZERO,
-};
-
-static const enum index item_phy_port[] = {
-	ITEM_PHY_PORT_INDEX,
 	ITEM_NEXT,
 	ZERO,
 };
@@ -1816,7 +1810,6 @@ static const enum index next_action[] = {
 	ACTION_RSS,
 	ACTION_PF,
 	ACTION_VF,
-	ACTION_PHY_PORT,
 	ACTION_PORT_ID,
 	ACTION_METER,
 	ACTION_METER_COLOR,
@@ -1906,13 +1899,6 @@ static const enum index action_rss[] = {
 static const enum index action_vf[] = {
 	ACTION_VF_ORIGINAL,
 	ACTION_VF_ID,
-	ACTION_NEXT,
-	ZERO,
-};
-
-static const enum index action_phy_port[] = {
-	ACTION_PHY_PORT_ORIGINAL,
-	ACTION_PHY_PORT_INDEX,
 	ACTION_NEXT,
 	ZERO,
 };
@@ -2666,6 +2652,14 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY(struct buffer,
 					args.configure.port_attr.nb_meters)),
 	},
+	[CONFIG_CONN_TRACK_NUMBER] = {
+		.name = "conn_tracks_number",
+		.help = "number of connection trackings",
+		.next = NEXT(next_config_attr,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct buffer,
+					args.configure.port_attr.nb_conn_tracks)),
+	},
 	/* Top-level command. */
 	[PATTERN_TEMPLATE] = {
 		.name = "pattern_template",
@@ -3012,6 +3006,14 @@ static const struct token token_list[] = {
 		.next = NEXT(next_qia_destroy_attr),
 		.call = parse_qia_destroy,
 	},
+	[QUEUE_INDIRECT_ACTION_QUERY] = {
+		.name = "query",
+		.help = "query indirect action",
+		.next = NEXT(next_qia_query_attr,
+			     NEXT_ENTRY(COMMON_INDIRECT_ACTION_ID)),
+		.args = ARGS(ARGS_ENTRY(struct buffer, args.vc.attr.group)),
+		.call = parse_qia,
+	},
 	/* Indirect action destroy arguments. */
 	[QUEUE_INDIRECT_ACTION_DESTROY_POSTPONE] = {
 		.name = "postpone",
@@ -3034,6 +3036,14 @@ static const struct token token_list[] = {
 		.name = "postpone",
 		.help = "postpone update operation",
 		.next = NEXT(next_qia_update_attr,
+			     NEXT_ENTRY(COMMON_BOOLEAN)),
+		.args = ARGS(ARGS_ENTRY(struct buffer, postpone)),
+	},
+	/* Indirect action update arguments. */
+	[QUEUE_INDIRECT_ACTION_QUERY_POSTPONE] = {
+		.name = "postpone",
+		.help = "postpone query operation",
+		.next = NEXT(next_qia_query_attr,
 			     NEXT_ENTRY(COMMON_BOOLEAN)),
 		.args = ARGS(ARGS_ENTRY(struct buffer, postpone)),
 	},
@@ -3457,41 +3467,6 @@ static const struct token token_list[] = {
 		.help = "number of layers covered",
 		.next = NEXT(item_any, NEXT_ENTRY(COMMON_UNSIGNED), item_param),
 		.args = ARGS(ARGS_ENTRY(struct rte_flow_item_any, num)),
-	},
-	[ITEM_PF] = {
-		.name = "pf",
-		.help = "match traffic from/to the physical function",
-		.priv = PRIV_ITEM(PF, 0),
-		.next = NEXT(NEXT_ENTRY(ITEM_NEXT)),
-		.call = parse_vc,
-	},
-	[ITEM_VF] = {
-		.name = "vf",
-		.help = "match traffic from/to a virtual function ID",
-		.priv = PRIV_ITEM(VF, sizeof(struct rte_flow_item_vf)),
-		.next = NEXT(item_vf),
-		.call = parse_vc,
-	},
-	[ITEM_VF_ID] = {
-		.name = "id",
-		.help = "VF ID",
-		.next = NEXT(item_vf, NEXT_ENTRY(COMMON_UNSIGNED), item_param),
-		.args = ARGS(ARGS_ENTRY(struct rte_flow_item_vf, id)),
-	},
-	[ITEM_PHY_PORT] = {
-		.name = "phy_port",
-		.help = "match traffic from/to a specific physical port",
-		.priv = PRIV_ITEM(PHY_PORT,
-				  sizeof(struct rte_flow_item_phy_port)),
-		.next = NEXT(item_phy_port),
-		.call = parse_vc,
-	},
-	[ITEM_PHY_PORT_INDEX] = {
-		.name = "index",
-		.help = "physical port index",
-		.next = NEXT(item_phy_port, NEXT_ENTRY(COMMON_UNSIGNED),
-			     item_param),
-		.args = ARGS(ARGS_ENTRY(struct rte_flow_item_phy_port, index)),
 	},
 	[ITEM_PORT_ID] = {
 		.name = "port_id",
@@ -5292,30 +5267,6 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_vf, id)),
 		.call = parse_vc_conf,
 	},
-	[ACTION_PHY_PORT] = {
-		.name = "phy_port",
-		.help = "direct packets to physical port index",
-		.priv = PRIV_ACTION(PHY_PORT,
-				    sizeof(struct rte_flow_action_phy_port)),
-		.next = NEXT(action_phy_port),
-		.call = parse_vc,
-	},
-	[ACTION_PHY_PORT_ORIGINAL] = {
-		.name = "original",
-		.help = "use original port index if possible",
-		.next = NEXT(action_phy_port, NEXT_ENTRY(COMMON_BOOLEAN)),
-		.args = ARGS(ARGS_ENTRY_BF(struct rte_flow_action_phy_port,
-					   original, 1)),
-		.call = parse_vc_conf,
-	},
-	[ACTION_PHY_PORT_INDEX] = {
-		.name = "index",
-		.help = "physical port index",
-		.next = NEXT(action_phy_port, NEXT_ENTRY(COMMON_UNSIGNED)),
-		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_phy_port,
-					index)),
-		.call = parse_vc_conf,
-	},
 	[ACTION_PORT_ID] = {
 		.name = "port_id",
 		.help = "direct matching traffic to a given DPDK port ID",
@@ -6681,6 +6632,8 @@ parse_qia(struct context *ctx, const struct token *token,
 			(void *)RTE_ALIGN_CEIL((uintptr_t)(out + 1),
 					       sizeof(double));
 		out->args.vc.attr.group = UINT32_MAX;
+		/* fallthrough */
+	case QUEUE_INDIRECT_ACTION_QUERY:
 		out->command = ctx->curr;
 		ctx->objdata = 0;
 		ctx->object = out;
@@ -6864,6 +6817,14 @@ parse_vc(struct context *ctx, const struct token *token,
 		ctx->object = out->args.vc.pattern;
 		ctx->objmask = NULL;
 		return len;
+	case ITEM_END:
+		if ((out->command == VALIDATE || out->command == CREATE) &&
+		    ctx->last)
+			return -1;
+		if (out->command == PATTERN_TEMPLATE_CREATE &&
+		    !ctx->last)
+			return -1;
+		break;
 	case ACTIONS:
 		out->args.vc.actions =
 			(void *)RTE_ALIGN_CEIL((uintptr_t)
@@ -9330,11 +9291,7 @@ parse_hex_string(const char *src, uint8_t *dst, uint32_t *size)
 	const uint8_t *head = dst;
 	uint32_t left;
 
-	/* Check input parameters */
-	if ((src == NULL) ||
-		(dst == NULL) ||
-		(size == NULL) ||
-		(*size == 0))
+	if (*size == 0)
 		return -1;
 
 	left = *size;
@@ -10504,6 +10461,11 @@ cmd_flow_parsed(const struct buffer *in)
 						in->args.vc.attr.group,
 						in->args.vc.actions);
 		break;
+	case QUEUE_INDIRECT_ACTION_QUERY:
+		port_queue_action_handle_query(in->port,
+					       in->queue, in->postpone,
+					       in->args.vc.attr.group);
+		break;
 	case INDIRECT_ACTION_CREATE:
 		port_action_handle_create(
 				in->port, in->args.vc.attr.group,
@@ -10670,9 +10632,6 @@ flow_item_default_mask(const struct rte_flow_item *item)
 	switch (item->type) {
 	case RTE_FLOW_ITEM_TYPE_ANY:
 		mask = &rte_flow_item_any_mask;
-		break;
-	case RTE_FLOW_ITEM_TYPE_VF:
-		mask = &rte_flow_item_vf_mask;
 		break;
 	case RTE_FLOW_ITEM_TYPE_PORT_ID:
 		mask = &rte_flow_item_port_id_mask;
@@ -10867,6 +10826,18 @@ cmd_set_raw_parsed_sample(const struct buffer *in)
 			parse_setup_nvgre_encap_data(&sample_nvgre_encap[idx]);
 			action->conf = &sample_nvgre_encap[idx];
 			break;
+		case RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR:
+			size = sizeof(struct rte_flow_action_ethdev);
+			rte_memcpy(&sample_port_representor[idx],
+					(const void *)action->conf, size);
+			action->conf = &sample_port_representor[idx];
+			break;
+		case RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT:
+			size = sizeof(struct rte_flow_action_ethdev);
+			rte_memcpy(&sample_represented_port[idx],
+					(const void *)action->conf, size);
+			action->conf = &sample_represented_port[idx];
+			break;
 		default:
 			fprintf(stderr, "Error - Not supported action\n");
 			return;
@@ -11024,19 +10995,15 @@ cmd_set_raw_parsed(const struct buffer *in)
 			} else {
 				const struct rte_flow_item_gtp_psc
 					*opt = item->spec;
-				struct {
-					uint8_t len;
-					uint8_t pdu_type:4;
-					uint8_t qfi:6;
-					uint8_t next;
-				} psc;
-				psc.len = sizeof(psc) / 4;
-				psc.pdu_type = opt->hdr.type;
-				psc.qfi = opt->hdr.qfi;
-				psc.next = 0;
-				*total_size += sizeof(psc);
-				rte_memcpy(data_tail - (*total_size),
-					   &psc, sizeof(psc));
+				struct rte_gtp_psc_generic_hdr *hdr;
+				size_t hdr_size = RTE_ALIGN(sizeof(*hdr),
+							 sizeof(int32_t));
+
+				*total_size += hdr_size;
+				hdr = (typeof(hdr))(data_tail - (*total_size));
+				memset(hdr, 0, hdr_size);
+				*hdr = opt->hdr;
+				hdr->ext_hdr_len = 1;
 				gtp_psc = i;
 				size = 0;
 			}
@@ -11224,16 +11191,16 @@ cmd_show_set_raw_parsed(void *parsed_result, struct cmdline *cl, void *data)
 	} while (all && ++index < RAW_ENCAP_CONFS_MAX_NUM);
 }
 
-cmdline_parse_token_string_t cmd_show_set_raw_cmd_show =
+static cmdline_parse_token_string_t cmd_show_set_raw_cmd_show =
 	TOKEN_STRING_INITIALIZER(struct cmd_show_set_raw_result,
 			cmd_show, "show");
-cmdline_parse_token_string_t cmd_show_set_raw_cmd_what =
+static cmdline_parse_token_string_t cmd_show_set_raw_cmd_what =
 	TOKEN_STRING_INITIALIZER(struct cmd_show_set_raw_result,
 			cmd_what, "raw_encap#raw_decap");
-cmdline_parse_token_num_t cmd_show_set_raw_cmd_index =
+static cmdline_parse_token_num_t cmd_show_set_raw_cmd_index =
 	TOKEN_NUM_INITIALIZER(struct cmd_show_set_raw_result,
 			cmd_index, RTE_UINT16);
-cmdline_parse_token_string_t cmd_show_set_raw_cmd_all =
+static cmdline_parse_token_string_t cmd_show_set_raw_cmd_all =
 	TOKEN_STRING_INITIALIZER(struct cmd_show_set_raw_result,
 			cmd_all, "all");
 cmdline_parse_inst_t cmd_show_set_raw = {

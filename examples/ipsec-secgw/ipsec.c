@@ -55,37 +55,71 @@ set_ipsec_conf(struct ipsec_sa *sa, struct rte_security_ipsec_xform *ipsec)
 }
 
 int
-create_lookaside_session(struct ipsec_ctx *ipsec_ctx, struct ipsec_sa *sa,
-		struct rte_ipsec_session *ips)
+create_lookaside_session(struct ipsec_ctx *ipsec_ctx_lcore[],
+	struct socket_ctx *skt_ctx, struct ipsec_sa *sa,
+	struct rte_ipsec_session *ips)
 {
+	uint16_t cdev_id = RTE_CRYPTO_MAX_DEVS;
 	struct rte_cryptodev_info cdev_info;
 	unsigned long cdev_id_qp = 0;
-	int32_t ret = 0;
 	struct cdev_key key = { 0 };
+	struct ipsec_ctx *ipsec_ctx;
+	uint32_t lcore_id;
+	int32_t ret = 0;
 
-	key.lcore_id = (uint8_t)rte_lcore_id();
+	RTE_LCORE_FOREACH(lcore_id) {
+		ipsec_ctx = ipsec_ctx_lcore[lcore_id];
 
-	key.cipher_algo = (uint8_t)sa->cipher_algo;
-	key.auth_algo = (uint8_t)sa->auth_algo;
-	key.aead_algo = (uint8_t)sa->aead_algo;
+		/* Core is not bound to any cryptodev, skip it */
+		if (ipsec_ctx->cdev_map == NULL)
+			continue;
 
-	ret = rte_hash_lookup_data(ipsec_ctx->cdev_map, &key,
-			(void **)&cdev_id_qp);
-	if (ret < 0) {
-		RTE_LOG(ERR, IPSEC,
-				"No cryptodev: core %u, cipher_algo %u, "
-				"auth_algo %u, aead_algo %u\n",
-				key.lcore_id,
-				key.cipher_algo,
-				key.auth_algo,
-				key.aead_algo);
-		return -1;
+		/* Looking for cryptodev, which can handle this SA */
+		key.lcore_id = (uint8_t)lcore_id;
+		key.cipher_algo = (uint8_t)sa->cipher_algo;
+		key.auth_algo = (uint8_t)sa->auth_algo;
+		key.aead_algo = (uint8_t)sa->aead_algo;
+
+		ret = rte_hash_lookup_data(ipsec_ctx->cdev_map, &key,
+				(void **)&cdev_id_qp);
+		if (ret == -ENOENT)
+			continue;
+		if (ret < 0) {
+			RTE_LOG(ERR, IPSEC,
+					"No cryptodev: core %u, cipher_algo %u, "
+					"auth_algo %u, aead_algo %u\n",
+					key.lcore_id,
+					key.cipher_algo,
+					key.auth_algo,
+					key.aead_algo);
+			return ret;
+		}
+
+		/* Verify that all cores are using same cryptodev for current
+		 * algorithm combination, required by SA.
+		 * Current cryptodev mapping process will map SA to the first
+		 * cryptodev that matches requirements, so it's a double check,
+		 * not an additional restriction.
+		 */
+		if (cdev_id == RTE_CRYPTO_MAX_DEVS)
+			cdev_id = ipsec_ctx->tbl[cdev_id_qp].id;
+		else if (cdev_id != ipsec_ctx->tbl[cdev_id_qp].id) {
+			RTE_LOG(ERR, IPSEC,
+					"SA mapping to multiple cryptodevs is "
+					"not supported!");
+			return -EINVAL;
+		}
+
+		/* Store per core queue pair information */
+		sa->cqp[lcore_id] = &ipsec_ctx->tbl[cdev_id_qp];
+	}
+	if (cdev_id == RTE_CRYPTO_MAX_DEVS) {
+		RTE_LOG(WARNING, IPSEC, "No cores found to handle SA\n");
+		return 0;
 	}
 
-	RTE_LOG_DP(DEBUG, IPSEC, "Create session for SA spi %u on cryptodev "
-			"%u qp %u\n", sa->spi,
-			ipsec_ctx->tbl[cdev_id_qp].id,
-			ipsec_ctx->tbl[cdev_id_qp].qp);
+	RTE_LOG(DEBUG, IPSEC, "Create session for SA spi %u on cryptodev "
+			"%u\n", sa->spi, cdev_id);
 
 	if (ips->type != RTE_SECURITY_ACTION_TYPE_NONE &&
 		ips->type != RTE_SECURITY_ACTION_TYPE_CPU_CRYPTO) {
@@ -111,19 +145,20 @@ create_lookaside_session(struct ipsec_ctx *ipsec_ctx, struct ipsec_sa *sa,
 		if (ips->type == RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL) {
 			struct rte_security_ctx *ctx = (struct rte_security_ctx *)
 							rte_cryptodev_get_sec_ctx(
-							ipsec_ctx->tbl[cdev_id_qp].id);
+							cdev_id);
 
 			/* Set IPsec parameters in conf */
 			set_ipsec_conf(sa, &(sess_conf.ipsec));
 
 			ips->security.ses = rte_security_session_create(ctx,
-					&sess_conf, ipsec_ctx->session_pool,
-					ipsec_ctx->session_priv_pool);
+					&sess_conf, skt_ctx->session_pool,
+					skt_ctx->session_priv_pool);
 			if (ips->security.ses == NULL) {
 				RTE_LOG(ERR, IPSEC,
 				"SEC Session init failed: err: %d\n", ret);
 				return -1;
 			}
+			ips->security.ctx = ctx;
 		} else {
 			RTE_LOG(ERR, IPSEC, "Inline not supported\n");
 			return -1;
@@ -131,27 +166,22 @@ create_lookaside_session(struct ipsec_ctx *ipsec_ctx, struct ipsec_sa *sa,
 	} else {
 		if (ips->type == RTE_SECURITY_ACTION_TYPE_CPU_CRYPTO) {
 			struct rte_cryptodev_info info;
-			uint16_t cdev_id;
 
-			cdev_id = ipsec_ctx->tbl[cdev_id_qp].id;
 			rte_cryptodev_info_get(cdev_id, &info);
 			if (!(info.feature_flags &
 				RTE_CRYPTODEV_FF_SYM_CPU_CRYPTO))
 				return -ENOTSUP;
 
-			ips->crypto.dev_id = cdev_id;
 		}
+		ips->crypto.dev_id = cdev_id;
 		ips->crypto.ses = rte_cryptodev_sym_session_create(
-				ipsec_ctx->session_pool);
-		rte_cryptodev_sym_session_init(ipsec_ctx->tbl[cdev_id_qp].id,
+				skt_ctx->session_pool);
+		rte_cryptodev_sym_session_init(cdev_id,
 				ips->crypto.ses, sa->xforms,
-				ipsec_ctx->session_priv_pool);
+				skt_ctx->session_priv_pool);
 
-		rte_cryptodev_info_get(ipsec_ctx->tbl[cdev_id_qp].id,
-				&cdev_info);
+		rte_cryptodev_info_get(cdev_id, &cdev_info);
 	}
-
-	sa->cdev_id_qp = cdev_id_qp;
 
 	return 0;
 }
@@ -496,7 +526,7 @@ int
 create_ipsec_esp_flow(struct ipsec_sa *sa)
 {
 	int ret = 0;
-	struct rte_flow_error err;
+	struct rte_flow_error err = {};
 	if (sa->direction == RTE_SECURITY_IPSEC_SA_DIR_EGRESS) {
 		RTE_LOG(ERR, IPSEC,
 			"No Flow director rule for Egress traffic\n");
@@ -621,8 +651,7 @@ ipsec_enqueue(ipsec_xform_fn xform_func, struct ipsec_ctx *ipsec_ctx,
 
 			rte_prefetch0(&priv->sym_cop);
 
-			if ((unlikely(ips->security.ses == NULL)) &&
-				create_lookaside_session(ipsec_ctx, sa, ips)) {
+			if (unlikely(ips->security.ses == NULL)) {
 				free_pkts(&pkts[i], 1);
 				continue;
 			}
@@ -656,8 +685,7 @@ ipsec_enqueue(ipsec_xform_fn xform_func, struct ipsec_ctx *ipsec_ctx,
 
 			rte_prefetch0(&priv->sym_cop);
 
-			if ((unlikely(ips->crypto.ses == NULL)) &&
-				create_lookaside_session(ipsec_ctx, sa, ips)) {
+			if (unlikely(ips->crypto.ses == NULL)) {
 				free_pkts(&pkts[i], 1);
 				continue;
 			}
@@ -704,8 +732,7 @@ ipsec_enqueue(ipsec_xform_fn xform_func, struct ipsec_ctx *ipsec_ctx,
 			continue;
 		}
 
-		RTE_ASSERT(sa->cdev_id_qp < ipsec_ctx->nb_qps);
-		enqueue_cop(&ipsec_ctx->tbl[sa->cdev_id_qp], &priv->cop);
+		enqueue_cop(sa->cqp[ipsec_ctx->lcore_id], &priv->cop);
 	}
 }
 

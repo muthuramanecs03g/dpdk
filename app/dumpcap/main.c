@@ -679,8 +679,13 @@ static void enable_pdump(struct rte_ring *r, struct rte_mempool *mp)
 		flags |= RTE_PDUMP_FLAG_PCAPNG;
 
 	TAILQ_FOREACH(intf, &interfaces, next) {
-		if (promiscuous_mode)
-			rte_eth_promiscuous_enable(intf->port);
+		if (promiscuous_mode) {
+			ret = rte_eth_promiscuous_enable(intf->port);
+			if (ret != 0)
+				fprintf(stderr,
+					"port %u set promiscuous enable failed: %d\n",
+					intf->port, ret);
+		}
 
 		ret = rte_pdump_enable_bpf(intf->port, RTE_PDUMP_ALL_QUEUES,
 					   flags, snaplen,
@@ -781,8 +786,8 @@ int main(int argc, char **argv)
 
 	progname = argv[0];
 
-	dpdk_init();
 	parse_opts(argc, argv);
+	dpdk_init();
 
 	if (filter_str)
 		compile_filter();

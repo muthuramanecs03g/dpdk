@@ -91,6 +91,15 @@ static struct rte_cryptodev_capabilities qat_sym_crypto_caps_gen4[] = {
 		CAP_RNG(key_size, 32, 32, 0),
 		CAP_RNG(digest_size, 16, 16, 0),
 		CAP_RNG(aad_size, 0, 240, 1), CAP_RNG(iv_size, 12, 12, 0)),
+	QAT_SYM_CIPHER_CAP(SM4_ECB,
+		CAP_SET(block_size, 16),
+		CAP_RNG(key_size, 16, 16, 0), CAP_RNG(iv_size, 0, 0, 0)),
+	QAT_SYM_CIPHER_CAP(SM4_CBC,
+		CAP_SET(block_size, 16),
+		CAP_RNG(key_size, 16, 16, 0), CAP_RNG(iv_size, 16, 16, 0)),
+	QAT_SYM_CIPHER_CAP(SM4_CTR,
+		CAP_SET(block_size, 16),
+		CAP_RNG(key_size, 16, 16, 0), CAP_RNG(iv_size, 16, 16, 0)),
 	RTE_CRYPTODEV_END_OF_CAPABILITIES_LIST()
 };
 
@@ -188,6 +197,9 @@ qat_sym_crypto_set_session_gen4(void *cdev, void *session)
 	struct qat_sym_session *ctx = session;
 	enum rte_proc_type_t proc_type = rte_eal_process_type();
 	int ret;
+
+	if (proc_type == RTE_PROC_AUTO || proc_type == RTE_PROC_INVALID)
+		return -EINVAL;
 
 	ret = qat_sym_crypto_set_session_gen1(cdev, session);
 	/* special single pass build request for GEN4 */
@@ -372,8 +384,12 @@ RTE_INIT(qat_sym_crypto_gen4_init)
 
 RTE_INIT(qat_asym_crypto_gen4_init)
 {
-	qat_asym_gen_dev_ops[QAT_GEN4].cryptodev_ops = NULL;
-	qat_asym_gen_dev_ops[QAT_GEN4].get_capabilities = NULL;
-	qat_asym_gen_dev_ops[QAT_GEN4].get_feature_flags = NULL;
-	qat_asym_gen_dev_ops[QAT_GEN4].set_session = NULL;
+	qat_asym_gen_dev_ops[QAT_GEN4].cryptodev_ops =
+			&qat_asym_crypto_ops_gen1;
+	qat_asym_gen_dev_ops[QAT_GEN4].get_capabilities =
+			qat_asym_crypto_cap_get_gen1;
+	qat_asym_gen_dev_ops[QAT_GEN4].get_feature_flags =
+			qat_asym_crypto_feature_flags_get_gen1;
+	qat_asym_gen_dev_ops[QAT_GEN4].set_session =
+			qat_asym_crypto_set_session_gen1;
 }

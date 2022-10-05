@@ -28,7 +28,6 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_ip.h>
@@ -504,9 +503,17 @@ tx_only_begin(portid_t pi)
 	return 0;
 }
 
+static void
+tx_only_stream_init(struct fwd_stream *fs)
+{
+	fs->disabled = ports[fs->tx_port].txq[fs->tx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+}
+
 struct fwd_engine tx_only_engine = {
 	.fwd_mode_name  = "txonly",
 	.port_fwd_begin = tx_only_begin,
 	.port_fwd_end   = NULL,
+	.stream_init    = tx_only_stream_init,
 	.packet_fwd     = pkt_burst_transmit,
 };

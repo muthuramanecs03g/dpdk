@@ -14,8 +14,9 @@ Deprecation Notices
 * kvargs: The function ``rte_kvargs_process`` will get a new parameter
   for returning key match count. It will ease handling of no-match case.
 
-* eal: The function ``rte_eal_remote_launch`` will return new error codes
-  after read or write error on the pipe, instead of calling ``rte_panic``.
+* eal: RTE_FUNC_PTR_OR_* macros have been marked deprecated and will be removed
+  in the future. Applications can use ``devtools/cocci/func_or_ret.cocci``
+  to update their code.
 
 * rte_atomicNN_xxx: These APIs do not take memory order parameter. This does
   not allow for writing optimized code for all the CPU architectures supported
@@ -32,21 +33,21 @@ Deprecation Notices
   ``__atomic_thread_fence`` must be used for patches that need to be merged in
   20.08 onwards. This change will not introduce any performance degradation.
 
-* mempool: Helper macro ``MEMPOOL_HEADER_SIZE()`` is deprecated and will
-  be removed in DPDK 22.11. The replacement macro
-  ``RTE_MEMPOOL_HEADER_SIZE()`` is internal only.
+* bus: The ``dev->device.numa_node`` field is set by each bus driver for
+  every device it manages to indicate on which NUMA node this device lies.
+  When this information is unknown, the assigned value is not consistent
+  across the bus drivers.
+  In DPDK 22.11, the default value will be set to -1 by all bus drivers
+  when the NUMA information is unavailable.
 
-* mempool: Macro to register mempool driver ``MEMPOOL_REGISTER_OPS()`` is
-  deprecated and will be removed in DPDK 22.11. Use replacement macro
-  ``RTE_MEMPOOL_REGISTER_OPS()``.
+* kni: The KNI kernel module and library are not recommended for use by new
+  applications - other technologies such as virtio-user are recommended instead.
+  Following the DPDK technical board
+  `decision <https://mails.dpdk.org/archives/dev/2021-January/197077.html>`_
+  and `refinement <http://mails.dpdk.org/archives/dev/2022-June/243596.html>`_:
 
-* mempool: The mempool API macros ``MEMPOOL_PG_*`` are deprecated and
-  will be removed in DPDK 22.11.
-
-* pci: To reduce unnecessary ABIs exposed by DPDK bus driver, "rte_bus_pci.h"
-  will be made internal in 21.11 and macros/data structures/functions defined
-  in the header will not be considered as ABI anymore. This change is inspired
-  by the RFC https://patchwork.dpdk.org/project/dpdk/list/?series=17176.
+  * Some deprecation warnings will be added in DPDK 22.11.
+  * The KNI kernel module, library and PMD will be removed from the DPDK 23.11.
 
 * lib: will fix extending some enum/define breaking the ABI. There are multiple
   samples in DPDK that enum/define terminated with a ``.*MAX.*`` value which is
@@ -62,9 +63,16 @@ Deprecation Notices
   us extending existing enum/define.
   One solution can be using a fixed size array instead of ``.*MAX.*`` value.
 
-* ethdev: The flow director API, including ``rte_eth_conf.fdir_conf`` field,
-  and the related structures (``rte_fdir_*`` and ``rte_eth_fdir_*``),
-  will be removed in DPDK 20.11.
+* ethdev: The function ``rte_eth_set_queue_rate_limit`` takes ``rate`` in Mbps.
+  The queue rate is limited to 64 Gbps because declared as ``uint16_t``.
+  The ``rate`` parameter will be modified to ``uint32_t`` in DPDK 22.11
+  so that it can work for more than 64 Gbps.
+
+* ethdev: Since no single PMD supports ``RTE_ETH_RX_OFFLOAD_HEADER_SPLIT``
+  offload and the ``split_hdr_size`` field in structure ``rte_eth_rxmode``
+  to enable per-port header split, they will be removed in DPDK 22.11.
+  The per-queue Rx packet split offload ``RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT``
+  can still be used, and it is configured by ``rte_eth_rxseg_split``.
 
 * ethdev: Announce moving from dedicated modify function for each field,
   to using the general ``rte_flow_modify_field`` action.
@@ -107,21 +115,37 @@ Deprecation Notices
   alternative is implemented.
   The legacy actions should be removed in DPDK 22.11.
 
+* ethdev: The enum ``rte_eth_event_ipsec_subtype`` will be extended to add
+  new subtype values ``RTE_ETH_EVENT_IPSEC_SA_PKT_EXPIRY``,
+  ``RTE_ETH_EVENT_IPSEC_SA_BYTE_HARD_EXPIRY`` and
+  ``RTE_ETH_EVENT_IPSEC_SA_PKT_HARD_EXPIRY`` in DPDK 22.11.
+
+* bbdev: ``RTE_BBDEV_OP_TYPE_COUNT`` terminating the ``rte_bbdev_op_type``
+  enum will be deprecated and instead use fixed array size when required
+  to allow for future enum extension.
+  Will extend API to support new operation type ``RTE_BBDEV_OP_FFT`` as per
+  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=22111>`__.
+  New members will be added in ``rte_bbdev_driver_info`` to expose
+  PMD queue topology inspired by
+  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=22076>`__.
+  New member will be added in ``rte_bbdev_driver_info`` to expose
+  the device status as per
+  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=23367>`__.
+  This should be updated in DPDK 22.11.
+
 * cryptodev: Hide structures ``rte_cryptodev_sym_session`` and
   ``rte_cryptodev_asym_session`` to remove unnecessary indirection between
   session and the private data of session. An opaque pointer can be exposed
   directly to application which can be attached to the ``rte_crypto_op``.
 
+* cryptodev: The function ``rte_cryptodev_cb_fn`` will be updated
+  to have another parameter ``qp_id`` to return the queue pair ID
+  which got error interrupt to the application,
+  so that application can reset that particular queue pair.
+
 * security: Hide structure ``rte_security_session`` and expose an opaque
   pointer for the private data to the application which can be attached
   to the packet while enqueuing.
 
-* metrics: The function ``rte_metrics_init`` will have a non-void return
-  in order to notify errors instead of calling ``rte_exit``.
-
-* raw/ioat: The ``ioat`` rawdev driver has been deprecated, since it's
-  functionality is provided through the new ``dmadev`` infrastructure.
-  To continue to use hardware previously supported by the ``ioat`` rawdev driver,
-  applications should be updated to use the ``dmadev`` library instead,
-  with the underlying HW-functionality being provided by the ``ioat`` or
-  ``idxd`` dma drivers
+* raw/dpaa2_cmdif: The ``dpaa2_cmdif`` rawdev driver will be deprecated
+  in DPDK 22.11, as it is no longer in use, no active user known.

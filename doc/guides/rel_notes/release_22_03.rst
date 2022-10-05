@@ -6,96 +6,52 @@
 DPDK Release 22.03
 ==================
 
-.. **Read this first.**
-
-   The text in the sections below explains how to update the release notes.
-
-   Use proper spelling, capitalization and punctuation in all sections.
-
-   Variable and config names should be quoted as fixed width text:
-   ``LIKE_THIS``.
-
-   Build the docs and view the output file to ensure the changes are correct::
-
-      ninja -C build doc
-      xdg-open build/doc/guides/html/rel_notes/release_22_03.html
-
-
 New Features
 ------------
 
-.. This section should contain new features added in this release.
-   Sample format:
-
-   * **Add a title in the past tense with a full stop.**
-
-     Add a short 1-2 sentence description in the past tense.
-     The description should be enough to allow someone scanning
-     the release notes to understand the new feature.
-
-     If the feature adds a lot of sub-features you can use a bullet list
-     like this:
-
-     * Added feature foo to do something.
-     * Enhanced feature bar to do something else.
-
-     Refer to the previous release notes for examples.
-
-     Suggested order in release notes items:
-     * Core libs (EAL, mempool, ring, mbuf, buses)
-     * Device abstraction libs and PMDs (ordered alphabetically by vendor name)
-       - ethdev (lib, PMDs)
-       - cryptodev (lib, PMDs)
-       - eventdev (lib, PMDs)
-       - etc
-     * Other libs
-     * Apps, Examples, Tools (if significant)
-
-     This section is a comment. Do not overwrite or remove it.
-     Also, make sure to start the actual text at the margin.
-     =======================================================
-
 * **Added ability to reuse hugepages in Linux.**
 
-  It is possible to reuse files in hugetlbfs to speed up hugepage mapping,
+  It is now possible to reuse files in hugetlbfs to speed up hugepage mapping,
   which may be useful for fast restart and large allocations.
   The new mode is activated with ``--huge-unlink=never``
   and has security implications, refer to the user and programmer guides.
 
 * **Added functions to calculate UDP/TCP checksum in mbuf.**
 
-  * Added the following functions to calculate UDP/TCP checksum of packets
-    which can be over multi-segments:
-    - ``rte_ipv4_udptcp_cksum_mbuf()``
-    - ``rte_ipv4_udptcp_cksum_mbuf_verify()``
-    - ``rte_ipv6_udptcp_cksum_mbuf()``
-    - ``rte_ipv6_udptcp_cksum_mbuf_verify()``
+  Added the following functions to calculate UDP/TCP checksum of packets
+  which can be over multi-segments:
 
-* **Added functions to configure flow engine.**
+  - ``rte_ipv4_udptcp_cksum_mbuf()``
+  - ``rte_ipv4_udptcp_cksum_mbuf_verify()``
+  - ``rte_ipv6_udptcp_cksum_mbuf()``
+  - ``rte_ipv6_udptcp_cksum_mbuf_verify()``
 
-  * Added ``rte_flow_configure`` API to configure flow management
-    engine, allowing to pre-allocate some resources for better performance.
-    Added ``rte_flow_info_get`` API to retrieve available resources.
+* **Added functions to configure the flow engine.**
 
-  * Added ``rte_flow_template_table_create`` API to group flow rules
-    with the same flow attributes and common matching patterns and actions
-    defined by ``rte_flow_pattern_template_create`` and
-    ``rte_flow_actions_template_create`` respectively.
-    Corresponding functions to destroy these entities are:
-    ``rte_flow_template_table_destroy``, ``rte_flow_pattern_template_destroy``
-    and ``rte_flow_actions_template_destroy``.
+  Added the ``rte_flow_configure`` API to configure the flow management
+  engine, allowing preallocation of some resources for better performance.
+  Added ``rte_flow_info_get`` API to retrieve available resources.
 
-* **Added functions for asynchronous flow rules creation/destruction.**
+  Added ``rte_flow_template_table_create`` API to group flow rules
+  with the same flow attributes and common matching patterns and actions
+  defined by ``rte_flow_pattern_template_create`` and
+  ``rte_flow_actions_template_create`` respectively.
+  The corresponding functions to destroy these entities are:
+  ``rte_flow_template_table_destroy``, ``rte_flow_pattern_template_destroy``
+  and ``rte_flow_actions_template_destroy``.
 
-  * Added ``rte_flow_async_create`` and ``rte_flow_async_destroy`` API
-    to enqueue flow creaion/destruction operations asynchronously as well as
-    ``rte_flow_pull`` to poll and retrieve results of these operations and
-    ``rte_flow_push`` to push all the in-flight	operations to the NIC.
+* **Added functions for asynchronous flow rules creation and destruction.**
 
-  * Added asynchronous API for indirect actions management:
-    ``rte_flow_async_action_handle_create``,
-    ``rte_flow_async_action_handle_destroy`` and
-    ``rte_flow_async_action_handle_update``.
+  Added the ``rte_flow_async_create`` and ``rte_flow_async_destroy`` APIs
+  to enqueue flow creation/destruction operations asynchronously as well as
+  ``rte_flow_pull`` to poll and retrieve results of these operations and
+  ``rte_flow_push`` to push all the in-flight	operations to the NIC.
+
+  Added asynchronous APIs for indirect actions management:
+
+  - ``rte_flow_async_action_handle_create``
+  - ``rte_flow_async_action_handle_destroy``
+  - ``rte_flow_async_action_handle_update``
 
 * **Added rte_flow support for matching GRE optional fields.**
 
@@ -104,35 +60,35 @@ New Features
 
 * **Added new RSS offload types for L2TPv2 in RSS flow.**
 
-  Added macro RTE_ETH_RSS_L2TPV2, now L2TPv2 session ID field can be used as
+  Added ``RTE_ETH_RSS_L2TPV2`` macro so that he L2TPv2 session ID field can be used as
   input set for RSS.
 
-* **Added IP reassembly Ethernet offload API, to get and set config.**
+* **Added IP reassembly Ethernet offload APIs to get and set config.**
 
   Added IP reassembly offload APIs which provide functions to query IP
   reassembly capabilities, to set configuration and to get currently set
   reassembly configuration.
 
-* **Added an API to enable queue based priority flow ctrl(PFC).**
+* **Added an API to enable queue based priority flow ctrl (PFC).**
 
-  New APIs, ``rte_eth_dev_priority_flow_ctrl_queue_info_get()`` and
-  ``rte_eth_dev_priority_flow_ctrl_queue_configure()``, was added.
+  Added new APIs, ``rte_eth_dev_priority_flow_ctrl_queue_info_get()`` and
+  ``rte_eth_dev_priority_flow_ctrl_queue_configure()`` for queue based
+  priority flow ctrl (PFC).
 
 * **Added a private dump API, to dump private info from device.**
 
-  Added the private dump API which provides querying private info from device.
-  There exists many private properties in different PMD drivers.
-  The information of these properties is important for debug.
-  As the information is private, a dump function is introduced.
+  Added the private dump API which provides a facility for querying private info from a device.
+  There exists many private properties in different PMD drivers and
+  the information in these properties is useful for debugging.
 
-* **Updated AF_XDP PMD**
+* **Updated AF_XDP PMD.**
 
-  * Added support for libxdp >=v1.2.2.
+  * Added support for libxdp >= v1.2.2.
   * Re-enabled secondary process support. RX/TX is not supported.
 
 * **Updated Amazon ENA PMD.**
 
-  The new driver version (v2.6.0) introduced bug fixes and improvements, including:
+  The new driver version (v2.6.0) introduces bug fixes and improvements, including:
 
   * Added new checksum related xstats: ``l3_csum_bad``, ``l4_csum_bad`` and
     ``l4_csum_good``.
@@ -159,14 +115,14 @@ New Features
 
 * **Updated Marvell cnxk ethdev PMD.**
 
-  * Added queue based priority flow control support for CN9K & CN10K.
+  * Added queue based priority flow control support for CN9K and CN10K.
   * Added support for IP reassembly for inline inbound IPsec packets.
   * Added support for packet marking in traffic manager.
   * Added support for CNF95xx B0 variant SoC.
 
 * **Updated Mellanox mlx5 driver.**
 
-  * Supported ConnectX-7 capability to schedule traffic sending on timestamp.
+  * Added support for ConnectX-7 capability to schedule traffic sending on timestamp.
   * Added WQE based hardware steering support with ``rte_flow_async`` API.
   * Added steering for external Rx queue created outside the PMD.
   * Added GRE optional fields matching.
@@ -174,14 +130,16 @@ New Features
 * **Updated Wangxun ngbe driver.**
 
   * Added support for devices of custom PHY interfaces.
+
     - M88E1512 PHY connects to RJ45
     - M88E1512 PHY connects to RGMII combo
     - YT8521S PHY connects to SFP
+
   * Added LED OEM support.
 
 * **Updated Wangxun txgbe driver.**
 
-  * Added LED OEM support.
+  Added LED OEM support.
 
 * **Added an API for private user data in asymmetric crypto session.**
 
@@ -210,58 +168,37 @@ New Features
 
 * **Added support for Kunpeng930 DMA devices to HiSilicon DMA PMD.**
 
-  * Kunpeng930 DMA devices are now enabled for HiSilicon DMA PMD.
+  Kunpeng930 DMA devices are now enabled for HiSilicon DMA PMD.
 
 * **Added CNXK GPIO PMD.**
 
-  Added a new rawdevice PMD which allows to manage userspace GPIOs and install
-  custom GPIO interrupt handlers which bypass kernel. This is especially useful
-  for applications, that besides providing standard dataplane functionality
-  want to have fast and low latency access to GPIO pin state.
+  Added a new rawdevice PMD which allows managing userspace GPIOs and installing
+  custom GPIO interrupt handlers which bypass the kernel. This is especially useful
+  for applications that as well as providing standard dataplane functionality
+  also want to have fast and low latency access to GPIO pin state.
 
   See the :doc:`../rawdevs/cnxk_gpio` rawdev guide for more details on this
   driver.
 
-* **Updated testpmd.**
+* **Updated testpmd to support software UDP/TCP checksum over multiple segments.**
 
-  * Called ``rte_ipv4/6_udptcp_cksum_mbuf()`` functions in testpmd csum mode
-    to support software UDP/TCP checksum over multiple segments.
+  Updated ``rte_ipv4/6_udptcp_cksum_mbuf()`` functions in testpmd csum mode
+  to support software UDP/TCP checksum over multiple segments.
 
 * **Added crypto producer mode in test-eventdev.**
 
-  * Crypto producer mode helps to measure performance of OP_NEW and OP_FORWARD
-    modes of event crypto adapter.
+  Crypto producer mode helps to measure performance of OP_NEW and OP_FORWARD
+  modes of event crypto adapter.
 
 
 Removed Items
 -------------
-
-.. This section should contain removed items in this release. Sample format:
-
-   * Add a short 1-2 sentence description of the removed item
-     in the past tense.
-
-   This section is a comment. Do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =======================================================
 
 * **Removed experimental performance thread example application.**
 
 
 API Changes
 -----------
-
-.. This section should contain API changes. Sample format:
-
-   * sample: Add a short 1-2 sentence description of the API change
-     which was announced in the previous releases and made in this release.
-     Start with a scope label like "ethdev:".
-     Use fixed width quotes for ``function_names`` or ``struct_names``.
-     Use the past tense.
-
-   This section is a comment. Do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =======================================================
 
 * net: added experimental functions ``rte_ipv4_udptcp_cksum_mbuf()``,
   ``rte_ipv4_udptcp_cksum_mbuf_verify()``, ``rte_ipv6_udptcp_cksum_mbuf()``,
@@ -284,51 +221,268 @@ API Changes
 ABI Changes
 -----------
 
-.. This section should contain ABI changes. Sample format:
-
-   * sample: Add a short 1-2 sentence description of the ABI change
-     which was announced in the previous releases and made in this release.
-     Start with a scope label like "ethdev:".
-     Use fixed width quotes for ``function_names`` or ``struct_names``.
-     Use the past tense.
-
-   This section is a comment. Do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =======================================================
-
 * No ABI change that would break compatibility with 21.11.
 
 
 Known Issues
 ------------
 
-.. This section should contain new known issues in this release. Sample format:
+* **Possible reduced power saving with PMD Power Management.**
 
-   * **Add title in present tense with full stop.**
+  Users may see reduced power savings when using PMD Power Management.
+  This issue occurs when compiling DPDK applications with GCC-9
+  on platforms with TSX enabled.
+  The function ``rte_power_monitor_multi()`` may return
+  without successfully starting the RTM transaction (``_xbegin()`` fails).
 
-     Add a short 1-2 sentence description of the known issue
-     in the present tense. Add information on any known workarounds.
-
-   This section is a comment. Do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =======================================================
+  There are three workarounds for this issue.
+  Either build DPDK with GCC-11 or newer, build with shared libraries,
+  or build DPDK with fewer drivers.
 
 
 Tested Platforms
 ----------------
 
-.. This section should contain a list of platforms that were tested
-   with this release.
+   * Intel\ |reg| platforms with Intel\ |reg| NICs combinations
 
-   The format is:
+     * CPU
 
-   * <vendor> platform with <vendor> <type of devices> combinations
+       * Intel\ |reg| Atom\ |trade| CPU C3758 @ 2.20GHz
+       * Intel\ |reg| Xeon\ |reg| CPU D-1553N @ 2.30GHz
+       * Intel\ |reg| Xeon\ |reg| CPU E5-2680 v2 @ 2.80GHz
+       * Intel\ |reg| Xeon\ |reg| CPU E5-2699 v3 @ 2.30GHz
+       * Intel\ |reg| Xeon\ |reg| CPU E5-2699 v4 @ 2.20GHz
+       * Intel\ |reg| Xeon\ |reg| Gold 6139 CPU @ 2.30GHz
+       * Intel\ |reg| Xeon\ |reg| Gold 6140M CPU @ 2.30GHz
+       * Intel\ |reg| Xeon\ |reg| Gold 6252N CPU @ 2.30GHz
+       * Intel\ |reg| Xeon\ |reg| Gold 6348 CPU @ 2.60GHz
+       * Intel\ |reg| Xeon\ |reg| Platinum 8180 CPU @ 2.50GHz
+       * Intel\ |reg| Xeon\ |reg| Platinum 8180M CPU @ 2.50GHz
+       * Intel\ |reg| Xeon\ |reg| Platinum 8280M CPU @ 2.70GHz
+       * Intel\ |reg| Xeon\ |reg| Platinum 8380 CPU @ 2.30GHz
 
-     * List of CPU
-     * List of OS
-     * List of devices
-     * Other relevant details...
+     * OS:
 
-   This section is a comment. Do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =======================================================
+       * Fedora 35
+       * OpenWRT 21.02.1
+       * FreeBSD 13.0
+       * Red Hat Enterprise Linux Server release 8.4
+       * Red Hat Enterprise Linux Server release 8.5
+       * Suse 15 SP3
+       * Ubuntu 20.04.3
+       * Ubuntu 21.10
+
+     * NICs:
+
+       * Intel\ |reg| Ethernet Controller E810-C for SFP (4x25G)
+
+         * Firmware version: 3.22 0x8000d83c 1.3146.0
+         * Device id (pf/vf): 8086:1593 / 8086:1889
+         * Driver version: 1.8.3_2_g5c2ff303 (ice)
+         * OS Default DDP: 1.3.28.0
+         * COMMS DDP: 1.3.35.0
+         * Wireless Edge DDP: 1.3.8.0
+
+       * Intel\ |reg| Ethernet Controller E810-C for QSFP (2x100G)
+
+         * Firmware version: 3.20 0x8000d83e 1.3146.0
+         * Device id (pf/vf): 8086:1592 / 8086:1889
+         * Driver version: 1.8.3_2_g5c2ff303 (ice)
+         * OS Default DDP: 1.3.28.0
+         * COMMS DDP: 1.3.35.0
+         * Wireless Edge DDP: 1.3.8.0
+
+       * Intel\ |reg| 82599ES 10 Gigabit Ethernet Controller
+
+         * Firmware version: 0x61bf0001
+         * Device id (pf/vf): 8086:10fb / 8086:10ed
+         * Driver version(in-tree): 5.1.0-k (ixgbe)
+         * Driver version(out-tree): 5.13.4 (ixgbe)
+
+       * Intel\ |reg| Ethernet Converged Network Adapter X710-DA4 (4x10G)
+
+         * Firmware version(PF): 8.30 0x8000a49d 1.2926.0
+         * Firmware version(VF): 8.50 0x8000b6d9 1.3082.0
+         * Device id (pf/vf): 8086:1572 / 8086:154c
+         * Driver version: 2.17.15 (i40e)
+
+       * Intel\ |reg| Corporation Ethernet Connection X722 for 10GbE SFP+ (2x10G)
+
+         * Firmware version: 5.50 0x80003327 1.3082.0
+         * Device id (pf/vf): 8086:37d0 / 8086:37cd
+         * Driver version(out-tree): 2.17.15 (i40e)
+         * Driver version(in-tree): 2.8.20-k (i40e)
+
+       * Intel\ |reg| Corporation Ethernet Connection X722 for 10GBASE-T
+
+         * Firmware version: 5.50 0x800032e0 1.2935.0
+         * Device id (pf/vf): 8086:37d2 / 8086:37cd
+         * Driver version(out-tree): 2.17.15 (i40e)
+         * Driver version(in-tree): 2.8.20-k (i40e)
+
+       * Intel\ |reg| Ethernet Converged Network Adapter XXV710-DA2 (2x25G)
+
+         * Firmware version(PF): 8.30 0x8000a483 1.2926.0
+         * Firmware version(VF): 8.50 0x8000b703 1.3082.0
+         * Device id (pf/vf): 8086:158b / 8086:154c
+         * Driver version: 2.17.15 (i40e)
+
+       * Intel\ |reg| Ethernet Converged Network Adapter XL710-QDA2 (2X40G)
+
+         * Firmware version(PF): 8.30 0x8000a4ae 1.2926.0
+         * Firmware version(VF): 8.50 0x8000b6c7 1.3082.0
+         * Device id (pf/vf): 8086:1583 / 8086:154c
+         * Driver version: 2.17.15 (i40e)
+
+       * Intel\ |reg| Ethernet Converged Network Adapter X710-T2L
+
+         * Firmware version: 8.30 0x8000a489 1.2879.0
+         * Device id (pf): 8086:15ff
+         * Driver version: 2.17.15 (i40e)
+
+* Intel\ |reg| platforms with Mellanox\ |reg| NICs combinations
+
+  * CPU:
+
+    * Intel\ |reg| Xeon\ |reg| Gold 6154 CPU @ 3.00GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2697A v4 @ 2.60GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2697 v3 @ 2.60GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2680 v2 @ 2.80GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2670 0 @ 2.60GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2650 v4 @ 2.20GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2650 v3 @ 2.30GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2640 @ 2.50GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2650 0 @ 2.00GHz
+    * Intel\ |reg| Xeon\ |reg| CPU E5-2620 v4 @ 2.10GHz
+
+  * OS:
+
+    * Red Hat Enterprise Linux release 8.2 (Ootpa)
+    * Red Hat Enterprise Linux Server release 7.8 (Maipo)
+    * Red Hat Enterprise Linux Server release 7.6 (Maipo)
+    * Red Hat Enterprise Linux Server release 7.5 (Maipo)
+    * Red Hat Enterprise Linux Server release 7.4 (Maipo)
+    * Red Hat Enterprise Linux Server release 7.3 (Maipo)
+    * Red Hat Enterprise Linux Server release 7.2 (Maipo)
+    * Ubuntu 20.04
+    * Ubuntu 18.04
+    * Ubuntu 16.04
+    * SUSE Enterprise Linux 15 SP2
+    * SUSE Enterprise Linux 12 SP4
+
+  * OFED:
+
+    * MLNX_OFED 5.5-1.0.3.2 and above
+    * MLNX_OFED 5.4-3.1.0.0
+
+  * upstream kernel:
+
+    * Linux 5.17.0-rc4 and above
+
+  * rdma-core:
+
+    * rdma-core-39.0 and above
+
+  * NICs:
+
+    * Mellanox\ |reg| ConnectX\ |reg|-3 Pro 40G MCX354A-FCC_Ax (2x40G)
+
+      * Host interface: PCI Express 3.0 x8
+      * Device ID: 15b3:1007
+      * Firmware version: 2.42.5000
+
+    * Mellanox\ |reg| ConnectX\ |reg|-3 Pro 40G MCX354A-FCCT (2x40G)
+
+      * Host interface: PCI Express 3.0 x8
+      * Device ID: 15b3:1007
+      * Firmware version: 2.42.5000
+
+    * Mellanox\ |reg| ConnectX\ |reg|-4 Lx 25G MCX4121A-ACAT (2x25G)
+
+      * Host interface: PCI Express 3.0 x8
+      * Device ID: 15b3:1015
+      * Firmware version: 14.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-4 Lx 50G MCX4131A-GCAT (1x50G)
+
+      * Host interface: PCI Express 3.0 x8
+      * Device ID: 15b3:1015
+      * Firmware version: 14.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-5 100G MCX516A-CCAT (2x100G)
+
+      * Host interface: PCI Express 3.0 x16
+      * Device ID: 15b3:1017
+      * Firmware version: 16.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-5 100G MCX556A-ECAT (2x100G)
+
+      * Host interface: PCI Express 3.0 x16
+      * Device ID: 15b3:1017
+      * Firmware version: 16.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-5 100G MCX556A-EDAT (2x100G)
+
+      * Host interface: PCI Express 3.0 x16
+      * Device ID: 15b3:1017
+      * Firmware version: 16.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-5 Ex EN 100G MCX516A-CDAT (2x100G)
+
+      * Host interface: PCI Express 4.0 x16
+      * Device ID: 15b3:1019
+      * Firmware version: 16.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-6 Dx EN 100G MCX623106AN-CDAT (2x100G)
+
+      * Host interface: PCI Express 4.0 x16
+      * Device ID: 15b3:101d
+      * Firmware version: 22.32.1010 and above
+
+    * Mellanox\ |reg| ConnectX\ |reg|-6 Lx EN 25G MCX631102AN-ADAT (2x25G)
+
+      * Host interface: PCI Express 4.0 x8
+      * Device ID: 15b3:101f
+      * Firmware version: 26.32.1010 and above
+
+* Mellanox\ |reg| BlueField\ |reg| SmartNIC
+
+  * Mellanox\ |reg| BlueField\ |reg| 2 SmartNIC MT41686 - MBF2H332A-AEEOT_A1 (2x25G)
+
+    * Host interface: PCI Express 3.0 x16
+    * Device ID: 15b3:a2d6
+    * Firmware version: 24.32.2004 and above
+
+  * Embedded software:
+
+    * Ubuntu 20.04.3
+    * MLNX_OFED 5.5-2.1.7.0 and above
+    * DPDK application running on Arm cores
+
+* IBM Power 9 platforms with Mellanox\ |reg| NICs combinations
+
+  * CPU:
+
+    * POWER9 2.2 (pvr 004e 1202)
+
+  * OS:
+
+    * Red Hat Enterprise Linux Server release 8.2
+
+  * NICs:
+
+    * Mellanox\ |reg| ConnectX\ |reg|-5 100G MCX556A-ECAT (2x100G)
+
+      * Host interface: PCI Express 4.0 x16
+      * Device ID: 15b3:1017
+      * Firmware version: 16.32.1010
+
+    * Mellanox\ |reg| ConnectX\ |reg|-6 Dx 100G MCX623106AN-CDAT (2x100G)
+
+      * Host interface: PCI Express 4.0 x16
+      * Device ID: 15b3:101d
+      * Firmware version: 22.32.1010
+
+  * OFED:
+
+    * MLNX_OFED 5.5-1.0.3.2

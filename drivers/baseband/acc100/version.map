@@ -1,10 +1,9 @@
-DPDK_22 {
+DPDK_23 {
 	local: *;
 };
 
 EXPERIMENTAL {
 	global:
 
-	rte_acc100_configure;
-
+	rte_acc10x_configure;
 };

@@ -6,10 +6,16 @@
 
 #include <stdbool.h>
 
+#define MAX_RX_QUEUE_PER_LCORE 16
 
 #define NB_SOCKETS 4
 
 #define MAX_PKT_BURST 32
+#define MAX_PKT_BURST_VEC 256
+
+#define MAX_PKTS                                  \
+	((MAX_PKT_BURST_VEC > MAX_PKT_BURST ?     \
+	  MAX_PKT_BURST_VEC : MAX_PKT_BURST) * 2)
 
 #define RTE_LOGTYPE_IPSEC RTE_LOGTYPE_USER1
 
@@ -48,12 +54,12 @@
 #define MBUF_PTYPE_TUNNEL_ESP_IN_UDP (RTE_PTYPE_TUNNEL_ESP | RTE_PTYPE_L4_UDP)
 
 struct traffic_type {
-	const uint8_t *data[MAX_PKT_BURST * 2];
-	struct rte_mbuf *pkts[MAX_PKT_BURST * 2];
-	void *saptr[MAX_PKT_BURST * 2];
-	uint32_t res[MAX_PKT_BURST * 2];
 	uint32_t num;
-};
+	struct rte_mbuf *pkts[MAX_PKTS];
+	const uint8_t *data[MAX_PKTS];
+	void *saptr[MAX_PKTS];
+	uint32_t res[MAX_PKTS];
+} __rte_cache_aligned;
 
 struct ipsec_traffic {
 	struct traffic_type ipsec;
@@ -129,12 +135,25 @@ extern uint32_t unprotected_port_mask;
 
 /* Index of SA in single mode */
 extern uint32_t single_sa_idx;
+extern uint32_t single_sa;
 
 extern volatile bool force_quit;
 
 extern uint32_t nb_bufs_in_pool;
 
 extern bool per_port_pool;
+
+extern uint32_t mtu_size;
+extern uint32_t frag_tbl_sz;
+
+#define SS_F		(1U << 0)	/* Single SA mode */
+#define INL_PR_F	(1U << 1)	/* Inline Protocol */
+#define INL_CR_F	(1U << 2)	/* Inline Crypto */
+#define LA_PR_F		(1U << 3)	/* Lookaside Protocol */
+#define LA_ANY_F	(1U << 4)	/* Lookaside Any */
+#define MAX_F		(LA_ANY_F << 1)
+
+extern uint16_t wrkr_flags;
 
 static inline uint8_t
 is_unprotected_port(uint16_t port_id)

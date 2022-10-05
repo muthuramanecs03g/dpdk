@@ -323,7 +323,7 @@ enum HNS3_CAPS_BITS {
 	HNS3_CAPS_UDP_TUNNEL_CSUM_B,
 	HNS3_CAPS_RAS_IMP_B,
 	HNS3_CAPS_RXD_ADV_LAYOUT_B = 15,
-	HNS3_CAPS_TM_B = 17,
+	HNS3_CAPS_TM_B = 19,
 };
 
 /* Capabilities of VF dependent on the PF */
@@ -603,7 +603,6 @@ struct hns3_cfg_gro_status_cmd {
 
 #define HNS3_RSS_HASH_KEY_OFFSET_B	4
 
-#define HNS3_RSS_CFG_TBL_SIZE	16
 #define HNS3_RSS_HASH_KEY_NUM	16
 /* Configure the algorithm mode and Hash Key, opcode:0x0D01 */
 struct hns3_rss_generic_config_cmd {

@@ -12,10 +12,11 @@
 #include <rte_cryptodev.h>
 #include <rte_cycles.h>
 #include <rte_ethdev.h>
-#include <rte_eventdev.h>
 #include <rte_event_crypto_adapter.h>
 #include <rte_event_eth_rx_adapter.h>
+#include <rte_event_eth_tx_adapter.h>
 #include <rte_event_timer_adapter.h>
+#include <rte_eventdev.h>
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 #include <rte_mempool.h>
@@ -40,7 +41,7 @@ struct worker_data {
 struct crypto_adptr_data {
 	uint8_t cdev_id;
 	uint16_t cdev_qp_id;
-	struct rte_cryptodev_sym_session **crypto_sess;
+	void **crypto_sess;
 };
 struct prod_data {
 	uint8_t dev_id;
@@ -70,6 +71,7 @@ struct test_perf {
 	struct rte_mempool *ca_op_pool;
 	struct rte_mempool *ca_sess_pool;
 	struct rte_mempool *ca_sess_priv_pool;
+	struct rte_mempool *ca_asym_sess_pool;
 } __rte_cache_aligned;
 
 struct perf_elt {
@@ -111,8 +113,6 @@ perf_process_last_stage(struct rte_mempool *const pool,
 		struct rte_event *const ev, struct worker_data *const w,
 		void *bufs[], int const buf_sz, uint8_t count)
 {
-	bufs[count++] = ev->event_ptr;
-
 	/* release fence here ensures event_prt is
 	 * stored before updating the number of
 	 * processed packets for worker lcores
@@ -120,9 +120,19 @@ perf_process_last_stage(struct rte_mempool *const pool,
 	rte_atomic_thread_fence(__ATOMIC_RELEASE);
 	w->processed_pkts++;
 
-	if (unlikely(count == buf_sz)) {
-		count = 0;
-		rte_mempool_put_bulk(pool, bufs, buf_sz);
+	if (ev->event_type == RTE_EVENT_TYPE_CRYPTODEV &&
+			((struct rte_crypto_op *)ev->event_ptr)->type ==
+				RTE_CRYPTO_OP_TYPE_ASYMMETRIC) {
+		struct rte_crypto_op *op = ev->event_ptr;
+
+		rte_free(op->asym->modex.result.data);
+		rte_crypto_op_free(op);
+	} else {
+		bufs[count++] = ev->event_ptr;
+		if (unlikely(count == buf_sz)) {
+			count = 0;
+			rte_mempool_put_bulk(pool, bufs, buf_sz);
+		}
 	}
 	return count;
 }
@@ -135,8 +145,6 @@ perf_process_last_stage_latency(struct rte_mempool *const pool,
 	uint64_t latency;
 	struct perf_elt *const m = ev->event_ptr;
 
-	bufs[count++] = ev->event_ptr;
-
 	/* release fence here ensures event_prt is
 	 * stored before updating the number of
 	 * processed packets for worker lcores
@@ -144,15 +152,23 @@ perf_process_last_stage_latency(struct rte_mempool *const pool,
 	rte_atomic_thread_fence(__ATOMIC_RELEASE);
 	w->processed_pkts++;
 
-	if (unlikely(count == buf_sz)) {
-		count = 0;
-		latency = rte_get_timer_cycles() - m->timestamp;
-		rte_mempool_put_bulk(pool, bufs, buf_sz);
+	if (ev->event_type == RTE_EVENT_TYPE_CRYPTODEV &&
+			((struct rte_crypto_op *)m)->type ==
+				RTE_CRYPTO_OP_TYPE_ASYMMETRIC) {
+		rte_free(((struct rte_crypto_op *)m)->asym->modex.result.data);
+		rte_crypto_op_free((struct rte_crypto_op *)m);
 	} else {
-		latency = rte_get_timer_cycles() - m->timestamp;
-	}
+		bufs[count++] = ev->event_ptr;
+		if (unlikely(count == buf_sz)) {
+			count = 0;
+			latency = rte_get_timer_cycles() - m->timestamp;
+			rte_mempool_put_bulk(pool, bufs, buf_sz);
+		} else {
+			latency = rte_get_timer_cycles() - m->timestamp;
+		}
 
-	w->latency += latency;
+		w->latency += latency;
+	}
 	return count;
 }
 
@@ -181,6 +197,10 @@ void perf_test_destroy(struct evt_test *test, struct evt_options *opt);
 void perf_eventdev_destroy(struct evt_test *test, struct evt_options *opt);
 void perf_cryptodev_destroy(struct evt_test *test, struct evt_options *opt);
 void perf_ethdev_destroy(struct evt_test *test, struct evt_options *opt);
+void perf_ethdev_rx_stop(struct evt_test *test, struct evt_options *opt);
 void perf_mempool_destroy(struct evt_test *test, struct evt_options *opt);
+void perf_worker_cleanup(struct rte_mempool *const pool, uint8_t dev_id,
+			 uint8_t port_id, struct rte_event events[],
+			 uint16_t nb_enq, uint16_t nb_deq);
 
 #endif /* _TEST_PERF_COMMON_ */

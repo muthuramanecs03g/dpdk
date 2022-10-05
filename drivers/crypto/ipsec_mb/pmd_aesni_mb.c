@@ -4,6 +4,11 @@
 
 #include "pmd_aesni_mb_priv.h"
 
+struct aesni_mb_op_buf_data {
+	struct rte_mbuf *m;
+	uint32_t offset;
+};
+
 /**
  * Calculate the authentication pre-computes
  *
@@ -1092,6 +1097,69 @@ set_cpu_mb_job_params(IMB_JOB *job, struct aesni_mb_session *session,
 	job->user_data = udata;
 }
 
+static int
+handle_aead_sgl_job(IMB_JOB *job, IMB_MGR *mb_mgr,
+		uint32_t *total_len,
+		struct aesni_mb_op_buf_data *src_data,
+		struct aesni_mb_op_buf_data *dst_data)
+{
+	uint32_t data_len, part_len;
+
+	if (*total_len == 0) {
+		job->sgl_state = IMB_SGL_COMPLETE;
+		return 0;
+	}
+
+	if (src_data->m == NULL) {
+		IPSEC_MB_LOG(ERR, "Invalid source buffer");
+		return -EINVAL;
+	}
+
+	job->sgl_state = IMB_SGL_UPDATE;
+
+	data_len = src_data->m->data_len - src_data->offset;
+
+	job->src = rte_pktmbuf_mtod_offset(src_data->m, uint8_t *,
+			src_data->offset);
+
+	if (dst_data->m != NULL) {
+		if (dst_data->m->data_len - dst_data->offset == 0) {
+			dst_data->m = dst_data->m->next;
+			if (dst_data->m == NULL) {
+				IPSEC_MB_LOG(ERR, "Invalid destination buffer");
+				return -EINVAL;
+			}
+			dst_data->offset = 0;
+		}
+		part_len = RTE_MIN(data_len, (dst_data->m->data_len -
+				dst_data->offset));
+		job->dst = rte_pktmbuf_mtod_offset(dst_data->m,
+				uint8_t *, dst_data->offset);
+		dst_data->offset += part_len;
+	} else {
+		part_len = RTE_MIN(data_len, *total_len);
+		job->dst = rte_pktmbuf_mtod_offset(src_data->m, uint8_t *,
+			src_data->offset);
+	}
+
+	job->msg_len_to_cipher_in_bytes = part_len;
+	job->msg_len_to_hash_in_bytes = part_len;
+
+	job = IMB_SUBMIT_JOB(mb_mgr);
+
+	*total_len -= part_len;
+
+	if (part_len != data_len) {
+		src_data->offset += part_len;
+	} else {
+		src_data->m = src_data->m->next;
+		src_data->offset = 0;
+	}
+
+	return 0;
+}
+
+
 /**
  * Process a crypto operation and complete a IMB_JOB job structure for
  * submission to the multi buffer library for processing.
@@ -1107,21 +1175,40 @@ set_cpu_mb_job_params(IMB_JOB *job, struct aesni_mb_session *session,
  */
 static inline int
 set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
-		struct rte_crypto_op *op, uint8_t *digest_idx)
+		struct rte_crypto_op *op, uint8_t *digest_idx,
+		IMB_MGR *mb_mgr)
 {
 	struct rte_mbuf *m_src = op->sym->m_src, *m_dst;
 	struct aesni_mb_qp_data *qp_data = ipsec_mb_get_qp_private_data(qp);
+	struct aesni_mb_op_buf_data src_sgl = {0};
+	struct aesni_mb_op_buf_data dst_sgl = {0};
 	struct aesni_mb_session *session;
 	uint32_t m_offset, oop;
 	uint32_t auth_off_in_bytes;
 	uint32_t ciph_off_in_bytes;
 	uint32_t auth_len_in_bytes;
 	uint32_t ciph_len_in_bytes;
+	uint32_t total_len;
+	IMB_JOB base_job;
+	uint8_t sgl = 0;
+	int ret;
 
 	session = ipsec_mb_get_session_private(qp, op);
 	if (session == NULL) {
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_SESSION;
 		return -1;
+	}
+
+	if (op->sym->m_src->nb_segs > 1) {
+		if (session->cipher.mode != IMB_CIPHER_GCM
+				&& session->cipher.mode !=
+				IMB_CIPHER_CHACHA20_POLY1305) {
+			op->status = RTE_CRYPTO_OP_STATUS_INVALID_ARGS;
+			IPSEC_MB_LOG(ERR, "Device only supports SGL for AES-GCM"
+					" or CHACHA20_POLY1305 algorithms.");
+			return -1;
+		}
+		sgl = 1;
 	}
 
 	/* Set crypto operation */
@@ -1175,6 +1262,11 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		if (session->cipher.mode == IMB_CIPHER_GCM) {
 			job->u.GCM.aad = op->sym->aead.aad.data;
 			job->u.GCM.aad_len_in_bytes = session->aead.aad_len;
+			if (sgl) {
+				job->u.GCM.ctx = &qp_data->gcm_sgl_ctx;
+				job->cipher_mode = IMB_CIPHER_GCM_SGL;
+				job->hash_alg = IMB_AUTH_GCM_SGL;
+			}
 		} else {
 			/* For GMAC */
 			job->u.GCM.aad = rte_pktmbuf_mtod_offset(m_src,
@@ -1206,6 +1298,11 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		job->u.CHACHA20_POLY1305.aad = op->sym->aead.aad.data;
 		job->u.CHACHA20_POLY1305.aad_len_in_bytes =
 			session->aead.aad_len;
+		if (sgl) {
+			job->u.CHACHA20_POLY1305.ctx = &qp_data->chacha_sgl_ctx;
+			job->cipher_mode = IMB_CIPHER_CHACHA20_POLY1305_SGL;
+			job->hash_alg = IMB_AUTH_CHACHA20_POLY1305_SGL;
+		}
 		job->enc_keys = session->cipher.expanded_aes_keys.encode;
 		job->dec_keys = session->cipher.expanded_aes_keys.encode;
 		break;
@@ -1278,8 +1375,13 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 	job->iv_len_in_bytes = session->iv.length;
 
 	/* Data Parameters */
-	job->src = rte_pktmbuf_mtod(m_src, uint8_t *);
-	job->dst = rte_pktmbuf_mtod_offset(m_dst, uint8_t *, m_offset);
+	if (sgl) {
+		job->src = NULL;
+		job->dst = NULL;
+	} else {
+		job->src = rte_pktmbuf_mtod(m_src, uint8_t *);
+		job->dst = rte_pktmbuf_mtod_offset(m_dst, uint8_t *, m_offset);
+	}
 
 	switch (job->hash_alg) {
 	case IMB_AUTH_AES_CCM:
@@ -1296,13 +1398,21 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 					op->sym->aead.data.offset;
 			job->msg_len_to_hash_in_bytes =
 					op->sym->aead.data.length;
-		} else {
-			job->msg_len_to_cipher_in_bytes = 0;
+		} else { /* AES-GMAC only, only AAD used */
 			job->msg_len_to_hash_in_bytes = 0;
+			job->hash_start_src_offset_in_bytes = 0;
 		}
 
 		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
 				session->iv.offset);
+		break;
+
+	case IMB_AUTH_GCM_SGL:
+	case IMB_AUTH_CHACHA20_POLY1305_SGL:
+		job->hash_start_src_offset_in_bytes = 0;
+		job->msg_len_to_hash_in_bytes = 0;
+		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
+			session->iv.offset);
 		break;
 
 	case IMB_AUTH_CHACHA20_POLY1305:
@@ -1310,7 +1420,6 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 			op->sym->aead.data.offset;
 		job->msg_len_to_hash_in_bytes =
 					op->sym->aead.data.length;
-
 		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
 				session->iv.offset);
 		break;
@@ -1378,12 +1487,27 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		job->msg_len_to_cipher_in_bits =
 					op->sym->cipher.data.length;
 		break;
-	case IMB_CIPHER_CCM:
 	case IMB_CIPHER_GCM:
+		if (session->cipher.mode == IMB_CIPHER_NULL) {
+			/* AES-GMAC only (only AAD used) */
+			job->msg_len_to_cipher_in_bytes = 0;
+			job->cipher_start_src_offset_in_bytes = 0;
+		} else {
+			job->cipher_start_src_offset_in_bytes =
+					op->sym->aead.data.offset;
+			job->msg_len_to_cipher_in_bytes = op->sym->aead.data.length;
+		}
+		break;
+	case IMB_CIPHER_CCM:
 	case IMB_CIPHER_CHACHA20_POLY1305:
 		job->cipher_start_src_offset_in_bytes =
 				op->sym->aead.data.offset;
 		job->msg_len_to_cipher_in_bytes = op->sym->aead.data.length;
+		break;
+	case IMB_CIPHER_GCM_SGL:
+	case IMB_CIPHER_CHACHA20_POLY1305_SGL:
+		job->msg_len_to_cipher_in_bytes = 0;
+		job->cipher_start_src_offset_in_bytes = 0;
 		break;
 	default:
 		job->cipher_start_src_offset_in_bytes =
@@ -1399,6 +1523,44 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 
 	/* Set user data to be crypto operation data struct */
 	job->user_data = op;
+
+	if (sgl) {
+		base_job = *job;
+		job->sgl_state = IMB_SGL_INIT;
+		job = IMB_SUBMIT_JOB(mb_mgr);
+		total_len = op->sym->aead.data.length;
+
+		src_sgl.m = m_src;
+		src_sgl.offset = m_offset;
+
+		while (src_sgl.offset >= src_sgl.m->data_len) {
+			src_sgl.offset -= src_sgl.m->data_len;
+			src_sgl.m = src_sgl.m->next;
+
+			RTE_ASSERT(src_sgl.m != NULL);
+		}
+
+		if (oop) {
+			dst_sgl.m = m_dst;
+			dst_sgl.offset = m_offset;
+
+			while (dst_sgl.offset >= dst_sgl.m->data_len) {
+				dst_sgl.offset -= dst_sgl.m->data_len;
+				dst_sgl.m = dst_sgl.m->next;
+
+				RTE_ASSERT(dst_sgl.m != NULL);
+			}
+		}
+
+		while (job->sgl_state != IMB_SGL_COMPLETE) {
+			job = IMB_GET_NEXT_JOB(mb_mgr);
+			*job = base_job;
+			ret = handle_aead_sgl_job(job, mb_mgr, &total_len,
+				&src_sgl, &dst_sgl);
+			if (ret < 0)
+				return ret;
+		}
+	}
 
 	return 0;
 }
@@ -1766,7 +1928,7 @@ aesni_mb_dequeue_burst(void *queue_pair, struct rte_crypto_op **ops,
 		else
 #endif
 			retval = set_mb_job_params(job, qp, op,
-				&digest_idx);
+				&digest_idx, mb_mgr);
 
 		if (unlikely(retval != 0)) {
 			qp->stats.dequeue_err_count++;

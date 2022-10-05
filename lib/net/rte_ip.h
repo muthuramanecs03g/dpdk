@@ -97,6 +97,12 @@ struct rte_ipv4_hdr {
 
 #define	RTE_IPV4_HDR_OFFSET_UNITS	8
 
+/* IPv4 options */
+#define RTE_IPV4_HDR_OPT_EOL       0
+#define RTE_IPV4_HDR_OPT_NOP       1
+#define RTE_IPV4_HDR_OPT_COPIED(v) ((v) & 0x80)
+#define RTE_IPV4_HDR_OPT_MAX_LEN   40
+
 /*
  * IPv4 address types
  */
@@ -154,18 +160,21 @@ rte_ipv4_hdr_len(const struct rte_ipv4_hdr *ipv4_hdr)
 static inline uint32_t
 __rte_raw_cksum(const void *buf, size_t len, uint32_t sum)
 {
-	/* extend strict-aliasing rules */
-	typedef uint16_t __attribute__((__may_alias__)) u16_p;
-	const u16_p *u16_buf = (const u16_p *)buf;
-	const u16_p *end = u16_buf + len / sizeof(*u16_buf);
+	const void *end;
 
-	for (; u16_buf != end; ++u16_buf)
-		sum += *u16_buf;
+	for (end = RTE_PTR_ADD(buf, RTE_ALIGN_FLOOR(len, sizeof(uint16_t)));
+	     buf != end; buf = RTE_PTR_ADD(buf, sizeof(uint16_t))) {
+		uint16_t v;
+
+		memcpy(&v, buf, sizeof(uint16_t));
+		sum += v;
+	}
 
 	/* if length is odd, keeping it byte order independent */
 	if (unlikely(len % 2)) {
 		uint16_t left = 0;
-		*(unsigned char *)&left = *(const unsigned char *)end;
+
+		memcpy(&left, end, 1);
 		sum += left;
 	}
 

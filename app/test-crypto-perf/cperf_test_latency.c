@@ -199,7 +199,13 @@ cperf_latency_test_runner(void *arg)
 					ctx->dst_buf_offset,
 					burst_size, ctx->sess, ctx->options,
 					ctx->test_vector, iv_offset,
-					&imix_idx, NULL);
+					&imix_idx, &tsc_start);
+
+			/* Populate the mbuf with the test vector */
+			for (i = 0; i < burst_size; i++)
+				cperf_mbuf_set(ops[i]->sym->m_src,
+						ctx->options,
+						ctx->test_vector);
 
 			tsc_start = rte_rdtsc_precise();
 

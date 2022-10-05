@@ -3,6 +3,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -25,6 +26,7 @@
 #define CMD_LINE_OPT_RING_SIZE "ring-size"
 #define CMD_LINE_OPT_BATCH_SIZE "dma-batch-size"
 #define CMD_LINE_OPT_FRAME_SIZE "max-frame-size"
+#define CMD_LINE_OPT_FORCE_COPY_SIZE "force-min-copy-size"
 #define CMD_LINE_OPT_STATS_INTERVAL "stats-interval"
 
 /* configurable number of RX/TX ring descriptors */
@@ -117,12 +119,12 @@ static uint16_t nb_txd = TX_DEFAULT_RINGSIZE;
 static volatile bool force_quit;
 
 static uint32_t dma_batch_sz = MAX_PKT_BURST;
-static uint32_t max_frame_size = RTE_ETHER_MAX_LEN;
+static uint32_t max_frame_size;
+static uint32_t force_min_copy_size;
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr dma_ports_eth_addr[RTE_MAX_ETHPORTS];
 
-static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
 struct rte_mempool *dma_pktmbuf_pool;
 
 /* Print out statistics for one port. */
@@ -206,7 +208,13 @@ print_stats(char *prgname)
 		"Rx Queues = %d, ", nb_queues);
 	status_strlen += snprintf(status_string + status_strlen,
 		sizeof(status_string) - status_strlen,
-		"Ring Size = %d", ring_size);
+		"Ring Size = %d\n", ring_size);
+	status_strlen += snprintf(status_string + status_strlen,
+		sizeof(status_string) - status_strlen,
+		"Force Min Copy Size = %u Packet Data Room Size = %u",
+		force_min_copy_size,
+		rte_pktmbuf_data_room_size(dma_pktmbuf_pool) -
+		RTE_PKTMBUF_HEADROOM);
 
 	memset(&ts, 0, sizeof(struct total_statistics));
 
@@ -304,7 +312,8 @@ static inline void
 pktmbuf_sw_copy(struct rte_mbuf *src, struct rte_mbuf *dst)
 {
 	rte_memcpy(rte_pktmbuf_mtod(dst, char *),
-		rte_pktmbuf_mtod(src, char *), src->data_len);
+		rte_pktmbuf_mtod(src, char *),
+		RTE_MAX(src->data_len, force_min_copy_size));
 }
 /* >8 End of perform packet copy there is a user-defined function. */
 
@@ -321,7 +330,9 @@ dma_enqueue_packets(struct rte_mbuf *pkts[], struct rte_mbuf *pkts_copy[],
 		ret = rte_dma_copy(dev_id, 0,
 			rte_pktmbuf_iova(pkts[i]),
 			rte_pktmbuf_iova(pkts_copy[i]),
-			rte_pktmbuf_data_len(pkts[i]), 0);
+			RTE_MAX(rte_pktmbuf_data_len(pkts[i]),
+				force_min_copy_size),
+			0);
 
 		if (ret < 0)
 			break;
@@ -398,8 +409,13 @@ dma_rx_port(struct rxtx_port_config *rx_config)
 		nb_rx = rte_eth_rx_burst(rx_config->rxtx_port, i,
 			pkts_burst, MAX_PKT_BURST);
 
-		if (nb_rx == 0)
+		if (nb_rx == 0) {
+			if (copy_mode == COPY_MODE_DMA_NUM &&
+				(nb_rx = dma_dequeue(pkts_burst, pkts_burst_copy,
+					MAX_PKT_BURST, rx_config->dmadev_ids[i])) > 0)
+				goto handle_tx;
 			continue;
+		}
 
 		port_statistics.rx[rx_config->rxtx_port] += nb_rx;
 
@@ -440,6 +456,7 @@ dma_rx_port(struct rxtx_port_config *rx_config)
 					pkts_burst_copy[j]);
 		}
 
+handle_tx:
 		rte_mempool_put_bulk(dma_pktmbuf_pool,
 			(void *)pkts_burst, nb_rx);
 
@@ -484,10 +501,13 @@ dma_tx_port(struct rxtx_port_config *tx_config)
 
 		port_statistics.tx[tx_config->rxtx_port] += nb_tx;
 
-		/* Free any unsent packets. */
-		if (unlikely(nb_tx < nb_dq))
+		if (unlikely(nb_tx < nb_dq)) {
+			port_statistics.tx_dropped[tx_config->rxtx_port] +=
+				(nb_dq - nb_tx);
+			/* Free any unsent packets. */
 			rte_mempool_put_bulk(dma_pktmbuf_pool,
 			(void *)&mbufs[nb_tx], nb_dq - nb_tx);
+		}
 	}
 }
 /* >8 End of transmitting packets from dmadev. */
@@ -570,6 +590,7 @@ dma_usage(const char *prgname)
 	printf("%s [EAL options] -- -p PORTMASK [-q NQ]\n"
 		"  -b --dma-batch-size: number of requests per DMA batch\n"
 		"  -f --max-frame-size: max frame size\n"
+		"  -m --force-min-copy-size: force a minimum copy length, even for smaller packets\n"
 		"  -p --portmask: hexadecimal bitmask of ports to configure\n"
 		"  -q NQ: number of RX queues per port (default is 1)\n"
 		"  --[no-]mac-updating: Enable or disable MAC addresses updating (enabled by default)\n"
@@ -615,6 +636,7 @@ dma_parse_args(int argc, char **argv, unsigned int nb_ports)
 		"b:"  /* dma batch size */
 		"c:"  /* copy type (sw|hw) */
 		"f:"  /* max frame size */
+		"m:"  /* force min copy size */
 		"p:"  /* portmask */
 		"q:"  /* number of RX queues per port */
 		"s:"  /* ring size */
@@ -630,6 +652,7 @@ dma_parse_args(int argc, char **argv, unsigned int nb_ports)
 		{CMD_LINE_OPT_RING_SIZE, required_argument, NULL, 's'},
 		{CMD_LINE_OPT_BATCH_SIZE, required_argument, NULL, 'b'},
 		{CMD_LINE_OPT_FRAME_SIZE, required_argument, NULL, 'f'},
+		{CMD_LINE_OPT_FORCE_COPY_SIZE, required_argument, NULL, 'm'},
 		{CMD_LINE_OPT_STATS_INTERVAL, required_argument, NULL, 'i'},
 		{NULL, 0, 0, 0}
 	};
@@ -662,6 +685,10 @@ dma_parse_args(int argc, char **argv, unsigned int nb_ports)
 				dma_usage(prgname);
 				return -1;
 			}
+			break;
+
+		case 'm':
+			force_min_copy_size = atoi(optarg);
 			break;
 
 		/* portmask */
@@ -851,6 +878,38 @@ assign_rings(void)
 }
 /* >8 End of assigning ring structures for packet exchanging. */
 
+static uint32_t
+eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
+{
+	uint32_t overhead_len;
+
+	if (max_mtu != UINT16_MAX && max_rx_pktlen > max_mtu)
+		overhead_len = max_rx_pktlen - max_mtu;
+	else
+		overhead_len = RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+
+	return overhead_len;
+}
+
+static int
+config_port_max_pkt_len(struct rte_eth_conf *conf,
+		struct rte_eth_dev_info *dev_info)
+{
+	uint32_t overhead_len;
+
+	if (max_frame_size == 0)
+		return 0;
+
+	if (max_frame_size < RTE_ETHER_MIN_LEN)
+		return -1;
+
+	overhead_len = eth_dev_get_overhead_len(dev_info->max_rx_pktlen,
+			dev_info->max_mtu);
+	conf->rxmode.mtu = max_frame_size - overhead_len;
+
+	return 0;
+}
+
 /*
  * Initializes a given port using global settings and with the RX buffers
  * coming from the mbuf_pool passed as a parameter.
@@ -878,9 +937,6 @@ port_init(uint16_t portid, struct rte_mempool *mbuf_pool, uint16_t nb_queues)
 	struct rte_eth_dev_info dev_info;
 	int ret, i;
 
-	if (max_frame_size > local_port_conf.rxmode.mtu)
-		local_port_conf.rxmode.mtu = max_frame_size;
-
 	/* Skip ports that are not enabled */
 	if ((dma_enabled_port_mask & (1 << portid)) == 0) {
 		printf("Skipping disabled port %u\n", portid);
@@ -894,6 +950,12 @@ port_init(uint16_t portid, struct rte_mempool *mbuf_pool, uint16_t nb_queues)
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Cannot get device info: %s, port=%u\n",
 			rte_strerror(-ret), portid);
+
+	ret = config_port_max_pkt_len(&local_port_conf, &dev_info);
+	if (ret != 0)
+		rte_exit(EXIT_FAILURE,
+			"Invalid max frame size: %u (port %u)\n",
+			max_frame_size, portid);
 
 	local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
 		dev_info.flow_type_rss_offloads;
@@ -934,25 +996,6 @@ port_init(uint16_t portid, struct rte_mempool *mbuf_pool, uint16_t nb_queues)
 		rte_exit(EXIT_FAILURE,
 			"rte_eth_tx_queue_setup:err=%d,port=%u\n",
 			ret, portid);
-
-	/* Initialize TX buffers */
-	tx_buffer[portid] = rte_zmalloc_socket("tx_buffer",
-			RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
-			rte_eth_dev_socket_id(portid));
-	if (tx_buffer[portid] == NULL)
-		rte_exit(EXIT_FAILURE,
-			"Cannot allocate buffer for tx on port %u\n",
-			portid);
-
-	rte_eth_tx_buffer_init(tx_buffer[portid], MAX_PKT_BURST);
-
-	ret = rte_eth_tx_buffer_set_err_callback(tx_buffer[portid],
-		rte_eth_tx_buffer_count_callback,
-		&port_statistics.tx_dropped[portid]);
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE,
-			"Cannot set error callback for tx buffer on port %u\n",
-			portid);
 
 	/* Start device. 8< */
 	ret = rte_eth_dev_start(portid);
@@ -1045,6 +1088,12 @@ main(int argc, char **argv)
 	if (dma_pktmbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 	/* >8 End of allocates mempool to hold the mbufs. */
+
+	if (force_min_copy_size >
+		(uint32_t)(rte_pktmbuf_data_room_size(dma_pktmbuf_pool) -
+			   RTE_PKTMBUF_HEADROOM))
+		rte_exit(EXIT_FAILURE,
+			 "Force min copy size > packet mbuf size\n");
 
 	/* Initialize each port. 8< */
 	cfg.nb_ports = 0;

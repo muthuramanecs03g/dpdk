@@ -19,7 +19,7 @@
 #include <rte_ether.h>
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 
 #include "iavf.h"
 #include "iavf_rxtx.h"
@@ -265,6 +265,11 @@ iavf_handle_pf_event_msg(struct rte_eth_dev *dev, uint8_t *msg,
 	struct virtchnl_pf_event *pf_msg =
 			(struct virtchnl_pf_event *)msg;
 
+	if (adapter->closed) {
+		PMD_DRV_LOG(DEBUG, "Port closed");
+		return;
+	}
+
 	if (msglen < sizeof(struct virtchnl_pf_event)) {
 		PMD_DRV_LOG(DEBUG, "Error event");
 		return;
@@ -497,12 +502,14 @@ iavf_get_vf_resource(struct iavf_adapter *adapter)
 		VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC |
 		VIRTCHNL_VF_OFFLOAD_FDIR_PF |
 		VIRTCHNL_VF_OFFLOAD_ADV_RSS_PF |
+		VIRTCHNL_VF_OFFLOAD_FSUB_PF |
 		VIRTCHNL_VF_OFFLOAD_REQ_QUEUES |
 		VIRTCHNL_VF_OFFLOAD_CRC |
 		VIRTCHNL_VF_OFFLOAD_VLAN_V2 |
 		VIRTCHNL_VF_LARGE_NUM_QPAIRS |
 		VIRTCHNL_VF_OFFLOAD_QOS |
-		VIRTCHNL_VF_OFFLOAD_INLINE_IPSEC_CRYPTO;
+		VIRTCHNL_VF_OFFLOAD_INLINE_IPSEC_CRYPTO |
+		VIRTCHNL_VF_CAP_PTP;
 
 	args.in_args = (uint8_t *)&caps;
 	args.in_args_size = sizeof(caps);
@@ -777,6 +784,9 @@ iavf_switch_queue(struct iavf_adapter *adapter, uint16_t qid,
 	struct iavf_cmd_info args;
 	int err;
 
+	if (adapter->closed)
+		return -EIO;
+
 	memset(&queue_select, 0, sizeof(queue_select));
 	queue_select.vsi_id = vf->vsi_res->vsi_id;
 	if (rx)
@@ -1047,16 +1057,21 @@ iavf_configure_queues(struct iavf_adapter *adapter,
 		vc_qp->rxq.crc_disable = rxq[i]->crc_len != 0 ? 1 : 0;
 #ifndef RTE_LIBRTE_IAVF_16BYTE_RX_DESC
 		if (vf->vf_res->vf_cap_flags &
-		    VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC &&
-		    vf->supported_rxdid & BIT(rxq[i]->rxdid)) {
-			vc_qp->rxq.rxdid = rxq[i]->rxdid;
-			PMD_DRV_LOG(NOTICE, "request RXDID[%d] in Queue[%d]",
-				    vc_qp->rxq.rxdid, i);
-		} else {
-			PMD_DRV_LOG(NOTICE, "RXDID[%d] is not supported, "
-				    "request default RXDID[%d] in Queue[%d]",
-				    rxq[i]->rxdid, IAVF_RXDID_LEGACY_1, i);
-			vc_qp->rxq.rxdid = IAVF_RXDID_LEGACY_1;
+		    VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC) {
+			if (vf->supported_rxdid & BIT(rxq[i]->rxdid)) {
+				vc_qp->rxq.rxdid = rxq[i]->rxdid;
+				PMD_DRV_LOG(NOTICE, "request RXDID[%d] in Queue[%d]",
+					    vc_qp->rxq.rxdid, i);
+			} else {
+				PMD_DRV_LOG(NOTICE, "RXDID[%d] is not supported, "
+					    "request default RXDID[%d] in Queue[%d]",
+					    rxq[i]->rxdid, IAVF_RXDID_LEGACY_1, i);
+				vc_qp->rxq.rxdid = IAVF_RXDID_LEGACY_1;
+			}
+
+			if (vf->vf_res->vf_cap_flags & VIRTCHNL_VF_CAP_PTP &&
+			    vf->ptp_caps & VIRTCHNL_1588_PTP_CAP_RX_TSTAMP)
+				vc_qp->rxq.flags |= VIRTCHNL_PTP_RX_TSTAMP;
 		}
 #else
 		if (vf->vf_res->vf_cap_flags &
@@ -1241,6 +1256,9 @@ iavf_query_stats(struct iavf_adapter *adapter,
 	struct iavf_cmd_info args;
 	int err;
 
+	if (adapter->closed)
+		return -EIO;
+
 	memset(&q_stats, 0, sizeof(q_stats));
 	q_stats.vsi_id = vf->vsi_res->vsi_id;
 	args.ops = VIRTCHNL_OP_GET_STATS;
@@ -1268,6 +1286,9 @@ iavf_config_promisc(struct iavf_adapter *adapter,
 	struct virtchnl_promisc_info promisc;
 	struct iavf_cmd_info args;
 	int err;
+
+	if (adapter->closed)
+		return -EIO;
 
 	promisc.flags = 0;
 	promisc.vsi_id = vf->vsi_res->vsi_id;
@@ -1311,6 +1332,9 @@ iavf_add_del_eth_addr(struct iavf_adapter *adapter, struct rte_ether_addr *addr,
 			   sizeof(struct virtchnl_ether_addr)];
 	struct iavf_cmd_info args;
 	int err;
+
+	if (adapter->closed)
+		return -EIO;
 
 	list = (struct virtchnl_ether_addr_list *)cmd_buffer;
 	list->vsi_id = vf->vsi_res->vsi_id;
@@ -1511,6 +1535,138 @@ iavf_fdir_check(struct iavf_adapter *adapter,
 }
 
 int
+iavf_flow_sub(struct iavf_adapter *adapter, struct iavf_fsub_conf *filter)
+{
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct virtchnl_flow_sub *fsub_cfg;
+	struct iavf_cmd_info args;
+	int err;
+
+	filter->sub_fltr.vsi_id = vf->vsi_res->vsi_id;
+	filter->sub_fltr.validate_only = 0;
+
+	memset(&args, 0, sizeof(args));
+	args.ops = VIRTCHNL_OP_FLOW_SUBSCRIBE;
+	args.in_args = (uint8_t *)(&filter->sub_fltr);
+	args.in_args_size = sizeof(*(&filter->sub_fltr));
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err)
+		PMD_DRV_LOG(ERR, "Failed to execute command of "
+				 "OP_FLOW_SUBSCRIBE");
+
+	fsub_cfg = (struct virtchnl_flow_sub *)args.out_buffer;
+	filter->flow_id = fsub_cfg->flow_id;
+
+	if (fsub_cfg->status == VIRTCHNL_FSUB_SUCCESS) {
+		PMD_DRV_LOG(INFO, "Succeed in adding rule request by PF");
+	} else if (fsub_cfg->status == VIRTCHNL_FSUB_FAILURE_RULE_NORESOURCE) {
+		PMD_DRV_LOG(ERR, "Failed to add rule request due to no hw "
+				 "resource");
+		err = -1;
+	} else if (fsub_cfg->status == VIRTCHNL_FSUB_FAILURE_RULE_EXIST) {
+		PMD_DRV_LOG(ERR, "Failed to add rule request due to the rule "
+				 "is already existed");
+		err = -1;
+	} else if (fsub_cfg->status == VIRTCHNL_FSUB_FAILURE_RULE_INVALID) {
+		PMD_DRV_LOG(ERR, "Failed to add rule request due to the hw "
+				 "doesn't support");
+		err = -1;
+	} else {
+		PMD_DRV_LOG(ERR, "Failed to add rule request due to other "
+				 "reasons");
+		err = -1;
+	}
+
+	return err;
+}
+
+int
+iavf_flow_unsub(struct iavf_adapter *adapter, struct iavf_fsub_conf *filter)
+{
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct virtchnl_flow_unsub *unsub_cfg;
+	struct iavf_cmd_info args;
+	int err;
+
+	filter->unsub_fltr.vsi_id = vf->vsi_res->vsi_id;
+	filter->unsub_fltr.flow_id = filter->flow_id;
+
+	memset(&args, 0, sizeof(args));
+	args.ops = VIRTCHNL_OP_FLOW_UNSUBSCRIBE;
+	args.in_args = (uint8_t *)(&filter->unsub_fltr);
+	args.in_args_size = sizeof(filter->unsub_fltr);
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err)
+		PMD_DRV_LOG(ERR, "Failed to execute command of "
+				 "OP_FLOW_UNSUBSCRIBE");
+
+	unsub_cfg = (struct virtchnl_flow_unsub *)args.out_buffer;
+
+	if (unsub_cfg->status == VIRTCHNL_FSUB_SUCCESS) {
+		PMD_DRV_LOG(INFO, "Succeed in deleting rule request by PF");
+	} else if (unsub_cfg->status == VIRTCHNL_FSUB_FAILURE_RULE_NONEXIST) {
+		PMD_DRV_LOG(ERR, "Failed to delete rule request due to this "
+				 "rule doesn't exist");
+		err = -1;
+	} else {
+		PMD_DRV_LOG(ERR, "Failed to delete rule request due to other "
+				 "reasons");
+		err = -1;
+	}
+
+	return err;
+}
+
+int
+iavf_flow_sub_check(struct iavf_adapter *adapter,
+		    struct iavf_fsub_conf *filter)
+{
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct virtchnl_flow_sub *fsub_cfg;
+
+	struct iavf_cmd_info args;
+	int err;
+
+	filter->sub_fltr.vsi_id = vf->vsi_res->vsi_id;
+	filter->sub_fltr.validate_only = 1;
+
+	args.ops = VIRTCHNL_OP_FLOW_SUBSCRIBE;
+	args.in_args = (uint8_t *)(&filter->sub_fltr);
+	args.in_args_size = sizeof(*(&filter->sub_fltr));
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err) {
+		PMD_DRV_LOG(ERR, "fail to check flow director rule");
+		return err;
+	}
+
+	fsub_cfg = (struct virtchnl_flow_sub *)args.out_buffer;
+
+	if (fsub_cfg->status == VIRTCHNL_FSUB_SUCCESS) {
+		PMD_DRV_LOG(INFO, "Succeed in checking rule request by PF");
+	} else if (fsub_cfg->status == VIRTCHNL_FSUB_FAILURE_RULE_INVALID) {
+		PMD_DRV_LOG(ERR, "Failed to check rule request due to "
+				 "parameters validation or HW doesn't "
+				 "support");
+		err = -1;
+	} else {
+		PMD_DRV_LOG(ERR, "Failed to check rule request due to other "
+				 "reasons");
+		err = -1;
+	}
+
+	return err;
+}
+
+int
 iavf_add_del_rss_cfg(struct iavf_adapter *adapter,
 		     struct virtchnl_rss_cfg *rss_cfg, bool add)
 {
@@ -1633,6 +1789,29 @@ int iavf_set_q_tc_map(struct rte_eth_dev *dev,
 	if (err)
 		PMD_DRV_LOG(ERR, "Failed to execute command of"
 			    " VIRTCHNL_OP_CONFIG_TC_MAP");
+	return err;
+}
+
+int iavf_set_q_bw(struct rte_eth_dev *dev,
+		struct virtchnl_queues_bw_cfg *q_bw, uint16_t size)
+{
+	struct iavf_adapter *adapter =
+			IAVF_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(dev->data->dev_private);
+	struct iavf_cmd_info args;
+	int err;
+
+	memset(&args, 0, sizeof(args));
+	args.ops = VIRTCHNL_OP_CONFIG_QUEUE_BW;
+	args.in_args = (uint8_t *)q_bw;
+	args.in_args_size = size;
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err)
+		PMD_DRV_LOG(ERR, "Failed to execute command of"
+			    " VIRTCHNL_OP_CONFIG_QUEUE_BW");
 	return err;
 }
 
@@ -1804,4 +1983,93 @@ iavf_ipsec_crypto_request(struct iavf_adapter *adapter,
 	memcpy(resp_msg, args.out_buffer, resp_msg_len);
 
 	return 0;
+}
+
+int
+iavf_set_vf_quanta_size(struct iavf_adapter *adapter, u16 start_queue_id, u16 num_queues)
+{
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct iavf_cmd_info args;
+	struct virtchnl_quanta_cfg q_quanta;
+	int err;
+
+	if (adapter->devargs.quanta_size == 0)
+		return 0;
+
+	q_quanta.quanta_size = adapter->devargs.quanta_size;
+	q_quanta.queue_select.type = VIRTCHNL_QUEUE_TYPE_TX;
+	q_quanta.queue_select.start_queue_id = start_queue_id;
+	q_quanta.queue_select.num_queues = num_queues;
+
+	args.ops = VIRTCHNL_OP_CONFIG_QUANTA;
+	args.in_args = (uint8_t *)&q_quanta;
+	args.in_args_size = sizeof(q_quanta);
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err) {
+		PMD_DRV_LOG(ERR, "Failed to execute command VIRTCHNL_OP_CONFIG_QUANTA");
+		return err;
+	}
+
+	return 0;
+}
+
+int
+iavf_get_ptp_cap(struct iavf_adapter *adapter)
+{
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct virtchnl_ptp_caps ptp_caps;
+	struct iavf_cmd_info args;
+	int err;
+
+	ptp_caps.caps = VIRTCHNL_1588_PTP_CAP_RX_TSTAMP |
+			VIRTCHNL_1588_PTP_CAP_READ_PHC;
+
+	args.ops = VIRTCHNL_OP_1588_PTP_GET_CAPS;
+	args.in_args = (uint8_t *)&ptp_caps;
+	args.in_args_size = sizeof(ptp_caps);
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err) {
+		PMD_DRV_LOG(ERR,
+			    "Failed to execute command of OP_1588_PTP_GET_CAPS");
+		return err;
+	}
+
+	vf->ptp_caps = ((struct virtchnl_ptp_caps *)args.out_buffer)->caps;
+
+	return 0;
+}
+
+int
+iavf_get_phc_time(struct iavf_rx_queue *rxq)
+{
+	struct iavf_adapter *adapter = rxq->vsi->adapter;
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(adapter);
+	struct virtchnl_phc_time phc_time;
+	struct iavf_cmd_info args;
+	int err = 0;
+
+	args.ops = VIRTCHNL_OP_1588_PTP_GET_TIME;
+	args.in_args = (uint8_t *)&phc_time;
+	args.in_args_size = sizeof(phc_time);
+	args.out_buffer = vf->aq_resp;
+	args.out_size = IAVF_AQ_BUF_SZ;
+
+	rte_spinlock_lock(&vf->phc_time_aq_lock);
+	err = iavf_execute_vf_cmd(adapter, &args, 0);
+	if (err) {
+		PMD_DRV_LOG(ERR,
+			    "Failed to execute command of VIRTCHNL_OP_1588_PTP_GET_TIME");
+		goto out;
+	}
+	rxq->phc_time = ((struct virtchnl_phc_time *)args.out_buffer)->time;
+
+out:
+	rte_spinlock_unlock(&vf->phc_time_aq_lock);
+	return err;
 }

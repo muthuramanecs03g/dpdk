@@ -116,7 +116,7 @@ struct mbox_msghdr {
 	  msg_rsp)                                                             \
 	M(SSO_GRP_GET_PRIORITY, 0x606, sso_grp_get_priority, sso_info_req,     \
 	  sso_grp_priority)                                                    \
-	M(SSO_WS_CACHE_INV, 0x607, sso_ws_cache_inv, msg_req, msg_rsp)         \
+	M(SSO_WS_CACHE_INV, 0x607, sso_ws_cache_inv, ssow_lf_inv_req, msg_rsp) \
 	M(SSO_GRP_QOS_CONFIG, 0x608, sso_grp_qos_config, sso_grp_qos_cfg,      \
 	  msg_rsp)                                                             \
 	M(SSO_GRP_GET_STATS, 0x609, sso_grp_get_stats, sso_info_req,           \
@@ -125,6 +125,9 @@ struct mbox_msghdr {
 	  sso_hws_stats)                                                       \
 	M(SSO_HW_RELEASE_XAQ, 0x611, sso_hw_release_xaq_aura,                  \
 	  sso_hw_xaq_release, msg_rsp)                                         \
+	M(SSO_CONFIG_LSW, 0x612, ssow_config_lsw, ssow_config_lsw, msg_rsp)    \
+	M(SSO_HWS_CHNG_MSHIP, 0x613, ssow_chng_mship, ssow_chng_mship,         \
+	  msg_rsp)                                                             \
 	/* TIM mbox IDs (range 0x800 - 0x9FF) */                               \
 	M(TIM_LF_ALLOC, 0x800, tim_lf_alloc, tim_lf_alloc_req,                 \
 	  tim_lf_alloc_rsp)                                                    \
@@ -259,7 +262,12 @@ struct mbox_msghdr {
 	M(NIX_CPT_BP_ENABLE, 0x8020, nix_cpt_bp_enable, nix_bp_cfg_req,        \
 	  nix_bp_cfg_rsp)                                                      \
 	M(NIX_CPT_BP_DISABLE, 0x8021, nix_cpt_bp_disable, nix_bp_cfg_req,      \
-	  msg_rsp)
+	  msg_rsp)                                                             \
+	M(NIX_RX_SW_SYNC, 0x8022, nix_rx_sw_sync, msg_req, msg_rsp)            \
+	M(NIX_READ_INLINE_IPSEC_CFG, 0x8023, nix_read_inline_ipsec_cfg,        \
+	  msg_req, nix_inline_ipsec_cfg)				       \
+	M(NIX_LF_INLINE_RQ_CFG, 0x8024, nix_lf_inline_rq_cfg,                  \
+	  nix_rq_cpt_field_mask_cfg_req, msg_rsp)
 
 /* Messages initiated by AF (range 0xC00 - 0xDFF) */
 #define MBOX_UP_CGX_MESSAGES                                                   \
@@ -773,7 +781,7 @@ struct nix_lf_alloc_req {
 	uint64_t __io way_mask;
 #define NIX_LF_RSS_TAG_LSB_AS_ADDER BIT_ULL(0)
 #define NIX_LF_LBK_BLK_SEL	    BIT_ULL(1)
-	uint64_t flags;
+	uint64_t __io flags;
 };
 
 struct nix_lf_alloc_rsp {
@@ -794,7 +802,7 @@ struct nix_lf_alloc_rsp {
 	uint8_t __io cgx_links;	      /* No. of CGX links present in HW */
 	uint8_t __io lbk_links;	      /* No. of LBK links present in HW */
 	uint8_t __io sdp_links;	      /* No. of SDP links present in HW */
-	uint8_t tx_link;	      /* Transmit channel link number */
+	uint8_t __io tx_link;	      /* Transmit channel link number */
 };
 
 struct nix_lf_free_req {
@@ -1082,6 +1090,25 @@ struct nix_mark_format_cfg_rsp {
 	uint8_t __io mark_format_idx;
 };
 
+struct nix_rq_cpt_field_mask_cfg_req {
+	struct mbox_msghdr hdr;
+#define RQ_CTX_MASK_MAX 6
+	union {
+		uint64_t __io rq_ctx_word_set[RQ_CTX_MASK_MAX];
+		struct nix_cn10k_rq_ctx_s rq_set;
+	};
+	union {
+		uint64_t __io rq_ctx_word_mask[RQ_CTX_MASK_MAX];
+		struct nix_cn10k_rq_ctx_s rq_mask;
+	};
+	struct nix_lf_rx_ipec_cfg1_req {
+		uint32_t __io spb_cpt_aura;
+		uint8_t __io rq_mask_enable;
+		uint8_t __io spb_cpt_sizem1;
+		uint8_t __io spb_cpt_enable;
+	} ipsec_cfg1;
+};
+
 struct nix_lso_format_cfg {
 	struct mbox_msghdr hdr;
 	uint64_t __io field_mask;
@@ -1157,7 +1184,9 @@ struct nix_inline_ipsec_cfg {
 	uint32_t __io cpt_credit;
 	struct {
 		uint8_t __io egrp;
-		uint8_t __io opcode;
+		uint16_t __io opcode;
+		uint16_t __io param1;
+		uint16_t __io param2;
 	} gen_cfg;
 	struct {
 		uint16_t __io cpt_pf_func;
@@ -1268,6 +1297,33 @@ struct ssow_lf_free_req {
 	uint16_t __io hws;
 };
 
+#define SSOW_INVAL_SELECTIVE_VER 0x1000
+struct ssow_lf_inv_req {
+	struct mbox_msghdr hdr;
+	uint16_t __io nb_hws;		      /* Number of HWS to invalidate*/
+	uint16_t __io hws[MAX_RVU_BLKLF_CNT]; /* Array of HWS */
+};
+
+struct ssow_config_lsw {
+	struct mbox_msghdr hdr;
+#define SSOW_LSW_DIS	 0
+#define SSOW_LSW_GW_WAIT 1
+#define SSOW_LSW_GW_IMM	 2
+	uint8_t __io lsw_mode;
+#define SSOW_WQE_REL_LSW_WAIT 0
+#define SSOW_WQE_REL_IMM      1
+	uint8_t __io wqe_release;
+};
+
+struct ssow_chng_mship {
+	struct mbox_msghdr hdr;
+	uint8_t __io set;	 /* Membership set to modify. */
+	uint8_t __io enable;	 /* Enable/Disable the hwgrps. */
+	uint8_t __io hws;	 /* HWS to modify. */
+	uint16_t __io nb_hwgrps; /* Number of hwgrps in the array */
+	uint16_t __io hwgrps[MAX_RVU_BLKLF_CNT]; /* Array of hwgrps. */
+};
+
 struct sso_hw_setconfig {
 	struct mbox_msghdr hdr;
 	uint32_t __io npa_aura_id;
@@ -1299,7 +1355,7 @@ struct sso_grp_priority {
 struct sso_grp_qos_cfg {
 	struct mbox_msghdr hdr;
 	uint16_t __io grp;
-	uint32_t __io xaq_limit;
+	uint32_t __io rsvd;
 	uint16_t __io taq_thr;
 	uint16_t __io iaq_thr;
 };
@@ -1422,11 +1478,11 @@ struct cpt_sts_rsp {
 struct cpt_rxc_time_cfg_req {
 	struct mbox_msghdr hdr;
 	int blkaddr;
-	uint32_t step;
-	uint16_t zombie_thres;
-	uint16_t zombie_limit;
-	uint16_t active_thres;
-	uint16_t active_limit;
+	uint32_t __io step;
+	uint16_t __io zombie_thres;
+	uint16_t __io zombie_limit;
+	uint16_t __io active_thres;
+	uint16_t __io active_limit;
 };
 
 struct cpt_rx_inline_lf_cfg_msg {
@@ -1434,7 +1490,9 @@ struct cpt_rx_inline_lf_cfg_msg {
 	uint16_t __io sso_pf_func;
 	uint16_t __io param1;
 	uint16_t __io param2;
-	uint16_t __io reserved;
+	uint16_t __io opcode;
+	uint32_t __io credit;
+	uint32_t __io reserved;
 };
 
 enum cpt_eng_type {

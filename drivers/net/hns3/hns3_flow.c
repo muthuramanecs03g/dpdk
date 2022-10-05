@@ -10,15 +10,6 @@
 #include "hns3_logs.h"
 #include "hns3_flow.h"
 
-/* Default default keys */
-static uint8_t hns3_hash_key[] = {
-	0x6D, 0x5A, 0x56, 0xDA, 0x25, 0x5B, 0x0E, 0xC2,
-	0x41, 0x67, 0x25, 0x3D, 0x43, 0xA3, 0x8F, 0xB0,
-	0xD0, 0xCA, 0x2B, 0xCB, 0xAE, 0x7B, 0x30, 0xB4,
-	0x77, 0xCB, 0x2D, 0xA3, 0x80, 0x30, 0xF2, 0x0C,
-	0x6A, 0x42, 0xB7, 0x3B, 0xBE, 0xAC, 0x01, 0xFA
-};
-
 static const uint8_t full_mask[VNI_OR_TNI_LEN] = { 0xFF, 0xFF, 0xFF };
 static const uint8_t zero_mask[VNI_OR_TNI_LEN] = { 0x00, 0x00, 0x00 };
 
@@ -173,13 +164,13 @@ hns3_counter_new(struct rte_eth_dev *dev, uint32_t indirect, uint32_t id,
 				"Counter id is used, indirect flag not match");
 		/* Clear the indirect counter on first use. */
 		if (cnt->indirect && cnt->ref_cnt == 1)
-			(void)hns3_get_count(hw, id, &value);
+			(void)hns3_fd_get_count(hw, id, &value);
 		cnt->ref_cnt++;
 		return 0;
 	}
 
 	/* Clear the counter by read ops because the counter is read-clear */
-	ret = hns3_get_count(hw, id, &value);
+	ret = hns3_fd_get_count(hw, id, &value);
 	if (ret)
 		return rte_flow_error_set(error, EIO,
 					  RTE_FLOW_ERROR_TYPE_HANDLE, NULL,
@@ -219,7 +210,7 @@ hns3_counter_query(struct rte_eth_dev *dev, struct rte_flow *flow,
 					  RTE_FLOW_ERROR_TYPE_HANDLE, NULL,
 					  "Can't find counter id");
 
-	ret = hns3_get_count(&hns->hw, flow->counter_id, &value);
+	ret = hns3_fd_get_count(&hns->hw, flow->counter_id, &value);
 	if (ret) {
 		rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_HANDLE,
 				   NULL, "Read counter fail.");
@@ -294,9 +285,8 @@ hns3_handle_action_queue(struct rte_eth_dev *dev,
 
 	queue = (const struct rte_flow_action_queue *)action->conf;
 	if (queue->index >= hw->data->nb_rx_queues) {
-		hns3_err(hw, "queue ID(%u) is greater than number of "
-			  "available queue (%u) in driver.",
-			  queue->index, hw->data->nb_rx_queues);
+		hns3_err(hw, "queue ID(%u) is greater than number of available queue (%u) in driver.",
+			 queue->index, hw->data->nb_rx_queues);
 		return rte_flow_error_set(error, EINVAL,
 					  RTE_FLOW_ERROR_TYPE_ACTION_CONF,
 					  action, "Invalid queue ID in PF");
@@ -1446,14 +1436,9 @@ hns3_disable_rss(struct hns3_hw *hw)
 {
 	int ret;
 
-	/* Redirected the redirection table to queue 0 */
-	ret = hns3_rss_reset_indir_table(hw);
+	ret = hns3_set_rss_tuple_by_rss_hf(hw, 0);
 	if (ret)
 		return ret;
-
-	/* Disable RSS */
-	hw->rss_info.conf.types = 0;
-	hw->rss_dis_flag = true;
 
 	return 0;
 }
@@ -1500,7 +1485,6 @@ hns3_parse_rss_algorithm(struct hns3_hw *hw, enum rte_eth_hash_function *func,
 static int
 hns3_hw_rss_hash_set(struct hns3_hw *hw, struct rte_flow_action_rss *rss_config)
 {
-	struct hns3_rss_tuple_cfg *tuple;
 	int ret;
 
 	hns3_adjust_rss_key(hw, rss_config);
@@ -1516,8 +1500,7 @@ hns3_hw_rss_hash_set(struct hns3_hw *hw, struct rte_flow_action_rss *rss_config)
 
 	hw->rss_info.conf.func = rss_config->func;
 
-	tuple = &hw->rss_info.rss_tuple_sets;
-	ret = hns3_set_rss_tuple_by_rss_hf(hw, tuple, rss_config->types);
+	ret = hns3_set_rss_tuple_by_rss_hf(hw, rss_config->types);
 	if (ret)
 		hns3_err(hw, "Update RSS tuples by rss hf failed %d", ret);
 
@@ -1672,9 +1655,8 @@ hns3_clear_rss_filter(struct rte_eth_dev *dev)
 	}
 
 	if (rss_rule_fail_cnt) {
-		hns3_err(hw, "fail to delete all RSS filters, success num = %d "
-			     "fail num = %d", rss_rule_succ_cnt,
-			     rss_rule_fail_cnt);
+		hns3_err(hw, "fail to delete all RSS filters, success num = %d fail num = %d",
+			 rss_rule_succ_cnt, rss_rule_fail_cnt);
 		ret = -EIO;
 	}
 

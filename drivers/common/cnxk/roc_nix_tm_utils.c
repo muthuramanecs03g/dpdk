@@ -478,7 +478,7 @@ nix_tm_child_res_valid(struct nix_tm_node_list *list,
 }
 
 uint8_t
-nix_tm_tl1_default_prep(uint32_t schq, volatile uint64_t *reg,
+nix_tm_tl1_default_prep(struct nix *nix, uint32_t schq, volatile uint64_t *reg,
 			volatile uint64_t *regval)
 {
 	uint8_t k = 0;
@@ -496,7 +496,7 @@ nix_tm_tl1_default_prep(uint32_t schq, volatile uint64_t *reg,
 	k++;
 
 	reg[k] = NIX_AF_TL1X_TOPOLOGY(schq);
-	regval[k] = (NIX_TM_TL1_DFLT_RR_PRIO << 1);
+	regval[k] = (nix->tm_aggr_lvl_rr_prio << 1);
 	k++;
 
 	reg[k] = NIX_AF_TL1X_CIR(schq);
@@ -540,7 +540,7 @@ nix_tm_topology_reg_prep(struct nix *nix, struct nix_tm_node *node,
 	 * Static Priority is disabled
 	 */
 	if (hw_lvl == NIX_TXSCH_LVL_TL1 && nix->tm_flags & NIX_TM_TL1_NO_SP) {
-		rr_prio = NIX_TM_TL1_DFLT_RR_PRIO;
+		rr_prio = nix->tm_aggr_lvl_rr_prio;
 		child = 0;
 	}
 
@@ -662,7 +662,7 @@ nix_tm_sched_reg_prep(struct nix *nix, struct nix_tm_node *node,
 	 */
 	if (hw_lvl == NIX_TXSCH_LVL_TL2 &&
 	    (!nix_tm_have_tl1_access(nix) || nix->tm_flags & NIX_TM_TL1_NO_SP))
-		strict_prio = NIX_TM_TL1_DFLT_RR_PRIO;
+		strict_prio = nix->tm_aggr_lvl_rr_prio;
 
 	plt_tm_dbg("Schedule config node %s(%u) lvl %u id %u, "
 		   "prio 0x%" PRIx64 ", rr_quantum/rr_wt 0x%" PRIx64 " (%p)",
@@ -1236,11 +1236,14 @@ roc_nix_tm_shaper_default_red_algo(struct roc_nix_tm_node *node,
 	struct nix_tm_shaper_profile *profile;
 	struct nix_tm_shaper_data cir, pir;
 
+	if (!roc_prof)
+		return;
+
 	profile = (struct nix_tm_shaper_profile *)roc_prof->reserved;
-	tm_node->red_algo = NIX_REDALG_STD;
+	tm_node->red_algo = roc_prof->red_algo;
 
 	/* C0 doesn't support STALL when both PIR & CIR are enabled */
-	if (profile && roc_model_is_cn96_cx()) {
+	if (roc_model_is_cn96_cx()) {
 		nix_tm_shaper_conf_get(profile, &cir, &pir);
 
 		if (pir.rate && cir.rate)

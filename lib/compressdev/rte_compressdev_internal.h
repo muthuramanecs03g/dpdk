@@ -22,7 +22,7 @@ extern "C" {
 /* Logging Macros */
 extern int compressdev_logtype;
 #define COMPRESSDEV_LOG(level, fmt, args...) \
-	rte_log(RTE_LOG_ ## level, compressdev_logtype, "%s(): "fmt "\n", \
+	rte_log(RTE_LOG_ ## level, compressdev_logtype, "%s(): " fmt "\n", \
 			__func__, ##args)
 
 /**
@@ -98,7 +98,7 @@ struct rte_compressdev {
 struct rte_compressdev_data {
 	uint8_t dev_id;
 	/**< Compress device identifier */
-	uint8_t socket_id;
+	int socket_id;
 	/**< Socket identifier where memory is allocated */
 	char name[RTE_COMPRESSDEV_NAME_MAX_LEN];
 	/**< Unique identifier name */

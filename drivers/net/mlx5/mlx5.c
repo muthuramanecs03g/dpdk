@@ -9,11 +9,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #include <rte_malloc.h>
 #include <ethdev_driver.h>
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_common.h>
 #include <rte_kvargs.h>
 #include <rte_rwlock.h>
@@ -22,6 +23,7 @@
 #include <rte_eal_paging.h>
 #include <rte_alarm.h>
 #include <rte_cycles.h>
+#include <rte_interrupts.h>
 
 #include <mlx5_glue.h>
 #include <mlx5_devx_cmds.h>
@@ -686,10 +688,14 @@ mlx5_aso_flow_mtrs_mng_close(struct mlx5_dev_ctx_shared *sh)
 #ifdef HAVE_MLX5_DR_CREATE_ACTION_ASO
 			for (i = 0; i < MLX5_ASO_MTRS_PER_POOL; i++) {
 				aso_mtr = &mtr_pool->mtrs[i];
-				if (aso_mtr->fm.meter_action)
+				if (aso_mtr->fm.meter_action_g)
 					claim_zero
 					(mlx5_glue->destroy_flow_action
-					(aso_mtr->fm.meter_action));
+					(aso_mtr->fm.meter_action_g));
+				if (aso_mtr->fm.meter_action_y)
+					claim_zero
+					(mlx5_glue->destroy_flow_action
+					(aso_mtr->fm.meter_action_y));
 			}
 #endif /* HAVE_MLX5_DR_CREATE_ACTION_ASO */
 			claim_zero(mlx5_devx_cmd_destroy
@@ -1298,6 +1304,11 @@ mlx5_shared_dev_ctx_args_config(struct mlx5_dev_ctx_shared *sh,
 		DRV_LOG(DEBUG, "E-Switch DV flow is not supported.");
 		config->dv_esw_en = 0;
 	}
+	if (config->dv_esw_en && !config->dv_flow_en) {
+		DRV_LOG(DEBUG,
+			"E-Switch DV flow is supported only when DV flow is enabled.");
+		config->dv_esw_en = 0;
+	}
 	if (config->dv_miss_info && config->dv_esw_en)
 		config->dv_xmeta_en = MLX5_XMETA_MODE_META16;
 	if (!config->dv_esw_en &&
@@ -1315,6 +1326,15 @@ mlx5_shared_dev_ctx_args_config(struct mlx5_dev_ctx_shared *sh,
 	if (!config->tx_pp && config->tx_skew) {
 		DRV_LOG(WARNING,
 			"\"tx_skew\" doesn't affect without \"tx_pp\".");
+	}
+	/* Check for LRO support. */
+	if (mlx5_devx_obj_ops_en(sh) && sh->cdev->config.hca_attr.lro_cap) {
+		/* TBD check tunnel lro caps. */
+		config->lro_allowed = 1;
+		DRV_LOG(DEBUG, "LRO is allowed.");
+		DRV_LOG(DEBUG,
+			"LRO minimal size of TCP segment required for coalescing is %d bytes.",
+			sh->cdev->config.hca_attr.lro_min_mss_size);
 	}
 	/*
 	 * If HW has bug working with tunnel packet decapsulation and scatter
@@ -1457,6 +1477,7 @@ mlx5_alloc_shared_dev_ctx(const struct mlx5_dev_spawn_data *spawn,
 	for (i = 0; i < sh->max_port; i++) {
 		sh->port[i].ih_port_id = RTE_MAX_ETHPORTS;
 		sh->port[i].devx_ih_port_id = RTE_MAX_ETHPORTS;
+		sh->port[i].nl_ih_port_id = RTE_MAX_ETHPORTS;
 	}
 	if (sh->cdev->config.devx) {
 		sh->td = mlx5_devx_cmd_create_td(sh->cdev->ctx);
@@ -1512,6 +1533,69 @@ error:
 	mlx5_free(sh);
 	rte_errno = err;
 	return NULL;
+}
+
+/**
+ * Create LWM event_channel and interrupt handle for shared device
+ * context. All rxqs sharing the device context share the event_channel.
+ * A callback is registered in interrupt thread to receive the LWM event.
+ *
+ * @param[in] priv
+ *   Pointer to mlx5_priv instance.
+ *
+ * @return
+ *   0 on success, negative with rte_errno set.
+ */
+int
+mlx5_lwm_setup(struct mlx5_priv *priv)
+{
+	int fd_lwm;
+
+	pthread_mutex_init(&priv->sh->lwm_config_lock, NULL);
+	priv->sh->devx_channel_lwm = mlx5_os_devx_create_event_channel
+			(priv->sh->cdev->ctx,
+			 MLX5DV_DEVX_CREATE_EVENT_CHANNEL_FLAGS_OMIT_EV_DATA);
+	if (!priv->sh->devx_channel_lwm)
+		goto err;
+	fd_lwm = mlx5_os_get_devx_channel_fd(priv->sh->devx_channel_lwm);
+	priv->sh->intr_handle_lwm = mlx5_os_interrupt_handler_create
+		(RTE_INTR_INSTANCE_F_SHARED, true,
+		 fd_lwm, mlx5_dev_interrupt_handler_lwm, priv);
+	if (!priv->sh->intr_handle_lwm)
+		goto err;
+	return 0;
+err:
+	if (priv->sh->devx_channel_lwm) {
+		mlx5_os_devx_destroy_event_channel
+			(priv->sh->devx_channel_lwm);
+		priv->sh->devx_channel_lwm = NULL;
+	}
+	pthread_mutex_destroy(&priv->sh->lwm_config_lock);
+	return -rte_errno;
+}
+
+/**
+ * Destroy LWM event_channel and interrupt handle for shared device
+ * context before free this context. The interrupt handler is also
+ * unregistered.
+ *
+ * @param[in] sh
+ *   Pointer to shared device context.
+ */
+void
+mlx5_lwm_unset(struct mlx5_dev_ctx_shared *sh)
+{
+	if (sh->intr_handle_lwm) {
+		mlx5_os_interrupt_handler_destroy(sh->intr_handle_lwm,
+			mlx5_dev_interrupt_handler_lwm, (void *)-1);
+		sh->intr_handle_lwm = NULL;
+	}
+	if (sh->devx_channel_lwm) {
+		mlx5_os_devx_destroy_event_channel
+			(sh->devx_channel_lwm);
+		sh->devx_channel_lwm = NULL;
+	}
+	pthread_mutex_destroy(&sh->lwm_config_lock);
 }
 
 /**
@@ -1591,6 +1675,7 @@ mlx5_free_shared_dev_ctx(struct mlx5_dev_ctx_shared *sh)
 		claim_zero(mlx5_devx_cmd_destroy(sh->td));
 	MLX5_ASSERT(sh->geneve_tlv_option_resource == NULL);
 	pthread_mutex_destroy(&sh->txpp.mutex);
+	mlx5_lwm_unset(sh);
 	mlx5_free(sh);
 	return;
 exit:
@@ -1995,6 +2080,8 @@ const struct eth_dev_ops mlx5_dev_ops = {
 	.dev_supported_ptypes_get = mlx5_dev_supported_ptypes_get,
 	.vlan_filter_set = mlx5_vlan_filter_set,
 	.rx_queue_setup = mlx5_rx_queue_setup,
+	.rx_queue_avail_thresh_set = mlx5_rx_queue_lwm_set,
+	.rx_queue_avail_thresh_query = mlx5_rx_queue_lwm_query,
 	.rx_hairpin_queue_setup = mlx5_rx_hairpin_queue_setup,
 	.tx_queue_setup = mlx5_tx_queue_setup,
 	.tx_hairpin_queue_setup = mlx5_tx_hairpin_queue_setup,
@@ -2314,10 +2401,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 		config->mps == MLX5_MPW_ENHANCED ? "enhanced " :
 		config->mps == MLX5_MPW ? "legacy " : "",
 		config->mps != MLX5_MPW_DISABLED ? "enabled" : "disabled");
-	/* LRO is supported only when DV flow enabled. */
-	if (dev_cap->lro_supported && !priv->sh->config.dv_flow_en)
-		dev_cap->lro_supported = 0;
-	if (dev_cap->lro_supported) {
+	if (priv->sh->config.lro_allowed) {
 		/*
 		 * If LRO timeout is not configured by application,
 		 * use the minimal supported value.

@@ -9,6 +9,7 @@
 
 #include <rte_byteorder.h>
 #include <rte_crypto.h>
+#include <rte_ip_frag.h>
 #include <rte_security.h>
 #include <rte_flow.h>
 #include <rte_ipsec.h>
@@ -36,6 +37,13 @@
 #define IPSEC_XFORM_MAX 2
 
 #define IP6_VERSION (6)
+
+#define SATP_OUT_IPV4(t)	\
+	((((t) & RTE_IPSEC_SATP_MODE_MASK) == RTE_IPSEC_SATP_MODE_TRANS && \
+	(((t) & RTE_IPSEC_SATP_IPV_MASK) == RTE_IPSEC_SATP_IPV4)) || \
+	((t) & RTE_IPSEC_SATP_MODE_MASK) == RTE_IPSEC_SATP_MODE_TUNLV4)
+
+#define BAD_PORT	((uint16_t)-1)
 
 struct rte_crypto_xform;
 struct ipsec_xform;
@@ -106,7 +114,7 @@ ipsec_mask_saptr(void *ptr)
 struct ipsec_sa {
 	struct rte_ipsec_session sessions[IPSEC_SESSION_MAX];
 	uint32_t spi;
-	uint32_t cdev_id_qp;
+	struct cdev_qp *cqp[RTE_MAX_LCORE];
 	uint64_t seq;
 	uint32_t salt;
 	uint32_t fallback_sessions;
@@ -224,12 +232,11 @@ struct ipsec_ctx {
 	uint16_t nb_qps;
 	uint16_t last_qp;
 	struct cdev_qp tbl[MAX_QP_PER_LCORE];
-	struct rte_mempool *session_pool;
-	struct rte_mempool *session_priv_pool;
 	struct rte_mbuf *ol_pkts[MAX_PKT_BURST] __rte_aligned(sizeof(void *));
 	uint16_t ol_pkts_cnt;
 	uint64_t ipv4_offloads;
 	uint64_t ipv6_offloads;
+	uint32_t lcore_id;
 };
 
 struct cdev_key {
@@ -259,6 +266,35 @@ struct cnt_blk {
 	uint64_t iv;
 	uint32_t cnt;
 } __rte_packed;
+
+struct lcore_rx_queue {
+	uint16_t port_id;
+	uint8_t queue_id;
+	struct rte_security_ctx *sec_ctx;
+} __rte_cache_aligned;
+
+struct buffer {
+	uint16_t len;
+	struct rte_mbuf *m_table[MAX_PKT_BURST] __rte_aligned(sizeof(void *));
+};
+
+struct lcore_conf {
+	uint16_t nb_rx_queue;
+	struct lcore_rx_queue rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
+	uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
+	struct buffer tx_mbufs[RTE_MAX_ETHPORTS];
+	struct ipsec_ctx inbound;
+	struct ipsec_ctx outbound;
+	struct rt_ctx *rt4_ctx;
+	struct rt_ctx *rt6_ctx;
+	struct {
+		struct rte_ip_frag_tbl *tbl;
+		struct rte_mempool *pool_indir;
+		struct rte_ip_frag_death_row dr;
+	} frag;
+} __rte_cache_aligned;
+
+extern struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
 /* Socket ctx */
 extern struct socket_ctx socket_ctx[NB_SOCKETS];
@@ -389,7 +425,8 @@ int
 sa_spi_present(struct sa_ctx *sa_ctx, uint32_t spi, int inbound);
 
 void
-sa_init(struct socket_ctx *ctx, int32_t socket_id);
+sa_init(struct socket_ctx *ctx, int32_t socket_id,
+		struct lcore_conf *lcore_conf);
 
 void
 rt_init(struct socket_ctx *ctx, int32_t socket_id);
@@ -405,8 +442,9 @@ void
 enqueue_cop_burst(struct cdev_qp *cqp);
 
 int
-create_lookaside_session(struct ipsec_ctx *ipsec_ctx, struct ipsec_sa *sa,
-		struct rte_ipsec_session *ips);
+create_lookaside_session(struct ipsec_ctx *ipsec_ctx[],
+	struct socket_ctx *skt_ctx, struct ipsec_sa *sa,
+	struct rte_ipsec_session *ips);
 
 int
 create_inline_session(struct socket_ctx *skt_ctx, struct ipsec_sa *sa,

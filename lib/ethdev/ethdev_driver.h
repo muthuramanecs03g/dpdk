@@ -19,6 +19,7 @@ extern "C" {
  *
  */
 
+#include <dev_driver.h>
 #include <rte_ethdev.h>
 
 /**
@@ -1074,6 +1075,26 @@ typedef int (*eth_ip_reassembly_conf_set_t)(struct rte_eth_dev *dev,
 typedef int (*eth_dev_priv_dump_t)(struct rte_eth_dev *dev, FILE *file);
 
 /**
+ * @internal Set Rx queue available descriptors threshold.
+ * @see rte_eth_rx_avail_thresh_set()
+ *
+ * Driver should round down number of descriptors on conversion from
+ * percentage.
+ */
+typedef int (*eth_rx_queue_avail_thresh_set_t)(struct rte_eth_dev *dev,
+				      uint16_t rx_queue_id,
+				      uint8_t avail_thresh);
+
+/**
+ * @internal Query Rx queue available descriptors threshold event.
+ * @see rte_eth_rx_avail_thresh_query()
+ */
+
+typedef int (*eth_rx_queue_avail_thresh_query_t)(struct rte_eth_dev *dev,
+					uint16_t *rx_queue_id,
+					uint8_t *avail_thresh);
+
+/**
  * @internal A structure containing the functions exported by an Ethernet driver.
  */
 struct eth_dev_ops {
@@ -1283,6 +1304,11 @@ struct eth_dev_ops {
 
 	/** Dump private info from device */
 	eth_dev_priv_dump_t eth_dev_priv_dump;
+
+	/** Set Rx queue available descriptors threshold */
+	eth_rx_queue_avail_thresh_set_t rx_queue_avail_thresh_set;
+	/** Query Rx queue available descriptors threshold event */
+	eth_rx_queue_avail_thresh_query_t rx_queue_avail_thresh_query;
 };
 
 /**
@@ -1888,6 +1914,42 @@ struct rte_eth_tunnel_filter_conf {
 	enum rte_eth_tunnel_type tunnel_type; /**< Tunnel Type */
 	uint32_t tenant_id;     /**< Tenant ID to match: VNI, GRE key... */
 	uint16_t queue_id;      /**< Queue assigned to if match */
+};
+
+/**
+ *  Memory space that can be configured to store Flow Director filters
+ *  in the board memory.
+ */
+enum rte_eth_fdir_pballoc_type {
+	RTE_ETH_FDIR_PBALLOC_64K = 0,  /**< 64k. */
+	RTE_ETH_FDIR_PBALLOC_128K,     /**< 128k. */
+	RTE_ETH_FDIR_PBALLOC_256K,     /**< 256k. */
+};
+
+/**
+ *  Select report mode of FDIR hash information in Rx descriptors.
+ */
+enum rte_fdir_status_mode {
+	RTE_FDIR_NO_REPORT_STATUS = 0, /**< Never report FDIR hash. */
+	RTE_FDIR_REPORT_STATUS, /**< Only report FDIR hash for matching pkts. */
+	RTE_FDIR_REPORT_STATUS_ALWAYS, /**< Always report FDIR hash. */
+};
+
+/**
+ * A structure used to configure the Flow Director (FDIR) feature
+ * of an Ethernet port.
+ *
+ * If mode is RTE_FDIR_MODE_NONE, the pballoc value is ignored.
+ */
+struct rte_eth_fdir_conf {
+	enum rte_fdir_mode mode; /**< Flow Director mode. */
+	enum rte_eth_fdir_pballoc_type pballoc; /**< Space for FDIR filters. */
+	enum rte_fdir_status_mode status;  /**< How to report FDIR hash. */
+	/** Rx queue of packets matching a "drop" filter in perfect mode. */
+	uint8_t drop_queue;
+	struct rte_eth_fdir_masks mask;
+	/** Flex payload configuration. */
+	struct rte_eth_fdir_flex_conf flex_conf;
 };
 
 #ifdef __cplusplus

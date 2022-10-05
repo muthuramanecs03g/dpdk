@@ -149,6 +149,9 @@ mlx5_flow_is_rss_expandable_item(const struct rte_flow_item *item)
 	case RTE_FLOW_ITEM_TYPE_IPV6:
 	case RTE_FLOW_ITEM_TYPE_UDP:
 	case RTE_FLOW_ITEM_TYPE_TCP:
+	case RTE_FLOW_ITEM_TYPE_ESP:
+	case RTE_FLOW_ITEM_TYPE_ICMP:
+	case RTE_FLOW_ITEM_TYPE_ICMP6:
 	case RTE_FLOW_ITEM_TYPE_VXLAN:
 	case RTE_FLOW_ITEM_TYPE_NVGRE:
 	case RTE_FLOW_ITEM_TYPE_GRE:
@@ -175,6 +178,9 @@ mlx5_nsh_proto_to_item_type(uint8_t proto_spec, uint8_t proto_mask)
 	enum rte_flow_item_type type;
 
 	switch (proto_mask & proto_spec) {
+	case 0:
+		type = RTE_FLOW_ITEM_TYPE_VOID;
+		break;
 	case RTE_VXLAN_GPE_TYPE_IPV4:
 		type = RTE_FLOW_ITEM_TYPE_IPV4;
 		break;
@@ -196,17 +202,23 @@ mlx5_inet_proto_to_item_type(uint8_t proto_spec, uint8_t proto_mask)
 	enum rte_flow_item_type type;
 
 	switch (proto_mask & proto_spec) {
+	case 0:
+		type = RTE_FLOW_ITEM_TYPE_VOID;
+		break;
 	case IPPROTO_UDP:
 		type = RTE_FLOW_ITEM_TYPE_UDP;
 		break;
 	case IPPROTO_TCP:
 		type = RTE_FLOW_ITEM_TYPE_TCP;
 		break;
-	case IPPROTO_IP:
+	case IPPROTO_IPIP:
 		type = RTE_FLOW_ITEM_TYPE_IPV4;
 		break;
 	case IPPROTO_IPV6:
 		type = RTE_FLOW_ITEM_TYPE_IPV6;
+		break;
+	case IPPROTO_ESP:
+		type = RTE_FLOW_ITEM_TYPE_ESP;
 		break;
 	default:
 		type = RTE_FLOW_ITEM_TYPE_END;
@@ -221,6 +233,9 @@ mlx5_ethertype_to_item_type(rte_be16_t type_spec,
 	enum rte_flow_item_type type;
 
 	switch (rte_be_to_cpu_16(type_spec & type_mask)) {
+	case 0:
+		type = RTE_FLOW_ITEM_TYPE_VOID;
+		break;
 	case RTE_ETHER_TYPE_TEB:
 		type = is_tunnel ?
 		       RTE_FLOW_ITEM_TYPE_ETH : RTE_FLOW_ITEM_TYPE_END;
@@ -549,9 +564,13 @@ enum mlx5_expansion {
 	MLX5_EXPANSION_OUTER_IPV4,
 	MLX5_EXPANSION_OUTER_IPV4_UDP,
 	MLX5_EXPANSION_OUTER_IPV4_TCP,
+	MLX5_EXPANSION_OUTER_IPV4_ESP,
+	MLX5_EXPANSION_OUTER_IPV4_ICMP,
 	MLX5_EXPANSION_OUTER_IPV6,
 	MLX5_EXPANSION_OUTER_IPV6_UDP,
 	MLX5_EXPANSION_OUTER_IPV6_TCP,
+	MLX5_EXPANSION_OUTER_IPV6_ESP,
+	MLX5_EXPANSION_OUTER_IPV6_ICMP6,
 	MLX5_EXPANSION_VXLAN,
 	MLX5_EXPANSION_STD_VXLAN,
 	MLX5_EXPANSION_L3_VXLAN,
@@ -565,9 +584,13 @@ enum mlx5_expansion {
 	MLX5_EXPANSION_IPV4,
 	MLX5_EXPANSION_IPV4_UDP,
 	MLX5_EXPANSION_IPV4_TCP,
+	MLX5_EXPANSION_IPV4_ESP,
+	MLX5_EXPANSION_IPV4_ICMP,
 	MLX5_EXPANSION_IPV6,
 	MLX5_EXPANSION_IPV6_UDP,
 	MLX5_EXPANSION_IPV6_TCP,
+	MLX5_EXPANSION_IPV6_ESP,
+	MLX5_EXPANSION_IPV6_ICMP6,
 	MLX5_EXPANSION_IPV6_FRAG_EXT,
 	MLX5_EXPANSION_GTP,
 	MLX5_EXPANSION_GENEVE,
@@ -602,6 +625,8 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT
 			(MLX5_EXPANSION_OUTER_IPV4_UDP,
 			 MLX5_EXPANSION_OUTER_IPV4_TCP,
+			 MLX5_EXPANSION_OUTER_IPV4_ESP,
+			 MLX5_EXPANSION_OUTER_IPV4_ICMP,
 			 MLX5_EXPANSION_GRE,
 			 MLX5_EXPANSION_NVGRE,
 			 MLX5_EXPANSION_IPV4,
@@ -623,10 +648,19 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 		.type = RTE_FLOW_ITEM_TYPE_TCP,
 		.rss_types = RTE_ETH_RSS_NONFRAG_IPV4_TCP,
 	},
+	[MLX5_EXPANSION_OUTER_IPV4_ESP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ESP,
+		.rss_types = RTE_ETH_RSS_ESP,
+	},
+	[MLX5_EXPANSION_OUTER_IPV4_ICMP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ICMP,
+	},
 	[MLX5_EXPANSION_OUTER_IPV6] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT
 			(MLX5_EXPANSION_OUTER_IPV6_UDP,
 			 MLX5_EXPANSION_OUTER_IPV6_TCP,
+			 MLX5_EXPANSION_OUTER_IPV6_ESP,
+			 MLX5_EXPANSION_OUTER_IPV6_ICMP6,
 			 MLX5_EXPANSION_IPV4,
 			 MLX5_EXPANSION_IPV6,
 			 MLX5_EXPANSION_GRE,
@@ -647,6 +681,13 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 	[MLX5_EXPANSION_OUTER_IPV6_TCP] = {
 		.type = RTE_FLOW_ITEM_TYPE_TCP,
 		.rss_types = RTE_ETH_RSS_NONFRAG_IPV6_TCP,
+	},
+	[MLX5_EXPANSION_OUTER_IPV6_ESP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ESP,
+		.rss_types = RTE_ETH_RSS_ESP,
+	},
+	[MLX5_EXPANSION_OUTER_IPV6_ICMP6] = {
+		.type = RTE_FLOW_ITEM_TYPE_ICMP6,
 	},
 	[MLX5_EXPANSION_VXLAN] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT(MLX5_EXPANSION_ETH,
@@ -707,7 +748,9 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 	},
 	[MLX5_EXPANSION_IPV4] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT(MLX5_EXPANSION_IPV4_UDP,
-						  MLX5_EXPANSION_IPV4_TCP),
+						  MLX5_EXPANSION_IPV4_TCP,
+						  MLX5_EXPANSION_IPV4_ESP,
+						  MLX5_EXPANSION_IPV4_ICMP),
 		.type = RTE_FLOW_ITEM_TYPE_IPV4,
 		.rss_types = RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_FRAG_IPV4 |
 			RTE_ETH_RSS_NONFRAG_IPV4_OTHER,
@@ -720,9 +763,18 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 		.type = RTE_FLOW_ITEM_TYPE_TCP,
 		.rss_types = RTE_ETH_RSS_NONFRAG_IPV4_TCP,
 	},
+	[MLX5_EXPANSION_IPV4_ESP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ESP,
+		.rss_types = RTE_ETH_RSS_ESP,
+	},
+	[MLX5_EXPANSION_IPV4_ICMP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ICMP,
+	},
 	[MLX5_EXPANSION_IPV6] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT(MLX5_EXPANSION_IPV6_UDP,
 						  MLX5_EXPANSION_IPV6_TCP,
+						  MLX5_EXPANSION_IPV6_ESP,
+						  MLX5_EXPANSION_IPV6_ICMP6,
 						  MLX5_EXPANSION_IPV6_FRAG_EXT),
 		.type = RTE_FLOW_ITEM_TYPE_IPV6,
 		.rss_types = RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_FRAG_IPV6 |
@@ -736,8 +788,15 @@ static const struct mlx5_flow_expand_node mlx5_support_expansion[] = {
 		.type = RTE_FLOW_ITEM_TYPE_TCP,
 		.rss_types = RTE_ETH_RSS_NONFRAG_IPV6_TCP,
 	},
+	[MLX5_EXPANSION_IPV6_ESP] = {
+		.type = RTE_FLOW_ITEM_TYPE_ESP,
+		.rss_types = RTE_ETH_RSS_ESP,
+	},
 	[MLX5_EXPANSION_IPV6_FRAG_EXT] = {
 		.type = RTE_FLOW_ITEM_TYPE_IPV6_FRAG_EXT,
+	},
+	[MLX5_EXPANSION_IPV6_ICMP6] = {
+		.type = RTE_FLOW_ITEM_TYPE_ICMP6,
 	},
 	[MLX5_EXPANSION_GTP] = {
 		.next = MLX5_FLOW_EXPAND_RSS_NEXT(MLX5_EXPANSION_IPV4,
@@ -1370,8 +1429,11 @@ flow_drv_rxq_flags_set(struct rte_eth_dev *dev,
 		return;
 	for (i = 0; i != ind_tbl->queues_n; ++i) {
 		int idx = ind_tbl->queues[i];
-		struct mlx5_rxq_ctrl *rxq_ctrl = mlx5_rxq_ctrl_get(dev, idx);
+		struct mlx5_rxq_ctrl *rxq_ctrl;
 
+		if (mlx5_is_external_rxq(dev, idx))
+			continue;
+		rxq_ctrl = mlx5_rxq_ctrl_get(dev, idx);
 		MLX5_ASSERT(rxq_ctrl != NULL);
 		if (rxq_ctrl == NULL)
 			continue;
@@ -1474,8 +1536,11 @@ flow_drv_rxq_flags_trim(struct rte_eth_dev *dev,
 	MLX5_ASSERT(dev->data->dev_started);
 	for (i = 0; i != ind_tbl->queues_n; ++i) {
 		int idx = ind_tbl->queues[i];
-		struct mlx5_rxq_ctrl *rxq_ctrl = mlx5_rxq_ctrl_get(dev, idx);
+		struct mlx5_rxq_ctrl *rxq_ctrl;
 
+		if (mlx5_is_external_rxq(dev, idx))
+			continue;
+		rxq_ctrl = mlx5_rxq_ctrl_get(dev, idx);
 		MLX5_ASSERT(rxq_ctrl != NULL);
 		if (rxq_ctrl == NULL)
 			continue;
@@ -5254,7 +5319,7 @@ flow_meter_split_prep(struct rte_eth_dev *dev,
 	const struct rte_flow_item *orig_items = items;
 	struct rte_flow_action *hw_mtr_action;
 	struct rte_flow_action *action_pre_head = NULL;
-	int32_t flow_src_port = priv->representor_id;
+	uint16_t flow_src_port = priv->representor_id;
 	bool mtr_first;
 	uint8_t mtr_id_offset = priv->mtr_reg_share ? MLX5_MTR_COLOR_BITS : 0;
 	uint8_t mtr_reg_bits = priv->mtr_reg_share ?
@@ -5262,27 +5327,19 @@ flow_meter_split_prep(struct rte_eth_dev *dev,
 	uint32_t flow_id = 0;
 	uint32_t flow_id_reversed = 0;
 	uint8_t flow_id_bits = 0;
+	bool after_meter = false;
 	int shift;
 
 	/* Prepare the suffix subflow items. */
 	tag_item = sfx_items++;
 	for (; items->type != RTE_FLOW_ITEM_TYPE_END; items++) {
-		struct mlx5_priv *port_priv;
-		const struct rte_flow_item_port_id *pid_v;
 		int item_type = items->type;
 
 		switch (item_type) {
 		case RTE_FLOW_ITEM_TYPE_PORT_ID:
-			pid_v = items->spec;
-			MLX5_ASSERT(pid_v);
-			port_priv = mlx5_port_to_eswitch_info(pid_v->id, false);
-			if (!port_priv)
-				return rte_flow_error_set(error,
-						rte_errno,
-						RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
-						pid_v,
-						"Failed to get port info.");
-			flow_src_port = port_priv->representor_id;
+		case RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT:
+			if (mlx5_flow_get_item_vport_id(dev, items, &flow_src_port, NULL, error))
+				return -rte_errno;
 			if (!fm->def_policy && wks->policy->is_hierarchy &&
 			    flow_src_port != priv->representor_id) {
 				if (flow_drv_mtr_hierarchy_rule_create(dev,
@@ -5328,6 +5385,7 @@ flow_meter_split_prep(struct rte_eth_dev *dev,
 				tag_action = actions_pre++;
 				action_cur = actions_pre++;
 			}
+			after_meter = true;
 			break;
 		case RTE_FLOW_ACTION_TYPE_VXLAN_DECAP:
 		case RTE_FLOW_ACTION_TYPE_NVGRE_DECAP:
@@ -5355,6 +5413,11 @@ flow_meter_split_prep(struct rte_eth_dev *dev,
 				vlan_item_dst->type = (enum rte_flow_item_type)
 						MLX5_RTE_FLOW_ITEM_TYPE_VLAN;
 			}
+			break;
+		case RTE_FLOW_ACTION_TYPE_COUNT:
+			if (fm->def_policy)
+				action_cur = after_meter ?
+						actions_sfx++ : actions_pre++;
 			break;
 		default:
 			break;
@@ -5774,7 +5837,7 @@ flow_check_match_action(const struct rte_flow_action actions[],
 	return flag ? actions_n + 1 : 0;
 }
 
-#define SAMPLE_SUFFIX_ITEM 2
+#define SAMPLE_SUFFIX_ITEM 3
 
 /**
  * Split the sample flow.
@@ -5815,6 +5878,7 @@ flow_check_match_action(const struct rte_flow_action actions[],
 static int
 flow_sample_split_prep(struct rte_eth_dev *dev,
 		       int add_tag,
+		       const struct rte_flow_item items[],
 		       struct rte_flow_item sfx_items[],
 		       const struct rte_flow_action actions[],
 		       struct rte_flow_action actions_sfx[],
@@ -5831,8 +5895,9 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 	struct mlx5_rte_flow_item_tag *tag_mask;
 	struct rte_flow_action_jump *jump_action;
 	uint32_t tag_id = 0;
-	int index;
 	int append_index = 0;
+	int set_tag_idx = -1;
+	int index;
 	int ret;
 
 	if (sample_action_pos < 0)
@@ -5840,6 +5905,52 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 					  RTE_FLOW_ERROR_TYPE_ACTION,
 					  NULL, "invalid position of sample "
 					  "action in list");
+	/* Prepare the actions for prefix and suffix flow. */
+	if (add_tag) {
+		/* Update the new added tag action index preceding
+		 * the PUSH_VLAN or ENCAP action.
+		 */
+		const struct rte_flow_action_raw_encap *raw_encap;
+		const struct rte_flow_action *action = actions;
+		int encap_idx;
+		int action_idx = 0;
+		int raw_decap_idx = -1;
+		int push_vlan_idx = -1;
+		for (; action->type != RTE_FLOW_ACTION_TYPE_END; action++) {
+			switch (action->type) {
+			case RTE_FLOW_ACTION_TYPE_RAW_DECAP:
+				raw_decap_idx = action_idx;
+				break;
+			case RTE_FLOW_ACTION_TYPE_RAW_ENCAP:
+				raw_encap = action->conf;
+				if (raw_encap->size >
+					MLX5_ENCAPSULATION_DECISION_SIZE) {
+					encap_idx = raw_decap_idx != -1 ?
+						    raw_decap_idx : action_idx;
+					if (encap_idx < sample_action_pos &&
+					    push_vlan_idx == -1)
+						set_tag_idx = encap_idx;
+				}
+				break;
+			case RTE_FLOW_ACTION_TYPE_VXLAN_ENCAP:
+			case RTE_FLOW_ACTION_TYPE_NVGRE_ENCAP:
+				encap_idx = action_idx;
+				if (encap_idx < sample_action_pos &&
+				    push_vlan_idx == -1)
+					set_tag_idx = encap_idx;
+				break;
+			case RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN:
+			case RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID:
+				push_vlan_idx = action_idx;
+				if (push_vlan_idx < sample_action_pos)
+					set_tag_idx = action_idx;
+				break;
+			default:
+				break;
+			}
+			action_idx++;
+		}
+	}
 	/* Prepare the actions for prefix and suffix flow. */
 	if (qrss_action_pos >= 0 && qrss_action_pos < sample_action_pos) {
 		index = qrss_action_pos;
@@ -5857,6 +5968,14 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 		memcpy(actions_sfx, actions + qrss_action_pos,
 		       sizeof(struct rte_flow_action));
 		actions_sfx++;
+	} else if (add_tag && set_tag_idx >= 0) {
+		if (set_tag_idx > 0)
+			memcpy(actions_pre, actions,
+			       sizeof(struct rte_flow_action) * set_tag_idx);
+		memcpy(actions_pre + set_tag_idx + 1, actions + set_tag_idx,
+		       sizeof(struct rte_flow_action) *
+		       (sample_action_pos - set_tag_idx));
+		index = sample_action_pos;
 	} else {
 		index = sample_action_pos;
 		if (index != 0)
@@ -5872,6 +5991,12 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 		append_index++;
 		set_tag = (void *)(actions_pre + actions_n + append_index);
 		ret = mlx5_flow_get_reg_id(dev, MLX5_SAMPLE_ID, 0, error);
+		/* Trust VF/SF on CX5 not supported meter so that the reserved
+		 * metadata regC is REG_NON, back to use application tag
+		 * index 0.
+		 */
+		if (unlikely(ret == REG_NON))
+			ret = mlx5_flow_get_reg_id(dev, MLX5_APP_TAG, 0, error);
 		if (ret < 0)
 			return ret;
 		mlx5_ipool_malloc(priv->sh->ipool
@@ -5881,6 +6006,12 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 			.data = tag_id,
 		};
 		/* Prepare the suffix subflow items. */
+		for (; items->type != RTE_FLOW_ITEM_TYPE_END; items++) {
+			if (items->type == RTE_FLOW_ITEM_TYPE_PORT_ID) {
+				memcpy(sfx_items, items, sizeof(*sfx_items));
+				sfx_items++;
+			}
+		}
 		tag_spec = (void *)(sfx_items + SAMPLE_SUFFIX_ITEM);
 		tag_spec->data = tag_id;
 		tag_spec->id = set_tag->id;
@@ -5898,13 +6029,17 @@ flow_sample_split_prep(struct rte_eth_dev *dev,
 				RTE_FLOW_ITEM_TYPE_END,
 		};
 		/* Prepare the tag action in prefix subflow. */
-		actions_pre[index++] =
+		set_tag_idx = (set_tag_idx == -1) ? index : set_tag_idx;
+		actions_pre[set_tag_idx] =
 			(struct rte_flow_action){
 			.type = (enum rte_flow_action_type)
 				MLX5_RTE_FLOW_ACTION_TYPE_TAG,
 			.conf = set_tag,
 		};
+		/* Update next sample position due to add one tag action */
+		index += 1;
 	}
+	/* Copy the sample action into prefix flow. */
 	memcpy(actions_pre + index, actions + sample_action_pos,
 	       sizeof(struct rte_flow_action));
 	index += 1;
@@ -6287,6 +6422,8 @@ flow_create_split_meter(struct rte_eth_dev *dev,
 								  fm->policy_id,
 								  NULL);
 			MLX5_ASSERT(wks->policy);
+			if (wks->policy->mark)
+				wks->mark = 1;
 			if (wks->policy->is_hierarchy) {
 				wks->final_policy =
 				mlx5_flow_meter_hierarchy_get_final_policy(dev,
@@ -6301,17 +6438,17 @@ flow_create_split_meter(struct rte_eth_dev *dev,
 		}
 		/*
 		 * If it isn't default-policy Meter, and
-		 * 1. There's no action in flow to change
+		 * 1. Not meter hierarchy and there's no action in flow to change
 		 *    packet (modify/encap/decap etc.), OR
 		 * 2. No drop count needed for this meter.
-		 * 3. It's not meter hierarchy.
 		 * Then no need to use regC to save meter id anymore.
 		 */
-		if (!fm->def_policy && !is_mtr_hierarchy &&
-		    (!has_modify || !fm->drop_cnt))
+		if (!fm->def_policy && ((!has_modify && !is_mtr_hierarchy) || !fm->drop_cnt))
 			set_mtr_reg = false;
-		/* Prefix actions: meter, decap, encap, tag, jump, end. */
-		act_size = sizeof(struct rte_flow_action) * (actions_n + 6) +
+		/* Prefix actions: meter, decap, encap, tag, jump, end, cnt. */
+#define METER_PREFIX_ACTION 7
+		act_size = (sizeof(struct rte_flow_action) *
+			    (actions_n + METER_PREFIX_ACTION)) +
 			   sizeof(struct mlx5_rte_flow_action_set_tag);
 		/* Suffix items: tag, vlan, port id, end. */
 #define METER_SUFFIX_ITEM 4
@@ -6487,7 +6624,7 @@ flow_create_split_sample(struct rte_eth_dev *dev,
 			jump_table = attr->group * MLX5_FLOW_TABLE_FACTOR +
 				     next_ft_step;
 		pre_actions = sfx_actions + actions_n;
-		tag_id = flow_sample_split_prep(dev, add_tag, sfx_items,
+		tag_id = flow_sample_split_prep(dev, add_tag, items, sfx_items,
 						actions, sfx_actions,
 						pre_actions, actions_n,
 						sample_action_pos,
@@ -7784,6 +7921,8 @@ mlx5_flow_destroy_mtr_acts(struct rte_eth_dev *dev,
  *   Meter policy struct.
  * @param[in] action
  *   Action specification used to create meter actions.
+ * @param[in] attr
+ *   Flow rule attributes.
  * @param[out] error
  *   Perform verbose error reporting if not NULL. Initialized in case of
  *   error only.
@@ -7795,12 +7934,13 @@ int
 mlx5_flow_create_mtr_acts(struct rte_eth_dev *dev,
 		      struct mlx5_flow_meter_policy *mtr_policy,
 		      const struct rte_flow_action *actions[RTE_COLORS],
+		      struct rte_flow_attr *attr,
 		      struct rte_mtr_error *error)
 {
 	const struct mlx5_flow_driver_ops *fops;
 
 	fops = flow_get_drv_ops(MLX5_FLOW_TYPE_DV);
-	return fops->create_mtr_acts(dev, mtr_policy, actions, error);
+	return fops->create_mtr_acts(dev, mtr_policy, actions, attr, error);
 }
 
 /**
@@ -10619,10 +10759,27 @@ mlx5_flow_flex_item_create(struct rte_eth_dev *dev,
 			   struct rte_flow_error *error)
 {
 	static const char err_msg[] = "flex item creation unsupported";
+	struct mlx5_priv *priv = dev->data->dev_private;
 	struct rte_flow_attr attr = { .transfer = 0 };
 	const struct mlx5_flow_driver_ops *fops =
 			flow_get_drv_ops(flow_get_drv_type(dev, &attr));
 
+	if (!priv->pci_dev) {
+		rte_flow_error_set(error, ENOTSUP,
+				   RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+				   "create flex item on PF only");
+		return NULL;
+	}
+	switch (priv->pci_dev->id.device_id) {
+	case PCI_DEVICE_ID_MELLANOX_CONNECTX6DXBF:
+	case PCI_DEVICE_ID_MELLANOX_CONNECTX7BF:
+		break;
+	default:
+		rte_flow_error_set(error, ENOTSUP,
+				   RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+				   "flex item available on BlueField ports only");
+		return NULL;
+	}
 	if (!fops->item_create) {
 		DRV_LOG(ERR, "port %u %s.", dev->data->port_id, err_msg);
 		rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION,
@@ -10808,4 +10965,93 @@ mlx5_flow_adjust_priority(struct rte_eth_dev *dev, int32_t priority,
 		break;
 	}
 	return  res;
+}
+
+/**
+ * Get the E-Switch Manager vport id.
+ *
+ * @param[in] dev
+ *   Pointer to the Ethernet device structure.
+ *
+ * @return
+ *   The vport id.
+ */
+int16_t mlx5_flow_get_esw_manager_vport_id(struct rte_eth_dev *dev)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_common_device *cdev = priv->sh->cdev;
+
+	/* New FW exposes E-Switch Manager vport ID, can use it directly. */
+	if (cdev->config.hca_attr.esw_mgr_vport_id_valid)
+		return (int16_t)cdev->config.hca_attr.esw_mgr_vport_id;
+
+	if (priv->pci_dev == NULL)
+		return 0;
+	switch (priv->pci_dev->id.device_id) {
+	case PCI_DEVICE_ID_MELLANOX_CONNECTX5BF:
+	case PCI_DEVICE_ID_MELLANOX_CONNECTX6DXBF:
+	case PCI_DEVICE_ID_MELLANOX_CONNECTX7BF:
+	/*
+	 * In old FW which doesn't expose the E-Switch Manager vport ID in the capability,
+	 * only the BF embedded CPUs control the E-Switch Manager port. Hence,
+	 * ECPF vport ID is selected and not the host port (0) in any BF case.
+	 */
+		return (int16_t)MLX5_ECPF_VPORT_ID;
+	default:
+		return MLX5_PF_VPORT_ID;
+	}
+}
+
+/**
+ * Parse item to get the vport id.
+ *
+ * @param[in] dev
+ *   Pointer to the Ethernet device structure.
+ * @param[in] item
+ *   The src port id match item.
+ * @param[out] vport_id
+ *   Pointer to put the vport id.
+ * @param[out] all_ports
+ *   Indicate if the item matches all ports.
+ * @param[out] error
+ *   Pointer to error structure.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+int mlx5_flow_get_item_vport_id(struct rte_eth_dev *dev,
+				const struct rte_flow_item *item,
+				uint16_t *vport_id,
+				bool *all_ports,
+				struct rte_flow_error *error)
+{
+	struct mlx5_priv *port_priv;
+	const struct rte_flow_item_port_id *pid_v;
+	uint32_t esw_mgr_port;
+
+	if (item->type != RTE_FLOW_ITEM_TYPE_PORT_ID &&
+	    item->type != RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
+					  NULL, "Incorrect item type.");
+	pid_v = item->spec;
+	if (!pid_v) {
+		if (all_ports)
+			*all_ports = (item->type == RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT);
+		return 0;
+	}
+	if (all_ports)
+		*all_ports = false;
+	esw_mgr_port = (item->type == RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT) ?
+				MLX5_REPRESENTED_PORT_ESW_MGR : MLX5_PORT_ESW_MGR;
+	if (pid_v->id == esw_mgr_port) {
+		*vport_id = mlx5_flow_get_esw_manager_vport_id(dev);
+	} else {
+		port_priv = mlx5_port_to_eswitch_info(pid_v->id, false);
+		if (!port_priv)
+			return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
+						  NULL, "Failed to get port info.");
+		*vport_id = port_priv->representor_id;
+	}
+
+	return 0;
 }

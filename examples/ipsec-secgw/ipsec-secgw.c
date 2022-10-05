@@ -56,24 +56,20 @@
 #include "parser.h"
 #include "sad.h"
 
+#if defined(__ARM_NEON)
+#include "ipsec_lpm_neon.h"
+#endif
+
 volatile bool force_quit;
 
 #define MAX_JUMBO_PKT_LEN  9600
 
 #define MEMPOOL_CACHE_SIZE 256
 
-#define CDEV_QUEUE_DESC 2048
 #define CDEV_MAP_ENTRIES 16384
 #define CDEV_MP_CACHE_SZ 64
 #define CDEV_MP_CACHE_MULTIPLIER 1.5 /* from rte_mempool.c */
 #define MAX_QUEUE_PAIRS 1
-
-#define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
-
-/* Configure how many packets ahead to prefetch, when reading packets */
-#define PREFETCH_OFFSET	3
-
-#define MAX_RX_QUEUE_PER_LCORE 16
 
 #define MAX_LCORE_PARAMS 1024
 
@@ -84,6 +80,11 @@ volatile bool force_quit;
 #define IPSEC_SECGW_TX_DESC_DEFAULT 1024
 static uint16_t nb_rxd = IPSEC_SECGW_RX_DESC_DEFAULT;
 static uint16_t nb_txd = IPSEC_SECGW_TX_DESC_DEFAULT;
+
+/*
+ * Configurable number of descriptors per queue pair
+ */
+static uint32_t qp_desc_nb = 2048;
 
 #define ETHADDR_TO_UINT64(addr) __BYTES_TO_UINT64( \
 		(addr)->addr_bytes[0], (addr)->addr_bytes[1], \
@@ -103,6 +104,12 @@ struct ethaddr_info ethaddr_tbl[RTE_MAX_ETHPORTS] = {
 	{ 0, ETHADDR(0x00, 0x16, 0x3e, 0x49, 0x9e, 0xdd) }
 };
 
+/*
+ * To hold ethernet header per port, which will be applied
+ * to outgoing packets.
+ */
+xmm_t val_eth[RTE_MAX_ETHPORTS];
+
 struct flow_info flow_info_tbl[RTE_MAX_ETHPORTS];
 
 #define CMD_LINE_OPT_CONFIG		"config"
@@ -120,6 +127,7 @@ struct flow_info flow_info_tbl[RTE_MAX_ETHPORTS];
 #define CMD_LINE_OPT_VECTOR_TIMEOUT	"vector-tmo"
 #define CMD_LINE_OPT_VECTOR_POOL_SZ	"vector-pool-sz"
 #define CMD_LINE_OPT_PER_PORT_POOL	"per-port-pool"
+#define CMD_LINE_OPT_QP_DESC_NB		"desc-nb"
 
 #define CMD_LINE_ARG_EVENT	"event"
 #define CMD_LINE_ARG_POLL	"poll"
@@ -149,6 +157,7 @@ enum {
 	CMD_LINE_OPT_VECTOR_TIMEOUT_NUM,
 	CMD_LINE_OPT_VECTOR_POOL_SZ_NUM,
 	CMD_LINE_OPT_PER_PORT_POOL_NUM,
+	CMD_LINE_OPT_QP_DESC_NB_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -167,6 +176,7 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_VECTOR_TIMEOUT, 1, 0, CMD_LINE_OPT_VECTOR_TIMEOUT_NUM},
 	{CMD_LINE_OPT_VECTOR_POOL_SZ, 1, 0, CMD_LINE_OPT_VECTOR_POOL_SZ_NUM},
 	{CMD_LINE_OPT_PER_PORT_POOL, 0, 0, CMD_LINE_OPT_PER_PORT_POOL_NUM},
+	{CMD_LINE_OPT_QP_DESC_NB, 1, 0, CMD_LINE_OPT_QP_DESC_NB_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -175,10 +185,10 @@ uint32_t single_sa_idx;
 /* mask of enabled ports */
 static uint32_t enabled_port_mask;
 static uint64_t enabled_cryptodev_mask = UINT64_MAX;
-static int32_t promiscuous_on = 1;
+static int32_t promiscuous_on;
 static int32_t numa_on = 1; /**< NUMA is enabled by default. */
 static uint32_t nb_lcores;
-static uint32_t single_sa;
+uint32_t single_sa;
 uint32_t nb_bufs_in_pool;
 
 /*
@@ -191,9 +201,9 @@ static uint64_t dev_tx_offload = UINT64_MAX;
 /*
  * global values that determine multi-seg policy
  */
-static uint32_t frag_tbl_sz;
+uint32_t frag_tbl_sz;
 static uint32_t frame_buf_size = RTE_MBUF_DEFAULT_BUF_SIZE;
-static uint32_t mtu_size = RTE_ETHER_MTU;
+uint32_t mtu_size = RTE_ETHER_MTU;
 static uint64_t frag_ttl_ns = MAX_FRAG_TTL_NS;
 static uint32_t stats_interval;
 
@@ -204,11 +214,6 @@ struct app_sa_prm app_sa_prm = {
 			.udp_encap = 0
 		};
 static const char *cfgfile;
-
-struct lcore_rx_queue {
-	uint16_t port_id;
-	uint8_t queue_id;
-} __rte_cache_aligned;
 
 struct lcore_params {
 	uint16_t port_id;
@@ -224,28 +229,7 @@ static uint16_t nb_lcore_params;
 static struct rte_hash *cdev_map_in;
 static struct rte_hash *cdev_map_out;
 
-struct buffer {
-	uint16_t len;
-	struct rte_mbuf *m_table[MAX_PKT_BURST] __rte_aligned(sizeof(void *));
-};
-
-struct lcore_conf {
-	uint16_t nb_rx_queue;
-	struct lcore_rx_queue rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
-	uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
-	struct buffer tx_mbufs[RTE_MAX_ETHPORTS];
-	struct ipsec_ctx inbound;
-	struct ipsec_ctx outbound;
-	struct rt_ctx *rt4_ctx;
-	struct rt_ctx *rt6_ctx;
-	struct {
-		struct rte_ip_frag_tbl *tbl;
-		struct rte_mempool *pool_indir;
-		struct rte_ip_frag_death_row dr;
-	} frag;
-} __rte_cache_aligned;
-
-static struct lcore_conf lcore_conf[RTE_MAX_LCORE];
+struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -269,6 +253,7 @@ struct socket_ctx socket_ctx[NB_SOCKETS];
 
 bool per_port_pool;
 
+uint16_t wrkr_flags;
 /*
  * Determine is multi-segment support required:
  *  - either frame buffer size is smaller then mtu
@@ -279,32 +264,6 @@ multi_seg_required(void)
 {
 	return (MTU_TO_FRAMELEN(mtu_size) + RTE_PKTMBUF_HEADROOM >
 		frame_buf_size || frag_tbl_sz != 0);
-}
-
-static inline void
-adjust_ipv4_pktlen(struct rte_mbuf *m, const struct rte_ipv4_hdr *iph,
-	uint32_t l2_len)
-{
-	uint32_t plen, trim;
-
-	plen = rte_be_to_cpu_16(iph->total_length) + l2_len;
-	if (plen < m->pkt_len) {
-		trim = m->pkt_len - plen;
-		rte_pktmbuf_trim(m, trim);
-	}
-}
-
-static inline void
-adjust_ipv6_pktlen(struct rte_mbuf *m, const struct rte_ipv6_hdr *iph,
-	uint32_t l2_len)
-{
-	uint32_t plen, trim;
-
-	plen = rte_be_to_cpu_16(iph->payload_len) + sizeof(*iph) + l2_len;
-	if (plen < m->pkt_len) {
-		trim = m->pkt_len - plen;
-		rte_pktmbuf_trim(m, trim);
-	}
 }
 
 
@@ -369,369 +328,6 @@ print_stats_cb(__rte_unused void *param)
 	printf("\n====================================================\n");
 
 	rte_eal_alarm_set(stats_interval * US_PER_S, print_stats_cb, NULL);
-}
-
-static inline void
-prepare_one_packet(struct rte_mbuf *pkt, struct ipsec_traffic *t)
-{
-	const struct rte_ether_hdr *eth;
-	const struct rte_ipv4_hdr *iph4;
-	const struct rte_ipv6_hdr *iph6;
-	const struct rte_udp_hdr *udp;
-	uint16_t ip4_hdr_len;
-	uint16_t nat_port;
-
-	eth = rte_pktmbuf_mtod(pkt, const struct rte_ether_hdr *);
-	if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
-
-		iph4 = (const struct rte_ipv4_hdr *)rte_pktmbuf_adj(pkt,
-			RTE_ETHER_HDR_LEN);
-		adjust_ipv4_pktlen(pkt, iph4, 0);
-
-		switch (iph4->next_proto_id) {
-		case IPPROTO_ESP:
-			t->ipsec.pkts[(t->ipsec.num)++] = pkt;
-			break;
-		case IPPROTO_UDP:
-			if (app_sa_prm.udp_encap == 1) {
-				ip4_hdr_len = ((iph4->version_ihl &
-					RTE_IPV4_HDR_IHL_MASK) *
-					RTE_IPV4_IHL_MULTIPLIER);
-				udp = rte_pktmbuf_mtod_offset(pkt,
-					struct rte_udp_hdr *, ip4_hdr_len);
-				nat_port = rte_cpu_to_be_16(IPSEC_NAT_T_PORT);
-				if (udp->src_port == nat_port ||
-					udp->dst_port == nat_port){
-					t->ipsec.pkts[(t->ipsec.num)++] = pkt;
-					pkt->packet_type |=
-						MBUF_PTYPE_TUNNEL_ESP_IN_UDP;
-					break;
-				}
-			}
-		/* Fall through */
-		default:
-			t->ip4.data[t->ip4.num] = &iph4->next_proto_id;
-			t->ip4.pkts[(t->ip4.num)++] = pkt;
-		}
-		pkt->l2_len = 0;
-		pkt->l3_len = sizeof(*iph4);
-		pkt->packet_type |= RTE_PTYPE_L3_IPV4;
-		if  (pkt->packet_type & RTE_PTYPE_L4_TCP)
-			pkt->l4_len = sizeof(struct rte_tcp_hdr);
-		else if (pkt->packet_type & RTE_PTYPE_L4_UDP)
-			pkt->l4_len = sizeof(struct rte_udp_hdr);
-	} else if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)) {
-		int next_proto;
-		size_t l3len, ext_len;
-		uint8_t *p;
-
-		/* get protocol type */
-		iph6 = (const struct rte_ipv6_hdr *)rte_pktmbuf_adj(pkt,
-			RTE_ETHER_HDR_LEN);
-		adjust_ipv6_pktlen(pkt, iph6, 0);
-
-		next_proto = iph6->proto;
-
-		/* determine l3 header size up to ESP extension */
-		l3len = sizeof(struct ip6_hdr);
-		p = rte_pktmbuf_mtod(pkt, uint8_t *);
-		while (next_proto != IPPROTO_ESP && l3len < pkt->data_len &&
-			(next_proto = rte_ipv6_get_next_ext(p + l3len,
-						next_proto, &ext_len)) >= 0)
-			l3len += ext_len;
-
-		/* drop packet when IPv6 header exceeds first segment length */
-		if (unlikely(l3len > pkt->data_len)) {
-			free_pkts(&pkt, 1);
-			return;
-		}
-
-		switch (next_proto) {
-		case IPPROTO_ESP:
-			t->ipsec.pkts[(t->ipsec.num)++] = pkt;
-			break;
-		case IPPROTO_UDP:
-			if (app_sa_prm.udp_encap == 1) {
-				udp = rte_pktmbuf_mtod_offset(pkt,
-					struct rte_udp_hdr *, l3len);
-				nat_port = rte_cpu_to_be_16(IPSEC_NAT_T_PORT);
-				if (udp->src_port == nat_port ||
-					udp->dst_port == nat_port){
-					t->ipsec.pkts[(t->ipsec.num)++] = pkt;
-					pkt->packet_type |=
-						MBUF_PTYPE_TUNNEL_ESP_IN_UDP;
-					break;
-				}
-			}
-		/* Fall through */
-		default:
-			t->ip6.data[t->ip6.num] = &iph6->proto;
-			t->ip6.pkts[(t->ip6.num)++] = pkt;
-		}
-		pkt->l2_len = 0;
-		pkt->l3_len = l3len;
-		pkt->packet_type |= RTE_PTYPE_L3_IPV6;
-	} else {
-		/* Unknown/Unsupported type, drop the packet */
-		RTE_LOG(ERR, IPSEC, "Unsupported packet type 0x%x\n",
-			rte_be_to_cpu_16(eth->ether_type));
-		free_pkts(&pkt, 1);
-		return;
-	}
-
-	/* Check if the packet has been processed inline. For inline protocol
-	 * processed packets, the metadata in the mbuf can be used to identify
-	 * the security processing done on the packet. The metadata will be
-	 * used to retrieve the application registered userdata associated
-	 * with the security session.
-	 */
-
-	if (pkt->ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD &&
-			rte_security_dynfield_is_registered()) {
-		struct ipsec_sa *sa;
-		struct ipsec_mbuf_metadata *priv;
-		struct rte_security_ctx *ctx = (struct rte_security_ctx *)
-						rte_eth_dev_get_sec_ctx(
-						pkt->port);
-
-		/* Retrieve the userdata registered. Here, the userdata
-		 * registered is the SA pointer.
-		 */
-		sa = (struct ipsec_sa *)rte_security_get_userdata(ctx,
-				*rte_security_dynfield(pkt));
-		if (sa == NULL) {
-			/* userdata could not be retrieved */
-			return;
-		}
-
-		/* Save SA as priv member in mbuf. This will be used in the
-		 * IPsec selector(SP-SA) check.
-		 */
-
-		priv = get_priv(pkt);
-		priv->sa = sa;
-	}
-}
-
-static inline void
-prepare_traffic(struct rte_mbuf **pkts, struct ipsec_traffic *t,
-		uint16_t nb_pkts)
-{
-	int32_t i;
-
-	t->ipsec.num = 0;
-	t->ip4.num = 0;
-	t->ip6.num = 0;
-
-	for (i = 0; i < (nb_pkts - PREFETCH_OFFSET); i++) {
-		rte_prefetch0(rte_pktmbuf_mtod(pkts[i + PREFETCH_OFFSET],
-					void *));
-		prepare_one_packet(pkts[i], t);
-	}
-	/* Process left packets */
-	for (; i < nb_pkts; i++)
-		prepare_one_packet(pkts[i], t);
-}
-
-static inline void
-prepare_tx_pkt(struct rte_mbuf *pkt, uint16_t port,
-		const struct lcore_conf *qconf)
-{
-	struct ip *ip;
-	struct rte_ether_hdr *ethhdr;
-
-	ip = rte_pktmbuf_mtod(pkt, struct ip *);
-
-	ethhdr = (struct rte_ether_hdr *)
-		rte_pktmbuf_prepend(pkt, RTE_ETHER_HDR_LEN);
-
-	if (ip->ip_v == IPVERSION) {
-		pkt->ol_flags |= qconf->outbound.ipv4_offloads;
-		pkt->l3_len = sizeof(struct ip);
-		pkt->l2_len = RTE_ETHER_HDR_LEN;
-
-		ip->ip_sum = 0;
-
-		/* calculate IPv4 cksum in SW */
-		if ((pkt->ol_flags & RTE_MBUF_F_TX_IP_CKSUM) == 0)
-			ip->ip_sum = rte_ipv4_cksum((struct rte_ipv4_hdr *)ip);
-
-		ethhdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
-	} else {
-		pkt->ol_flags |= qconf->outbound.ipv6_offloads;
-		pkt->l3_len = sizeof(struct ip6_hdr);
-		pkt->l2_len = RTE_ETHER_HDR_LEN;
-
-		ethhdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6);
-	}
-
-	memcpy(&ethhdr->src_addr, &ethaddr_tbl[port].src,
-			sizeof(struct rte_ether_addr));
-	memcpy(&ethhdr->dst_addr, &ethaddr_tbl[port].dst,
-			sizeof(struct rte_ether_addr));
-}
-
-static inline void
-prepare_tx_burst(struct rte_mbuf *pkts[], uint16_t nb_pkts, uint16_t port,
-		const struct lcore_conf *qconf)
-{
-	int32_t i;
-	const int32_t prefetch_offset = 2;
-
-	for (i = 0; i < (nb_pkts - prefetch_offset); i++) {
-		rte_mbuf_prefetch_part2(pkts[i + prefetch_offset]);
-		prepare_tx_pkt(pkts[i], port, qconf);
-	}
-	/* Process left packets */
-	for (; i < nb_pkts; i++)
-		prepare_tx_pkt(pkts[i], port, qconf);
-}
-
-/* Send burst of packets on an output interface */
-static inline int32_t
-send_burst(struct lcore_conf *qconf, uint16_t n, uint16_t port)
-{
-	struct rte_mbuf **m_table;
-	int32_t ret;
-	uint16_t queueid;
-
-	queueid = qconf->tx_queue_id[port];
-	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
-
-	prepare_tx_burst(m_table, n, port, qconf);
-
-	ret = rte_eth_tx_burst(port, queueid, m_table, n);
-
-	core_stats_update_tx(ret);
-
-	if (unlikely(ret < n)) {
-		do {
-			free_pkts(&m_table[ret], 1);
-		} while (++ret < n);
-	}
-
-	return 0;
-}
-
-/*
- * Helper function to fragment and queue for TX one packet.
- */
-static inline uint32_t
-send_fragment_packet(struct lcore_conf *qconf, struct rte_mbuf *m,
-	uint16_t port, uint8_t proto)
-{
-	struct buffer *tbl;
-	uint32_t len, n;
-	int32_t rc;
-
-	tbl =  qconf->tx_mbufs + port;
-	len = tbl->len;
-
-	/* free space for new fragments */
-	if (len + RTE_LIBRTE_IP_FRAG_MAX_FRAG >=  RTE_DIM(tbl->m_table)) {
-		send_burst(qconf, len, port);
-		len = 0;
-	}
-
-	n = RTE_DIM(tbl->m_table) - len;
-
-	if (proto == IPPROTO_IP)
-		rc = rte_ipv4_fragment_packet(m, tbl->m_table + len,
-			n, mtu_size, m->pool, qconf->frag.pool_indir);
-	else
-		rc = rte_ipv6_fragment_packet(m, tbl->m_table + len,
-			n, mtu_size, m->pool, qconf->frag.pool_indir);
-
-	if (rc >= 0)
-		len += rc;
-	else
-		RTE_LOG(ERR, IPSEC,
-			"%s: failed to fragment packet with size %u, "
-			"error code: %d\n",
-			__func__, m->pkt_len, rte_errno);
-
-	free_pkts(&m, 1);
-	return len;
-}
-
-/* Enqueue a single packet, and send burst if queue is filled */
-static inline int32_t
-send_single_packet(struct rte_mbuf *m, uint16_t port, uint8_t proto)
-{
-	uint32_t lcore_id;
-	uint16_t len;
-	struct lcore_conf *qconf;
-
-	lcore_id = rte_lcore_id();
-
-	qconf = &lcore_conf[lcore_id];
-	len = qconf->tx_mbufs[port].len;
-
-	if (m->pkt_len <= mtu_size) {
-		qconf->tx_mbufs[port].m_table[len] = m;
-		len++;
-
-	/* need to fragment the packet */
-	} else if (frag_tbl_sz > 0)
-		len = send_fragment_packet(qconf, m, port, proto);
-	else
-		free_pkts(&m, 1);
-
-	/* enough pkts to be sent */
-	if (unlikely(len == MAX_PKT_BURST)) {
-		send_burst(qconf, MAX_PKT_BURST, port);
-		len = 0;
-	}
-
-	qconf->tx_mbufs[port].len = len;
-	return 0;
-}
-
-static inline void
-inbound_sp_sa(struct sp_ctx *sp, struct sa_ctx *sa, struct traffic_type *ip,
-		uint16_t lim, struct ipsec_spd_stats *stats)
-{
-	struct rte_mbuf *m;
-	uint32_t i, j, res, sa_idx;
-
-	if (ip->num == 0 || sp == NULL)
-		return;
-
-	rte_acl_classify((struct rte_acl_ctx *)sp, ip->data, ip->res,
-			ip->num, DEFAULT_MAX_CATEGORIES);
-
-	j = 0;
-	for (i = 0; i < ip->num; i++) {
-		m = ip->pkts[i];
-		res = ip->res[i];
-		if (res == BYPASS) {
-			ip->pkts[j++] = m;
-			stats->bypass++;
-			continue;
-		}
-		if (res == DISCARD) {
-			free_pkts(&m, 1);
-			stats->discard++;
-			continue;
-		}
-
-		/* Only check SPI match for processed IPSec packets */
-		if (i < lim && ((m->ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD) == 0)) {
-			stats->discard++;
-			free_pkts(&m, 1);
-			continue;
-		}
-
-		sa_idx = res - 1;
-		if (!inbound_sa_check(sa, m, sa_idx)) {
-			stats->discard++;
-			free_pkts(&m, 1);
-			continue;
-		}
-		ip->pkts[j++] = m;
-		stats->protect++;
-	}
-	ip->num = j;
 }
 
 static void
@@ -962,147 +558,13 @@ process_pkts_outbound_nosp(struct ipsec_ctx *ipsec_ctx,
 	}
 }
 
-static inline int32_t
-get_hop_for_offload_pkt(struct rte_mbuf *pkt, int is_ipv6)
-{
-	struct ipsec_mbuf_metadata *priv;
-	struct ipsec_sa *sa;
-
-	priv = get_priv(pkt);
-
-	sa = priv->sa;
-	if (unlikely(sa == NULL)) {
-		RTE_LOG(ERR, IPSEC, "SA not saved in private data\n");
-		goto fail;
-	}
-
-	if (is_ipv6)
-		return sa->portid;
-
-	/* else */
-	return (sa->portid | RTE_LPM_LOOKUP_SUCCESS);
-
-fail:
-	if (is_ipv6)
-		return -1;
-
-	/* else */
-	return 0;
-}
-
-static inline void
-route4_pkts(struct rt_ctx *rt_ctx, struct rte_mbuf *pkts[], uint8_t nb_pkts)
-{
-	uint32_t hop[MAX_PKT_BURST * 2];
-	uint32_t dst_ip[MAX_PKT_BURST * 2];
-	int32_t pkt_hop = 0;
-	uint16_t i, offset;
-	uint16_t lpm_pkts = 0;
-	unsigned int lcoreid = rte_lcore_id();
-
-	if (nb_pkts == 0)
-		return;
-
-	/* Need to do an LPM lookup for non-inline packets. Inline packets will
-	 * have port ID in the SA
-	 */
-
-	for (i = 0; i < nb_pkts; i++) {
-		if (!(pkts[i]->ol_flags & RTE_MBUF_F_TX_SEC_OFFLOAD)) {
-			/* Security offload not enabled. So an LPM lookup is
-			 * required to get the hop
-			 */
-			offset = offsetof(struct ip, ip_dst);
-			dst_ip[lpm_pkts] = *rte_pktmbuf_mtod_offset(pkts[i],
-					uint32_t *, offset);
-			dst_ip[lpm_pkts] = rte_be_to_cpu_32(dst_ip[lpm_pkts]);
-			lpm_pkts++;
-		}
-	}
-
-	rte_lpm_lookup_bulk((struct rte_lpm *)rt_ctx, dst_ip, hop, lpm_pkts);
-
-	lpm_pkts = 0;
-
-	for (i = 0; i < nb_pkts; i++) {
-		if (pkts[i]->ol_flags & RTE_MBUF_F_TX_SEC_OFFLOAD) {
-			/* Read hop from the SA */
-			pkt_hop = get_hop_for_offload_pkt(pkts[i], 0);
-		} else {
-			/* Need to use hop returned by lookup */
-			pkt_hop = hop[lpm_pkts++];
-		}
-
-		if ((pkt_hop & RTE_LPM_LOOKUP_SUCCESS) == 0) {
-			core_statistics[lcoreid].lpm4.miss++;
-			free_pkts(&pkts[i], 1);
-			continue;
-		}
-		send_single_packet(pkts[i], pkt_hop & 0xff, IPPROTO_IP);
-	}
-}
-
-static inline void
-route6_pkts(struct rt_ctx *rt_ctx, struct rte_mbuf *pkts[], uint8_t nb_pkts)
-{
-	int32_t hop[MAX_PKT_BURST * 2];
-	uint8_t dst_ip[MAX_PKT_BURST * 2][16];
-	uint8_t *ip6_dst;
-	int32_t pkt_hop = 0;
-	uint16_t i, offset;
-	uint16_t lpm_pkts = 0;
-	unsigned int lcoreid = rte_lcore_id();
-
-	if (nb_pkts == 0)
-		return;
-
-	/* Need to do an LPM lookup for non-inline packets. Inline packets will
-	 * have port ID in the SA
-	 */
-
-	for (i = 0; i < nb_pkts; i++) {
-		if (!(pkts[i]->ol_flags & RTE_MBUF_F_TX_SEC_OFFLOAD)) {
-			/* Security offload not enabled. So an LPM lookup is
-			 * required to get the hop
-			 */
-			offset = offsetof(struct ip6_hdr, ip6_dst);
-			ip6_dst = rte_pktmbuf_mtod_offset(pkts[i], uint8_t *,
-					offset);
-			memcpy(&dst_ip[lpm_pkts][0], ip6_dst, 16);
-			lpm_pkts++;
-		}
-	}
-
-	rte_lpm6_lookup_bulk_func((struct rte_lpm6 *)rt_ctx, dst_ip, hop,
-			lpm_pkts);
-
-	lpm_pkts = 0;
-
-	for (i = 0; i < nb_pkts; i++) {
-		if (pkts[i]->ol_flags & RTE_MBUF_F_TX_SEC_OFFLOAD) {
-			/* Read hop from the SA */
-			pkt_hop = get_hop_for_offload_pkt(pkts[i], 1);
-		} else {
-			/* Need to use hop returned by lookup */
-			pkt_hop = hop[lpm_pkts++];
-		}
-
-		if (pkt_hop == -1) {
-			core_statistics[lcoreid].lpm6.miss++;
-			free_pkts(&pkts[i], 1);
-			continue;
-		}
-		send_single_packet(pkts[i], pkt_hop & 0xff, IPPROTO_IPV6);
-	}
-}
-
 static inline void
 process_pkts(struct lcore_conf *qconf, struct rte_mbuf **pkts,
-		uint8_t nb_pkts, uint16_t portid)
+	     uint8_t nb_pkts, uint16_t portid, struct rte_security_ctx *ctx)
 {
 	struct ipsec_traffic traffic;
 
-	prepare_traffic(pkts, &traffic, nb_pkts);
+	prepare_traffic(ctx, pkts, &traffic, nb_pkts);
 
 	if (unlikely(single_sa)) {
 		if (is_unprotected_port(portid))
@@ -1116,23 +578,16 @@ process_pkts(struct lcore_conf *qconf, struct rte_mbuf **pkts,
 			process_pkts_outbound(&qconf->outbound, &traffic);
 	}
 
-	route4_pkts(qconf->rt4_ctx, traffic.ip4.pkts, traffic.ip4.num);
+#if defined __ARM_NEON
+	/* Neon optimized packet routing */
+	route4_pkts_neon(qconf->rt4_ctx, traffic.ip4.pkts, traffic.ip4.num,
+			 qconf->outbound.ipv4_offloads, true);
+	route6_pkts_neon(qconf->rt6_ctx, traffic.ip6.pkts, traffic.ip6.num);
+#else
+	route4_pkts(qconf->rt4_ctx, traffic.ip4.pkts, traffic.ip4.num,
+		    qconf->outbound.ipv4_offloads, true);
 	route6_pkts(qconf->rt6_ctx, traffic.ip6.pkts, traffic.ip6.num);
-}
-
-static inline void
-drain_tx_buffers(struct lcore_conf *qconf)
-{
-	struct buffer *buf;
-	uint32_t portid;
-
-	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
-		buf = &qconf->tx_mbufs[portid];
-		if (buf->len == 0)
-			continue;
-		send_burst(qconf, buf->len, portid);
-		buf->len = 0;
-	}
+#endif
 }
 
 static inline void
@@ -1182,7 +637,8 @@ drain_inbound_crypto_queues(const struct lcore_conf *qconf,
 	if (trf.ip4.num != 0) {
 		inbound_sp_sa(ctx->sp4_ctx, ctx->sa_ctx, &trf.ip4, 0,
 			&core_statistics[lcoreid].inbound.spd4);
-		route4_pkts(qconf->rt4_ctx, trf.ip4.pkts, trf.ip4.num);
+		route4_pkts(qconf->rt4_ctx, trf.ip4.pkts, trf.ip4.num,
+			    qconf->outbound.ipv4_offloads, true);
 	}
 
 	/* process ipv6 packets */
@@ -1216,7 +672,8 @@ drain_outbound_crypto_queues(const struct lcore_conf *qconf,
 
 	/* process ipv4 packets */
 	if (trf.ip4.num != 0)
-		route4_pkts(qconf->rt4_ctx, trf.ip4.pkts, trf.ip4.num);
+		route4_pkts(qconf->rt4_ctx, trf.ip4.pkts, trf.ip4.num,
+			    qconf->outbound.ipv4_offloads, true);
 
 	/* process ipv6 packets */
 	if (trf.ip6.num != 0)
@@ -1251,16 +708,12 @@ ipsec_poll_mode_worker(void)
 	qconf->inbound.sp6_ctx = socket_ctx[socket_id].sp_ip6_in;
 	qconf->inbound.sa_ctx = socket_ctx[socket_id].sa_in;
 	qconf->inbound.cdev_map = cdev_map_in;
-	qconf->inbound.session_pool = socket_ctx[socket_id].session_pool;
-	qconf->inbound.session_priv_pool =
-			socket_ctx[socket_id].session_priv_pool;
+	qconf->inbound.lcore_id = lcore_id;
 	qconf->outbound.sp4_ctx = socket_ctx[socket_id].sp_ip4_out;
 	qconf->outbound.sp6_ctx = socket_ctx[socket_id].sp_ip6_out;
 	qconf->outbound.sa_ctx = socket_ctx[socket_id].sa_out;
 	qconf->outbound.cdev_map = cdev_map_out;
-	qconf->outbound.session_pool = socket_ctx[socket_id].session_pool;
-	qconf->outbound.session_priv_pool =
-			socket_ctx[socket_id].session_priv_pool;
+	qconf->outbound.lcore_id = lcore_id;
 	qconf->frag.pool_indir = socket_ctx[socket_id].mbuf_pool_indir;
 
 	rc = ipsec_sad_lcore_cache_init(app_sa_prm.cache_sz);
@@ -1309,7 +762,8 @@ ipsec_poll_mode_worker(void)
 
 			if (nb_rx > 0) {
 				core_stats_update_rx(nb_rx);
-				process_pkts(qconf, pkts, nb_rx, portid);
+				process_pkts(qconf, pkts, nb_rx, portid,
+					     rxql->sec_ctx);
 			}
 
 			/* dequeue and process completed crypto-ops */
@@ -1456,6 +910,7 @@ print_usage(const char *prgname)
 		" [--event-vector]"
 		" [--vector-size SIZE]"
 		" [--vector-tmo TIMEOUT in ns]"
+		" [--" CMD_LINE_OPT_QP_DESC_NB " NUMBER_OF_DESC]"
 		"\n\n"
 		"  -p PORTMASK: Hexadecimal bitmask of ports to configure\n"
 		"  -P : Enable promiscuous mode\n"
@@ -1518,6 +973,8 @@ print_usage(const char *prgname)
 		"  --" CMD_LINE_OPT_PER_PORT_POOL " Enable per port mbuf pool\n"
 		"  --" CMD_LINE_OPT_VECTOR_POOL_SZ " Vector pool size\n"
 		"                    (default value is based on mbuf count)\n"
+		"  --" CMD_LINE_OPT_QP_DESC_NB " DESC_NB"
+		": Number of descriptors per queue pair (default value: 2048)\n"
 		"\n",
 		prgname);
 }
@@ -1798,6 +1255,7 @@ parse_args(int32_t argc, char **argv, struct eh_conf *eh_conf)
 			single_sa = 1;
 			single_sa_idx = ret;
 			eh_conf->ipsec_mode = EH_IPSEC_MODE_TYPE_DRIVER;
+			wrkr_flags |= SS_F;
 			printf("Configured with single SA index %u\n",
 					single_sa_idx);
 			break;
@@ -1886,7 +1344,7 @@ parse_args(int32_t argc, char **argv, struct eh_conf *eh_conf)
 		case CMD_LINE_OPT_VECTOR_SIZE_NUM:
 			ret = parse_decimal(optarg);
 
-			if (ret > MAX_PKT_BURST) {
+			if (ret > MAX_PKT_BURST_VEC) {
 				printf("Invalid argument for \'%s\': %s\n",
 					CMD_LINE_OPT_VECTOR_SIZE, optarg);
 				print_usage(prgname);
@@ -1909,6 +1367,9 @@ parse_args(int32_t argc, char **argv, struct eh_conf *eh_conf)
 			break;
 		case CMD_LINE_OPT_PER_PORT_POOL_NUM:
 			per_port_pool = 1;
+			break;
+		case CMD_LINE_OPT_QP_DESC_NB_NUM:
+			qp_desc_nb = parse_decimal(optarg);
 			break;
 		default:
 			print_usage(prgname);
@@ -1959,6 +1420,8 @@ add_dst_ethaddr(uint16_t port, const struct rte_ether_addr *addr)
 		return -EINVAL;
 
 	ethaddr_tbl[port].dst = ETHADDR_TO_UINT64(addr);
+	rte_ether_addr_copy((struct rte_ether_addr *)&ethaddr_tbl[port].dst,
+			    (struct rte_ether_addr *)(val_eth + port));
 	return 0;
 }
 
@@ -2023,7 +1486,7 @@ check_all_ports_link_status(uint32_t port_mask)
 }
 
 static int32_t
-add_mapping(struct rte_hash *map, const char *str, uint16_t cdev_id,
+add_mapping(const char *str, uint16_t cdev_id,
 		uint16_t qp, struct lcore_params *params,
 		struct ipsec_ctx *ipsec_ctx,
 		const struct rte_cryptodev_capabilities *cipher,
@@ -2042,7 +1505,7 @@ add_mapping(struct rte_hash *map, const char *str, uint16_t cdev_id,
 	if (aead)
 		key.aead_algo = aead->sym.aead.algo;
 
-	ret = rte_hash_lookup(map, &key);
+	ret = rte_hash_lookup(ipsec_ctx->cdev_map, &key);
 	if (ret != -ENOENT)
 		return 0;
 
@@ -2064,7 +1527,7 @@ add_mapping(struct rte_hash *map, const char *str, uint16_t cdev_id,
 				cdev_id, qp, i);
 	}
 
-	ret = rte_hash_add_key_data(map, &key, (void *)i);
+	ret = rte_hash_add_key_data(ipsec_ctx->cdev_map, &key, (void *)i);
 	if (ret < 0) {
 		printf("Failed to insert cdev mapping for (lcore %u, "
 				"cdev %u, qp %u), errno %d\n",
@@ -2082,20 +1545,19 @@ add_cdev_mapping(struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
 {
 	int32_t ret = 0;
 	const struct rte_cryptodev_capabilities *i, *j;
-	struct rte_hash *map;
 	struct lcore_conf *qconf;
 	struct ipsec_ctx *ipsec_ctx;
 	const char *str;
 
 	qconf = &lcore_conf[params->lcore_id];
 
-	if ((unprotected_port_mask & (1 << params->port_id)) == 0) {
-		map = cdev_map_out;
+	if (!is_unprotected_port(params->port_id)) {
 		ipsec_ctx = &qconf->outbound;
+		ipsec_ctx->cdev_map = cdev_map_out;
 		str = "Outbound";
 	} else {
-		map = cdev_map_in;
 		ipsec_ctx = &qconf->inbound;
+		ipsec_ctx->cdev_map = cdev_map_in;
 		str = "Inbound";
 	}
 
@@ -2110,7 +1572,7 @@ add_cdev_mapping(struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
 			continue;
 
 		if (i->sym.xform_type == RTE_CRYPTO_SYM_XFORM_AEAD) {
-			ret |= add_mapping(map, str, cdev_id, qp, params,
+			ret |= add_mapping(str, cdev_id, qp, params,
 					ipsec_ctx, NULL, NULL, i);
 			continue;
 		}
@@ -2126,7 +1588,7 @@ add_cdev_mapping(struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
 			if (j->sym.xform_type != RTE_CRYPTO_SYM_XFORM_AUTH)
 				continue;
 
-			ret |= add_mapping(map, str, cdev_id, qp, params,
+			ret |= add_mapping(str, cdev_id, qp, params,
 						ipsec_ctx, i, j, NULL);
 		}
 	}
@@ -2228,7 +1690,7 @@ cryptodevs_init(uint16_t req_queue_num)
 			rte_panic("Failed to initialize cryptodev %u\n",
 					cdev_id);
 
-		qp_conf.nb_descriptors = CDEV_QUEUE_DESC;
+		qp_conf.nb_descriptors = qp_desc_nb;
 		qp_conf.mp_session =
 			socket_ctx[dev_conf.socket_id].session_pool;
 		qp_conf.mp_session_private =
@@ -2249,6 +1711,147 @@ cryptodevs_init(uint16_t req_queue_num)
 	return total_nb_qps;
 }
 
+static int
+check_ptype(int portid)
+{
+	int l3_ipv4 = 0, l3_ipv6 = 0, l4_udp = 0, tunnel_esp = 0;
+	int i, nb_ptypes;
+	uint32_t mask;
+
+	mask = (RTE_PTYPE_L3_MASK | RTE_PTYPE_L4_MASK |
+		      RTE_PTYPE_TUNNEL_MASK);
+
+	nb_ptypes = rte_eth_dev_get_supported_ptypes(portid, mask, NULL, 0);
+	if (nb_ptypes <= 0)
+		return 0;
+
+	uint32_t ptypes[nb_ptypes];
+
+	nb_ptypes = rte_eth_dev_get_supported_ptypes(portid, mask, ptypes, nb_ptypes);
+	for (i = 0; i < nb_ptypes; ++i) {
+		if (RTE_ETH_IS_IPV4_HDR(ptypes[i]))
+			l3_ipv4 = 1;
+		if (RTE_ETH_IS_IPV6_HDR(ptypes[i]))
+			l3_ipv6 = 1;
+		if ((ptypes[i] & RTE_PTYPE_TUNNEL_MASK) == RTE_PTYPE_TUNNEL_ESP)
+			tunnel_esp = 1;
+		if ((ptypes[i] & RTE_PTYPE_L4_MASK) == RTE_PTYPE_L4_UDP)
+			l4_udp = 1;
+	}
+
+	if (l3_ipv4 == 0)
+		printf("port %d cannot parse RTE_PTYPE_L3_IPV4\n", portid);
+
+	if (l3_ipv6 == 0)
+		printf("port %d cannot parse RTE_PTYPE_L3_IPV6\n", portid);
+
+	if (l4_udp == 0)
+		printf("port %d cannot parse RTE_PTYPE_L4_UDP\n", portid);
+
+	if (tunnel_esp == 0)
+		printf("port %d cannot parse RTE_PTYPE_TUNNEL_ESP\n", portid);
+
+	if (l3_ipv4 && l3_ipv6 && l4_udp && tunnel_esp)
+		return 1;
+
+	return 0;
+
+}
+
+static inline void
+parse_ptype(struct rte_mbuf *m)
+{
+	uint32_t packet_type = RTE_PTYPE_UNKNOWN;
+	const struct rte_ipv4_hdr *iph4;
+	const struct rte_ipv6_hdr *iph6;
+	const struct rte_ether_hdr *eth;
+	const struct rte_udp_hdr *udp;
+	uint16_t nat_port, ether_type;
+	int next_proto = 0;
+	size_t ext_len = 0;
+	const uint8_t *p;
+	uint32_t l3len;
+
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	ether_type = eth->ether_type;
+
+	if (ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+		iph4 = (const struct rte_ipv4_hdr *)(eth + 1);
+		l3len = ((iph4->version_ihl & RTE_IPV4_HDR_IHL_MASK) *
+			       RTE_IPV4_IHL_MULTIPLIER);
+
+		if (l3len == sizeof(struct rte_ipv4_hdr))
+			packet_type |= RTE_PTYPE_L3_IPV4;
+		else
+			packet_type |= RTE_PTYPE_L3_IPV4_EXT_UNKNOWN;
+
+		next_proto = iph4->next_proto_id;
+		p = (const uint8_t *)iph4;
+	} else if (ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)) {
+		iph6 = (const struct rte_ipv6_hdr *)(eth + 1);
+		l3len = sizeof(struct ip6_hdr);
+
+		/* determine l3 header size up to ESP extension */
+		next_proto = iph6->proto;
+		p = (const uint8_t *)iph6;
+		while (next_proto != IPPROTO_ESP && l3len < m->data_len &&
+			(next_proto = rte_ipv6_get_next_ext(p + l3len,
+						next_proto, &ext_len)) >= 0)
+			l3len += ext_len;
+
+		/* Skip IPv6 header exceeds first segment length */
+		if (unlikely(l3len + RTE_ETHER_HDR_LEN > m->data_len))
+			goto exit;
+
+		if (l3len == sizeof(struct ip6_hdr))
+			packet_type |= RTE_PTYPE_L3_IPV6;
+		else
+			packet_type |= RTE_PTYPE_L3_IPV6_EXT;
+	}
+
+	switch (next_proto) {
+	case IPPROTO_ESP:
+		packet_type |= RTE_PTYPE_TUNNEL_ESP;
+		break;
+	case IPPROTO_UDP:
+		if (app_sa_prm.udp_encap == 1) {
+			udp = (const struct rte_udp_hdr *)(p + l3len);
+			nat_port = rte_cpu_to_be_16(IPSEC_NAT_T_PORT);
+			if (udp->src_port == nat_port ||
+			    udp->dst_port == nat_port)
+				packet_type |=
+					MBUF_PTYPE_TUNNEL_ESP_IN_UDP;
+		}
+		break;
+	default:
+		break;
+	}
+exit:
+	m->packet_type |= packet_type;
+}
+
+static uint16_t
+parse_ptype_cb(uint16_t port __rte_unused, uint16_t queue __rte_unused,
+	       struct rte_mbuf *pkts[], uint16_t nb_pkts,
+	       uint16_t max_pkts __rte_unused,
+	       void *user_param __rte_unused)
+{
+	uint32_t i;
+
+	if (unlikely(nb_pkts == 0))
+		return nb_pkts;
+
+	rte_prefetch0(rte_pktmbuf_mtod(pkts[0], struct ether_hdr *));
+	for (i = 0; i < (unsigned int) (nb_pkts - 1); ++i) {
+		rte_prefetch0(rte_pktmbuf_mtod(pkts[i+1],
+			struct ether_hdr *));
+		parse_ptype(pkts[i]);
+	}
+	parse_ptype(pkts[i]);
+
+	return nb_pkts;
+}
+
 static void
 port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 {
@@ -2260,6 +1863,7 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 	struct lcore_conf *qconf;
 	struct rte_ether_addr ethaddr;
 	struct rte_eth_conf local_port_conf = port_conf;
+	int ptype_supported;
 
 	ret = rte_eth_dev_info_get(portid, &dev_info);
 	if (ret != 0)
@@ -2280,6 +1884,12 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 			portid, rte_strerror(-ret));
 
 	ethaddr_tbl[portid].src = ETHADDR_TO_UINT64(&ethaddr);
+
+	rte_ether_addr_copy((struct rte_ether_addr *)&ethaddr_tbl[portid].dst,
+			    (struct rte_ether_addr *)(val_eth + portid));
+	rte_ether_addr_copy((struct rte_ether_addr *)&ethaddr_tbl[portid].src,
+			    (struct rte_ether_addr *)(val_eth + portid) + 1);
+
 	print_ethaddr("Address: ", &ethaddr);
 	printf("\n");
 
@@ -2330,9 +1940,6 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 		local_port_conf.txmode.offloads |=
 			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
-	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM)
-		local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM;
-
 	printf("port %u configuring rx_offloads=0x%" PRIx64
 		", tx_offloads=0x%" PRIx64 "\n",
 		portid, local_port_conf.rxmode.offloads,
@@ -2360,6 +1967,11 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 		rte_exit(EXIT_FAILURE, "Cannot adjust number of descriptors: "
 				"err=%d, port=%d\n", ret, portid);
 
+	/* Check if required ptypes are supported */
+	ptype_supported = check_ptype(portid);
+	if (!ptype_supported)
+		printf("Port %d: softly parse packet type info\n", portid);
+
 	/* init one TX queue per lcore */
 	tx_queueid = 0;
 	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
@@ -2385,12 +1997,6 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 
 		qconf = &lcore_conf[lcore_id];
 		qconf->tx_queue_id[portid] = tx_queueid;
-
-		/* Pre-populate pkt offloads based on capabilities */
-		qconf->outbound.ipv4_offloads = RTE_MBUF_F_TX_IPV4;
-		qconf->outbound.ipv6_offloads = RTE_MBUF_F_TX_IPV6;
-		if (local_port_conf.txmode.offloads & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM)
-			qconf->outbound.ipv4_offloads |= RTE_MBUF_F_TX_IP_CKSUM;
 
 		tx_queueid++;
 
@@ -2421,6 +2027,16 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 				rte_exit(EXIT_FAILURE,
 					"rte_eth_rx_queue_setup: err=%d, "
 					"port=%d\n", ret, portid);
+
+			/* Register Rx callback if ptypes are not supported */
+			if (!ptype_supported &&
+			    !rte_eth_add_rx_callback(portid, queue,
+						     parse_ptype_cb, NULL)) {
+				printf("Failed to add rx callback: port=%d, "
+				       "queue=%d\n", portid, queue);
+			}
+
+
 		}
 	}
 	printf("\n");
@@ -2566,39 +2182,15 @@ pool_init(struct socket_ctx *ctx, int32_t socket_id, int portid,
 		printf("Allocated mbuf pool on socket %d\n", socket_id);
 }
 
-static inline int
-inline_ipsec_event_esn_overflow(struct rte_security_ctx *ctx, uint64_t md)
-{
-	struct ipsec_sa *sa;
-
-	/* For inline protocol processing, the metadata in the event will
-	 * uniquely identify the security session which raised the event.
-	 * Application would then need the userdata it had registered with the
-	 * security session to process the event.
-	 */
-
-	sa = (struct ipsec_sa *)rte_security_get_userdata(ctx, md);
-
-	if (sa == NULL) {
-		/* userdata could not be retrieved */
-		return -1;
-	}
-
-	/* Sequence number over flow. SA need to be re-established */
-	RTE_SET_USED(sa);
-	return 0;
-}
-
 static int
 inline_ipsec_event_callback(uint16_t port_id, enum rte_eth_event_type type,
 		 void *param, void *ret_param)
 {
 	uint64_t md;
 	struct rte_eth_event_ipsec_desc *event_desc = NULL;
-	struct rte_security_ctx *ctx = (struct rte_security_ctx *)
-					rte_eth_dev_get_sec_ctx(port_id);
 
 	RTE_SET_USED(param);
+	RTE_SET_USED(port_id);
 
 	if (type != RTE_ETH_EVENT_IPSEC)
 		return -1;
@@ -2611,8 +2203,10 @@ inline_ipsec_event_callback(uint16_t port_id, enum rte_eth_event_type type,
 
 	md = event_desc->metadata;
 
-	if (event_desc->subtype == RTE_ETH_EVENT_IPSEC_ESN_OVERFLOW)
-		return inline_ipsec_event_esn_overflow(ctx, md);
+	if (event_desc->subtype == RTE_ETH_EVENT_IPSEC_ESN_OVERFLOW) {
+		if (md == 0)
+			return -1;
+	}
 	else if (event_desc->subtype >= RTE_ETH_EVENT_IPSEC_MAX) {
 		printf("Invalid IPsec event reported\n");
 		return -1;
@@ -2896,8 +2490,37 @@ check_event_mode_params(struct eh_conf *eh_conf)
 	return 0;
 }
 
+static int
+one_session_free(struct rte_ipsec_session *ips)
+{
+	int32_t ret = 0;
+
+	if (ips->type == RTE_SECURITY_ACTION_TYPE_NONE ||
+		ips->type == RTE_SECURITY_ACTION_TYPE_CPU_CRYPTO) {
+		/* Session has not been created */
+		if (ips->crypto.ses == NULL)
+			return 0;
+
+		ret = rte_cryptodev_sym_session_clear(ips->crypto.dev_id,
+						      ips->crypto.ses);
+		if (ret)
+			return ret;
+
+		ret = rte_cryptodev_sym_session_free(ips->crypto.ses);
+	} else {
+		/* Session has not been created */
+		if (ips->security.ctx == NULL || ips->security.ses == NULL)
+			return 0;
+
+		ret = rte_security_session_destroy(ips->security.ctx,
+						   ips->security.ses);
+	}
+
+	return ret;
+}
+
 static void
-inline_sessions_free(struct sa_ctx *sa_ctx)
+sessions_free(struct sa_ctx *sa_ctx)
 {
 	struct rte_ipsec_session *ips;
 	struct ipsec_sa *sa;
@@ -2914,16 +2537,7 @@ inline_sessions_free(struct sa_ctx *sa_ctx)
 			continue;
 
 		ips = ipsec_get_primary_session(sa);
-		if (ips->type != RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL &&
-		    ips->type != RTE_SECURITY_ACTION_TYPE_INLINE_CRYPTO)
-			continue;
-
-		if (!rte_eth_dev_is_valid_port(sa->portid))
-			continue;
-
-		ret = rte_security_session_destroy(
-				rte_eth_dev_get_sec_ctx(sa->portid),
-				ips->security.ses);
+		ret = one_session_free(ips);
 		if (ret)
 			RTE_LOG(ERR, IPSEC, "Failed to destroy security "
 					    "session type %d, spi %d\n",
@@ -2939,7 +2553,7 @@ calculate_nb_mbufs(uint16_t nb_ports, uint16_t nb_crypto_qp, uint32_t nb_rxq,
 			nb_ports * nb_lcores * MAX_PKT_BURST +
 			nb_ports * nb_txq * nb_txd +
 			nb_lcores * MEMPOOL_CACHE_SIZE +
-			nb_crypto_qp * CDEV_QUEUE_DESC +
+			nb_crypto_qp * qp_desc_nb +
 			nb_lcores * frag_tbl_sz *
 			FRAG_TBL_BUCKET_ENTRIES),
 		       8192U);
@@ -3271,7 +2885,6 @@ ipsec_secgw_telemetry_init(void)
 		"Optional Parameters: int <logical core id>");
 }
 
-
 int32_t
 main(int32_t argc, char **argv)
 {
@@ -3284,6 +2897,7 @@ main(int32_t argc, char **argv)
 	uint64_t req_rx_offloads[RTE_MAX_ETHPORTS];
 	uint64_t req_tx_offloads[RTE_MAX_ETHPORTS];
 	struct eh_conf *eh_conf = NULL;
+	uint32_t ipv4_cksum_port_mask = 0;
 	size_t sess_sz;
 
 	nb_bufs_in_pool = 0;
@@ -3405,6 +3019,20 @@ main(int32_t argc, char **argv)
 				&req_tx_offloads[portid]);
 		port_init(portid, req_rx_offloads[portid],
 				req_tx_offloads[portid]);
+		if ((req_tx_offloads[portid] & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM))
+			ipv4_cksum_port_mask = 1U << portid;
+	}
+
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		if (rte_lcore_is_enabled(lcore_id) == 0)
+			continue;
+
+		/* Pre-populate pkt offloads based on capabilities */
+		lcore_conf[lcore_id].outbound.ipv4_offloads = RTE_MBUF_F_TX_IPV4;
+		lcore_conf[lcore_id].outbound.ipv6_offloads = RTE_MBUF_F_TX_IPV6;
+		/* Update per lcore checksum offload support only if all ports support it */
+		if (ipv4_cksum_port_mask == enabled_port_mask)
+			lcore_conf[lcore_id].outbound.ipv4_offloads |= RTE_MBUF_F_TX_IP_CKSUM;
 	}
 
 	/*
@@ -3466,7 +3094,7 @@ main(int32_t argc, char **argv)
 		if ((socket_ctx[socket_id].session_pool != NULL) &&
 			(socket_ctx[socket_id].sa_in == NULL) &&
 			(socket_ctx[socket_id].sa_out == NULL)) {
-			sa_init(&socket_ctx[socket_id], socket_id);
+			sa_init(&socket_ctx[socket_id], socket_id, lcore_conf);
 			sp4_init(&socket_ctx[socket_id], socket_id);
 			sp6_init(&socket_ctx[socket_id], socket_id);
 			rt_init(&socket_ctx[socket_id], socket_id);
@@ -3474,6 +3102,21 @@ main(int32_t argc, char **argv)
 	}
 
 	flow_init();
+
+	/* Get security context if available and only if dynamic field is
+	 * registered for fast path access.
+	 */
+	if (!rte_security_dynfield_is_registered())
+		goto skip_sec_ctx;
+
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		for (i = 0; i < lcore_conf[lcore_id].nb_rx_queue; i++) {
+			portid = lcore_conf[lcore_id].rx_queue_list[i].port_id;
+			lcore_conf[lcore_id].rx_queue_list[i].sec_ctx =
+				rte_eth_dev_get_sec_ctx(portid);
+		}
+	}
+skip_sec_ctx:
 
 	check_all_ports_link_status(enabled_port_mask);
 
@@ -3498,11 +3141,11 @@ main(int32_t argc, char **argv)
 	/* Free eventmode configuration memory */
 	eh_conf_uninit(eh_conf);
 
-	/* Destroy inline inbound and outbound sessions */
+	/* Destroy inbound and outbound sessions */
 	for (i = 0; i < NB_SOCKETS && i < rte_socket_count(); i++) {
 		socket_id = rte_socket_id_by_idx(i);
-		inline_sessions_free(socket_ctx[socket_id].sa_in);
-		inline_sessions_free(socket_ctx[socket_id].sa_out);
+		sessions_free(socket_ctx[socket_id].sa_in);
+		sessions_free(socket_ctx[socket_id].sa_out);
 	}
 
 	for (cdev_id = 0; cdev_id < rte_cryptodev_count(); cdev_id++) {
@@ -3511,6 +3154,8 @@ main(int32_t argc, char **argv)
 		rte_cryptodev_close(cdev_id);
 		printf(" Done\n");
 	}
+
+	flow_print_counters();
 
 	RTE_ETH_FOREACH_DEV(portid) {
 		if ((enabled_port_mask & (1 << portid)) == 0)

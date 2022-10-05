@@ -100,6 +100,7 @@ enum npc_err_status {
 enum npc_mcam_intf { NPC_MCAM_RX, NPC_MCAM_TX };
 
 typedef union npc_kex_cap_terms_t {
+	/** Packet Matching Rule term fields */
 	struct {
 		/** Total length of received packet */
 		uint64_t len : 1;
@@ -111,10 +112,14 @@ typedef union npc_kex_cap_terms_t {
 		uint64_t vlan_id_0 : 1;
 		/** Last VLAN ID (inner) */
 		uint64_t vlan_id_x : 1;
+		/** PCP in the first VLAN header */
+		uint64_t vlan_pcp_0 : 1;
 		/** destination MAC address */
 		uint64_t dmac : 1;
 		/** IP Protocol or IPv6 Next Header */
 		uint64_t ip_proto : 1;
+		/** DSCP in IP header */
+		uint64_t ip_dscp : 1;
 		/** Destination UDP port, implies IPPROTO=17 */
 		uint64_t udp_dport : 1;
 		/** Destination TCP port implies IPPROTO=6 */
@@ -155,12 +160,13 @@ typedef union npc_kex_cap_terms_t {
 		uint64_t sctp_sport : 1;
 		/** Destination SCTP port */
 		uint64_t sctp_dport : 1;
-		/** GTPU Tunnel endpoint identifier */
-		uint64_t gtpu_teid : 1;
-
+		/** GTPv1 tunnel endpoint identifier */
+		uint64_t gtpv1_teid : 1;
 	} bit;
+
 	/** All bits of the bit field structure */
 	uint64_t all_bits;
+
 } npc_kex_cap_terms_t;
 
 struct npc_parse_item_info {
@@ -189,6 +195,7 @@ struct npc_parse_state {
 	/* adjust ltype in MCAM to match at least one vlan */
 	bool set_vlan_ltype_mask;
 	bool set_ipv6ext_ltype_mask;
+	bool is_second_pass_rule;
 };
 
 enum npc_kpu_parser_flag {
@@ -421,6 +428,7 @@ void npc_get_hw_supp_mask(struct npc_parse_state *pst,
 int npc_parse_item_basic(const struct roc_npc_item_info *item,
 			 struct npc_parse_item_info *info);
 int npc_parse_meta_items(struct npc_parse_state *pst);
+int npc_parse_mark_item(struct npc_parse_state *pst);
 int npc_parse_pre_l2(struct npc_parse_state *pst);
 int npc_parse_higig2_hdr(struct npc_parse_state *pst);
 int npc_parse_cpt_hdr(struct npc_parse_state *pst);
@@ -451,4 +459,6 @@ int npc_rss_action_program(struct roc_npc *roc_npc,
 			   const struct roc_npc_action actions[],
 			   struct roc_npc_flow *flow);
 int npc_rss_group_free(struct npc *npc, struct roc_npc_flow *flow);
+int npc_mcam_init(struct npc *npc, struct roc_npc_flow *flow, int mcam_id);
+int npc_mcam_move(struct mbox *mbox, uint16_t old_ent, uint16_t new_ent);
 #endif /* _ROC_NPC_PRIV_H_ */

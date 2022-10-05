@@ -225,6 +225,9 @@ extern int rte_regexdev_logtype;
 } while (0)
 
 /**
+ * @warning
+ * @b EXPERIMENTAL: this API may change without prior notice.
+ *
  * Check if dev_id is ready.
  *
  * @param dev_id
@@ -234,6 +237,7 @@ extern int rte_regexdev_logtype;
  *   - 0 if device state is not in ready state.
  *   - 1 if device state is ready state.
  */
+__rte_experimental
 int rte_regexdev_is_valid_dev(uint16_t dev_id);
 
 /**
@@ -1469,7 +1473,8 @@ rte_regexdev_enqueue_burst(uint8_t dev_id, uint16_t qp_id,
 	struct rte_regexdev *dev = &rte_regex_devices[dev_id];
 #ifdef RTE_LIBRTE_REGEXDEV_DEBUG
 	RTE_REGEXDEV_VALID_DEV_ID_OR_ERR_RET(dev_id, -EINVAL);
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->enqueue, -ENOTSUP);
+	if (*dev->enqueue == NULL)
+		return -ENOTSUP;
 	if (qp_id >= dev->data->dev_conf.nb_queue_pairs) {
 		RTE_REGEXDEV_LOG(ERR, "Invalid queue %d\n", qp_id);
 		return -EINVAL;
@@ -1528,7 +1533,8 @@ rte_regexdev_dequeue_burst(uint8_t dev_id, uint16_t qp_id,
 	struct rte_regexdev *dev = &rte_regex_devices[dev_id];
 #ifdef RTE_LIBRTE_REGEXDEV_DEBUG
 	RTE_REGEXDEV_VALID_DEV_ID_OR_ERR_RET(dev_id, -EINVAL);
-	RTE_FUNC_PTR_OR_ERR_RET(*dev->dequeue, -ENOTSUP);
+	if (*dev->dequeue == NULL)
+		return -ENOTSUP;
 	if (qp_id >= dev->data->dev_conf.nb_queue_pairs) {
 		RTE_REGEXDEV_LOG(ERR, "Invalid queue %d\n", qp_id);
 		return -EINVAL;

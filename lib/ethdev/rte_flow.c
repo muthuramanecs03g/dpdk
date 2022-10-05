@@ -6,13 +6,11 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 #include <rte_common.h>
 #include <rte_errno.h>
 #include <rte_branch_prediction.h>
 #include <rte_string_fns.h>
-#include <rte_mbuf.h>
 #include <rte_mbuf_dyn.h>
 #include "rte_ethdev.h"
 #include "rte_flow_driver.h"
@@ -99,9 +97,6 @@ static const struct rte_flow_desc_data rte_flow_desc_item[] = {
 	MK_FLOW_ITEM(VOID, 0),
 	MK_FLOW_ITEM(INVERT, 0),
 	MK_FLOW_ITEM(ANY, sizeof(struct rte_flow_item_any)),
-	MK_FLOW_ITEM(PF, 0),
-	MK_FLOW_ITEM(VF, sizeof(struct rte_flow_item_vf)),
-	MK_FLOW_ITEM(PHY_PORT, sizeof(struct rte_flow_item_phy_port)),
 	MK_FLOW_ITEM(PORT_ID, sizeof(struct rte_flow_item_port_id)),
 	MK_FLOW_ITEM(RAW, sizeof(struct rte_flow_item_raw)),
 	MK_FLOW_ITEM(ETH, sizeof(struct rte_flow_item_eth)),
@@ -193,7 +188,6 @@ static const struct rte_flow_desc_data rte_flow_desc_action[] = {
 	MK_FLOW_ACTION(RSS, sizeof(struct rte_flow_action_rss)),
 	MK_FLOW_ACTION(PF, 0),
 	MK_FLOW_ACTION(VF, sizeof(struct rte_flow_action_vf)),
-	MK_FLOW_ACTION(PHY_PORT, sizeof(struct rte_flow_action_phy_port)),
 	MK_FLOW_ACTION(PORT_ID, sizeof(struct rte_flow_action_port_id)),
 	MK_FLOW_ACTION(METER, sizeof(struct rte_flow_action_meter)),
 	MK_FLOW_ACTION(SECURITY, sizeof(struct rte_flow_action_security)),
@@ -1844,5 +1838,23 @@ rte_flow_async_action_handle_update(uint16_t port_id,
 
 	ret = ops->async_action_handle_update(dev, queue_id, op_attr,
 					  action_handle, update, user_data, error);
+	return flow_err(port_id, ret, error);
+}
+
+int
+rte_flow_async_action_handle_query(uint16_t port_id,
+		uint32_t queue_id,
+		const struct rte_flow_op_attr *op_attr,
+		const struct rte_flow_action_handle *action_handle,
+		void *data,
+		void *user_data,
+		struct rte_flow_error *error)
+{
+	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
+	const struct rte_flow_ops *ops = rte_flow_ops_get(port_id, error);
+	int ret;
+
+	ret = ops->async_action_handle_query(dev, queue_id, op_attr,
+					  action_handle, data, user_data, error);
 	return flow_err(port_id, ret, error);
 }

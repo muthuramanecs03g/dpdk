@@ -12,7 +12,8 @@ up to 400-Gb/s.
 
 This document explains how to use DPDK with the Netronome Poll Mode
 Driver (PMD) supporting Netronome's Network Flow Processor 6xxx
-(NFP-6xxx) and Netronome's Flow Processor 4xxx (NFP-4xxx).
+(NFP-6xxx), Netronome's Network Flow Processor 4xxx (NFP-4xxx) and
+Netronome's Network Flow Processor 38xx (NFP-38xx).
 
 NFP is a SRIOV capable device and the PMD supports the physical
 function (PF) and the virtual functions (VFs).
@@ -99,9 +100,10 @@ more than one SmartNIC, same type of SmartNIC or different ones, and to upload a
 different firmware to each SmartNIC.
 
    .. Note::
-      Currently the NFP PMD supports using the PF with Agilio Basic Firmware. See
-      https://help.netronome.com/support/solutions for more information on the
-      various firmwares supported by the Netronome Agilio CX smartNIC.
+      Currently the NFP PMD supports using the PF with Agilio Firmware with NFD3
+      and Agilio Firmware with NFDk. See https://help.netronome.com/support/solutions
+      for more information on the various firmwares supported by the Netronome
+      Agilio CX smartNIC.
 
 PF multiport support
 --------------------

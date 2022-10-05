@@ -252,6 +252,7 @@ CN9XX Features supported
 * Tunnel mode
 * Transport mode(IPv4)
 * UDP Encapsulation
+* AH
 
 AEAD algorithms
 +++++++++++++++
@@ -273,6 +274,7 @@ Auth algorithms
 * SHA384-192-HMAC
 * SHA512-256-HMAC
 * AES-XCBC-96
+* AES-GMAC
 
 CN10XX Features supported
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -284,6 +286,7 @@ CN10XX Features supported
 * Tunnel mode
 * Transport mode
 * UDP Encapsulation
+* AH
 
 AEAD algorithms
 +++++++++++++++
@@ -306,3 +309,4 @@ Auth algorithms
 * SHA384-192-HMAC
 * SHA512-256-HMAC
 * AES-XCBC-96
+* AES-GMAC

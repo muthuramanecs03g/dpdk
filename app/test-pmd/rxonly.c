@@ -28,7 +28,6 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_string_fns.h>
@@ -68,9 +67,17 @@ pkt_burst_receive(struct fwd_stream *fs)
 	get_end_cycles(fs, start_tsc);
 }
 
+static void
+stream_init_receive(struct fwd_stream *fs)
+{
+	fs->disabled = ports[fs->rx_port].rxq[fs->rx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+}
+
 struct fwd_engine rx_only_engine = {
 	.fwd_mode_name  = "rxonly",
 	.port_fwd_begin = NULL,
 	.port_fwd_end   = NULL,
+	.stream_init    = stream_init_receive,
 	.packet_fwd     = pkt_burst_receive,
 };

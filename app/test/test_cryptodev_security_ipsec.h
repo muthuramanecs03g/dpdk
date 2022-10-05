@@ -40,6 +40,11 @@ struct ipsec_test_data {
 	struct rte_security_ipsec_xform ipsec_xform;
 
 	bool aead;
+
+	bool aes_gmac;
+
+	bool auth_only;
+
 	/* Antireplay packet */
 	bool ar_packet;
 
@@ -68,10 +73,21 @@ enum dscp_flags {
 	TEST_IPSEC_SET_DSCP_1_INNER_0,
 };
 
+#define TEST_IPSEC_FLABEL_VAL 0x1234
+
+enum flabel_flags {
+	TEST_IPSEC_COPY_FLABEL_INNER_0 = 1,
+	TEST_IPSEC_COPY_FLABEL_INNER_1,
+	TEST_IPSEC_SET_FLABEL_0_INNER_1,
+	TEST_IPSEC_SET_FLABEL_1_INNER_0,
+};
+
 struct ipsec_test_flags {
 	bool display_alg;
 	bool sa_expiry_pkts_soft;
 	bool sa_expiry_pkts_hard;
+	bool sa_expiry_bytes_soft;
+	bool sa_expiry_bytes_hard;
 	bool icv_corrupt;
 	bool iv_gen;
 	uint32_t tunnel_hdr_verify;
@@ -87,7 +103,9 @@ struct ipsec_test_flags {
 	bool antireplay;
 	enum df_flags df;
 	enum dscp_flags dscp;
+	enum flabel_flags flabel;
 	bool dec_ttl_or_hop_limit;
+	bool ah;
 };
 
 struct crypto_param {
@@ -116,6 +134,11 @@ static const struct crypto_param aead_list[] = {
 	{
 		.type = RTE_CRYPTO_SYM_XFORM_AEAD,
 		.alg.aead = RTE_CRYPTO_AEAD_AES_GCM,
+		.key_length = 32,
+	},
+	{
+		.type = RTE_CRYPTO_SYM_XFORM_AEAD,
+		.alg.aead = RTE_CRYPTO_AEAD_AES_CCM,
 		.key_length = 32
 	},
 };
@@ -182,6 +205,13 @@ static const struct crypto_param auth_list[] = {
 		.key_length = 16,
 		.digest_length = 12,
 	},
+	{
+		.type = RTE_CRYPTO_SYM_XFORM_AUTH,
+		.alg.auth =  RTE_CRYPTO_AUTH_AES_GMAC,
+		.key_length = 16,
+		.digest_length = 16,
+		.iv_length = 12,
+	},
 };
 
 struct crypto_param_comb {
@@ -198,7 +228,11 @@ extern struct crypto_param_comb alg_list[RTE_DIM(aead_list) +
 					 (RTE_DIM(cipher_list) *
 					  RTE_DIM(auth_list))];
 
+extern struct crypto_param_comb ah_alg_list[2 * (RTE_DIM(auth_list) - 1)];
+
 void test_ipsec_alg_list_populate(void);
+
+void test_ipsec_ah_alg_list_populate(void);
 
 int test_ipsec_sec_caps_verify(struct rte_security_ipsec_xform *ipsec_xform,
 			       const struct rte_security_capability *sec_cap,

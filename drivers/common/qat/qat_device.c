@@ -58,8 +58,8 @@ qat_pci_get_extra_size(enum qat_device_gen qat_dev_gen)
 {
 	struct qat_dev_hw_spec_funcs *ops_hw =
 		qat_dev_hw_spec[qat_dev_gen];
-	RTE_FUNC_PTR_OR_ERR_RET(ops_hw->qat_dev_get_extra_size,
-		-ENOTSUP);
+	if (ops_hw->qat_dev_get_extra_size == NULL)
+		return -ENOTSUP;
 	return ops_hw->qat_dev_get_extra_size();
 }
 
@@ -364,6 +364,7 @@ static int qat_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	struct qat_pci_device *qat_pci_dev;
 	struct qat_dev_hw_spec_funcs *ops_hw;
 	struct qat_dev_cmd_param qat_dev_cmd_param[] = {
+			{ QAT_IPSEC_MB_LIB, 0 },
 			{ SYM_ENQ_THRESHOLD_NAME, 0 },
 			{ ASYM_ENQ_THRESHOLD_NAME, 0 },
 			{ COMP_ENQ_THRESHOLD_NAME, 0 },
@@ -380,8 +381,8 @@ static int qat_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		return -ENODEV;
 
 	ops_hw = qat_dev_hw_spec[qat_pci_dev->qat_dev_gen];
-	RTE_FUNC_PTR_OR_ERR_RET(ops_hw->qat_dev_reset_ring_pairs,
-		-ENOTSUP);
+	if (ops_hw->qat_dev_reset_ring_pairs == NULL)
+		return -ENOTSUP;
 	if (ops_hw->qat_dev_reset_ring_pairs(qat_pci_dev)) {
 		QAT_LOG(ERR,
 			"Cannot reset ring pairs, does pf driver supports pf2vf comms?"

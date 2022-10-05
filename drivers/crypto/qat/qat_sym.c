@@ -7,7 +7,7 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 #include <rte_crypto_sym.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_byteorder.h>
 
 #include "qat_sym.h"
@@ -15,6 +15,7 @@
 #include "qat_qp.h"
 
 uint8_t qat_sym_driver_id;
+int qat_ipsec_mb_lib;
 
 struct qat_crypto_gen_dev_ops qat_sym_gen_dev_ops[QAT_N_GENS];
 
@@ -60,6 +61,10 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 	uintptr_t build_request_p = (uintptr_t)opaque[1];
 	qat_sym_build_request_t build_request = (void *)build_request_p;
 	struct qat_sym_session *ctx = NULL;
+	enum rte_proc_type_t proc_type = rte_eal_process_type();
+
+	if (proc_type == RTE_PROC_AUTO || proc_type == RTE_PROC_INVALID)
+		return -EINVAL;
 
 	if (likely(op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)) {
 		ctx = get_sym_session_private_data(op->sym->session,
@@ -71,11 +76,9 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 		if (sess != (uintptr_t)ctx) {
 			struct rte_cryptodev *cdev;
 			struct qat_cryptodev_private *internals;
-			enum rte_proc_type_t proc_type;
 
 			cdev = rte_cryptodev_pmd_get_dev(ctx->dev_id);
 			internals = cdev->data->dev_private;
-			proc_type = rte_eal_process_type();
 
 			if (internals->qat_dev->qat_dev_gen != dev_gen) {
 				op->status =
@@ -102,17 +105,15 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 
 #ifdef RTE_LIB_SECURITY
 	else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION) {
-		if ((void *)sess != (void *)op->sym->sec_session) {
+		ctx = get_sec_session_private_data(op->sym->sec_session);
+		if (unlikely(!ctx)) {
+			QAT_DP_LOG(ERR, "No session for this device");
+			return -EINVAL;
+		}
+		if (sess != (uintptr_t)ctx) {
 			struct rte_cryptodev *cdev;
 			struct qat_cryptodev_private *internals;
-			enum rte_proc_type_t proc_type;
 
-			ctx = get_sec_session_private_data(
-					op->sym->sec_session);
-			if (unlikely(!ctx)) {
-				QAT_DP_LOG(ERR, "No session for this device");
-				return -EINVAL;
-			}
 			if (unlikely(ctx->bpi_ctx == NULL)) {
 				QAT_DP_LOG(ERR, "QAT PMD only supports security"
 						" operation requests for"
@@ -130,7 +131,6 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 			}
 			cdev = rte_cryptodev_pmd_get_dev(ctx->dev_id);
 			internals = cdev->data->dev_private;
-			proc_type = rte_eal_process_type();
 
 			if (internals->qat_dev->qat_dev_gen != dev_gen) {
 				op->status =
@@ -307,6 +307,8 @@ qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
 		if (!strcmp(qat_dev_cmd_param[i].name, SYM_ENQ_THRESHOLD_NAME))
 			internals->min_enq_burst_threshold =
 					qat_dev_cmd_param[i].val;
+		if (!strcmp(qat_dev_cmd_param[i].name, QAT_IPSEC_MB_LIB))
+			qat_ipsec_mb_lib = qat_dev_cmd_param[i].val;
 		i++;
 	}
 

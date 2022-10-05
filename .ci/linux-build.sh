@@ -1,5 +1,8 @@
 #!/bin/sh -xe
 
+# Builds are run as root in containers, no need for sudo
+[ "$(id -u)" != '0' ] || alias sudo=
+
 on_error() {
     if [ $? = 0 ]; then
         exit
@@ -53,19 +56,30 @@ catch_coredump() {
     return 1
 }
 
+cross_file=
+
 if [ "$AARCH64" = "true" ]; then
-    # Note: common/cnxk is disabled for Ubuntu 18.04
-    # https://bugs.dpdk.org/show_bug.cgi?id=697
-    OPTS="$OPTS -Ddisable_drivers=common/cnxk"
     if [ "${CC%%clang}" != "$CC" ]; then
-        OPTS="$OPTS --cross-file config/arm/arm64_armv8_linux_clang_ubuntu1804"
+        cross_file=config/arm/arm64_armv8_linux_clang_ubuntu
     else
-        OPTS="$OPTS --cross-file config/arm/arm64_armv8_linux_gcc"
+        cross_file=config/arm/arm64_armv8_linux_gcc
     fi
 fi
 
+if [ "$MINGW" = "true" ]; then
+    cross_file=config/x86/cross-mingw
+fi
+
 if [ "$PPC64LE" = "true" ]; then
-    OPTS="$OPTS --cross-file config/ppc/ppc64le-power8-linux-gcc-ubuntu1804"
+    cross_file=config/ppc/ppc64le-power8-linux-gcc-ubuntu
+fi
+
+if [ "$RISCV64" = "true" ]; then
+    cross_file=config/riscv/riscv64_linux_gcc
+fi
+
+if [ -n "$cross_file" ]; then
+    OPTS="$OPTS --cross-file $cross_file"
 fi
 
 if [ "$BUILD_DOCS" = "true" ]; then
@@ -78,7 +92,9 @@ if [ "$BUILD_32BIT" = "true" ]; then
     export PKG_CONFIG_LIBDIR="/usr/lib32/pkgconfig"
 fi
 
-if [ "$DEF_LIB" = "static" ]; then
+if [ "$MINGW" = "true" ]; then
+    OPTS="$OPTS -Dexamples=helloworld"
+elif [ "$DEF_LIB" = "static" ]; then
     OPTS="$OPTS -Dexamples=l2fwd,l3fwd"
 else
     OPTS="$OPTS -Dexamples=all"
@@ -89,13 +105,21 @@ OPTS="$OPTS --default-library=$DEF_LIB"
 OPTS="$OPTS --buildtype=debugoptimized"
 OPTS="$OPTS -Dcheck_includes=true"
 if [ "$MINI" = "true" ]; then
-    OPTS="$OPTS -Denable_drivers=bus/vdev,mempool/ring,net/null"
+    OPTS="$OPTS -Denable_drivers=net/null"
     OPTS="$OPTS -Ddisable_libs=*"
 fi
+
+if [ "$ASAN" = "true" ]; then
+    OPTS="$OPTS -Db_sanitize=address"
+    if [ "${CC%%clang}" != "$CC" ]; then
+        OPTS="$OPTS -Db_lundef=false"
+    fi
+fi
+
 meson build --werror $OPTS
 ninja -C build
 
-if [ "$AARCH64" != "true" ] && [ "$PPC64LE" != "true" ]; then
+if [ -z "$cross_file" ]; then
     failed=
     configure_coredump
     devtools/test-null.sh || failed="true"
@@ -104,8 +128,6 @@ if [ "$AARCH64" != "true" ] && [ "$PPC64LE" != "true" ]; then
 fi
 
 if [ "$ABI_CHECKS" = "true" ]; then
-    LIBABIGAIL_VERSION=${LIBABIGAIL_VERSION:-libabigail-1.6}
-
     if [ "$(cat libabigail/VERSION 2>/dev/null)" != "$LIBABIGAIL_VERSION" ]; then
         rm -rf libabigail
         # if we change libabigail, invalidate existing abi cache
@@ -113,14 +135,13 @@ if [ "$ABI_CHECKS" = "true" ]; then
     fi
 
     if [ ! -d libabigail ]; then
-        install_libabigail $LIBABIGAIL_VERSION $(pwd)/libabigail
+        install_libabigail "$LIBABIGAIL_VERSION" $(pwd)/libabigail
         echo $LIBABIGAIL_VERSION > libabigail/VERSION
     fi
 
     export PATH=$(pwd)/libabigail/bin:$PATH
 
     REF_GIT_REPO=${REF_GIT_REPO:-https://dpdk.org/git/dpdk}
-    REF_GIT_TAG=${REF_GIT_TAG:-v19.11}
 
     if [ "$(cat reference/VERSION 2>/dev/null)" != "$REF_GIT_TAG" ]; then
         rm -rf reference
@@ -128,7 +149,7 @@ if [ "$ABI_CHECKS" = "true" ]; then
 
     if [ ! -d reference ]; then
         refsrcdir=$(readlink -f $(pwd)/../dpdk-$REF_GIT_TAG)
-        git clone --single-branch -b $REF_GIT_TAG $REF_GIT_REPO $refsrcdir
+        git clone --single-branch -b "$REF_GIT_TAG" $REF_GIT_REPO $refsrcdir
         meson $OPTS -Dexamples= $refsrcdir $refsrcdir/build
         ninja -C $refsrcdir/build
         DESTDIR=$(pwd)/reference ninja -C $refsrcdir/build install

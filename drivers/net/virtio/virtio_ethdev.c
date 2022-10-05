@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
 
@@ -24,7 +25,7 @@
 #include <rte_memory.h>
 #include <rte_eal_paging.h>
 #include <rte_eal.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_cycles.h>
 #include <rte_kvargs.h>
 
@@ -2612,6 +2613,13 @@ virtio_dev_configure(struct rte_eth_dev *dev)
 	/* if request features changed, reinit the device */
 	if (req_features != hw->req_guest_features) {
 		ret = virtio_init_device(dev, req_features);
+		if (ret < 0)
+			return ret;
+	}
+
+	/* if queues are not allocated, reinit the device */
+	if (hw->vqs == NULL) {
+		ret = virtio_init_device(dev, hw->req_guest_features);
 		if (ret < 0)
 			return ret;
 	}

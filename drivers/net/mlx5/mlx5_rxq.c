@@ -374,7 +374,7 @@ mlx5_get_rx_queue_offloads(struct rte_eth_dev *dev)
 			     RTE_ETH_RX_OFFLOAD_TCP_CKSUM);
 	if (priv->sh->dev_cap.hw_vlan_strip)
 		offloads |= RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
-	if (priv->sh->dev_cap.lro_supported)
+	if (priv->sh->config.lro_allowed)
 		offloads |= RTE_ETH_RX_OFFLOAD_TCP_LRO;
 	return offloads;
 }
@@ -840,7 +840,16 @@ mlx5_rx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	int res;
 	uint64_t offloads = conf->offloads |
 			    dev->data->dev_conf.rxmode.offloads;
+	bool is_extmem = false;
 
+	if ((offloads & RTE_ETH_RX_OFFLOAD_TCP_LRO) &&
+	    !priv->sh->config.lro_allowed) {
+		DRV_LOG(ERR,
+			"Port %u queue %u LRO is configured but not allowed.",
+			dev->data->port_id, idx);
+		rte_errno = EINVAL;
+		return -rte_errno;
+	}
 	if (mp) {
 		/*
 		 * The parameters should be checked on rte_eth_dev layer.
@@ -849,6 +858,8 @@ mlx5_rx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		 */
 		rx_seg = &rx_single;
 		n_seg = 1;
+		is_extmem = rte_pktmbuf_priv_flags(mp) &
+			    RTE_PKTMBUF_POOL_F_PINNED_EXT_BUF;
 	}
 	if (n_seg > 1) {
 		/* The offloads should be checked on rte_eth_dev layer. */
@@ -912,7 +923,7 @@ mlx5_rx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	}
 	if (rxq_ctrl == NULL) {
 		rxq_ctrl = mlx5_rxq_new(dev, idx, desc, socket, conf, rx_seg,
-					n_seg);
+					n_seg, is_extmem);
 		if (rxq_ctrl == NULL) {
 			DRV_LOG(ERR, "port %u unable to allocate rx queue index %u",
 				dev->data->port_id, idx);
@@ -1548,7 +1559,8 @@ mlx5_max_lro_msg_size_adjust(struct rte_eth_dev *dev, uint16_t idx,
  *   Log number of strides to configure for this queue.
  * @param actual_log_stride_size
  *   Log stride size to configure for this queue.
- *
+ * @param is_extmem
+ *   Is external pinned memory pool used.
  * @return
  *   0 if Multi-Packet RQ is supported, otherwise -1.
  */
@@ -1556,7 +1568,8 @@ static int
 mlx5_mprq_prepare(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		  bool rx_seg_en, uint32_t min_mbuf_size,
 		  uint32_t *actual_log_stride_num,
-		  uint32_t *actual_log_stride_size)
+		  uint32_t *actual_log_stride_size,
+		  bool is_extmem)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_port_config *config = &priv->config;
@@ -1575,7 +1588,7 @@ mlx5_mprq_prepare(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 				log_max_stride_size);
 	uint32_t log_stride_wqe_size;
 
-	if (mlx5_check_mprq_support(dev) != 1 || rx_seg_en)
+	if (mlx5_check_mprq_support(dev) != 1 || rx_seg_en || is_extmem)
 		goto unsupport;
 	/* Checks if chosen number of strides is in supported range. */
 	if (config->mprq.log_stride_num > log_max_stride_num ||
@@ -1641,7 +1654,7 @@ unsupport:
 			" rxq_num = %u, stride_sz = %u, stride_num = %u\n"
 			"  supported: min_rxqs_num = %u, min_buf_wqe_sz = %u"
 			" min_stride_sz = %u, max_stride_sz = %u).\n"
-			"Rx segment is %senable.",
+			"Rx segment is %senabled. External mempool is %sused.",
 			dev->data->port_id, min_mbuf_size, desc, priv->rxqs_n,
 			RTE_BIT32(config->mprq.log_stride_size),
 			RTE_BIT32(config->mprq.log_stride_num),
@@ -1649,7 +1662,7 @@ unsupport:
 			RTE_BIT32(dev_cap->mprq.log_min_stride_wqe_size),
 			RTE_BIT32(dev_cap->mprq.log_min_stride_size),
 			RTE_BIT32(dev_cap->mprq.log_max_stride_size),
-			rx_seg_en ? "" : "not ");
+			rx_seg_en ? "" : "not ", is_extmem ? "" : "not ");
 	return -1;
 }
 
@@ -1671,7 +1684,8 @@ unsupport:
 struct mlx5_rxq_ctrl *
 mlx5_rxq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	     unsigned int socket, const struct rte_eth_rxconf *conf,
-	     const struct rte_eth_rxseg_split *rx_seg, uint16_t n_seg)
+	     const struct rte_eth_rxseg_split *rx_seg, uint16_t n_seg,
+	     bool is_extmem)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_rxq_ctrl *tmpl;
@@ -1694,7 +1708,8 @@ mlx5_rxq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	const int mprq_en = !mlx5_mprq_prepare(dev, idx, desc, rx_seg_en,
 					       non_scatter_min_mbuf_size,
 					       &mprq_log_actual_stride_num,
-					       &mprq_log_actual_stride_size);
+					       &mprq_log_actual_stride_size,
+					       is_extmem);
 	/*
 	 * Always allocate extra slots, even if eventually
 	 * the vector Rx will not be used.
@@ -2042,6 +2057,8 @@ mlx5_rxq_get(struct rte_eth_dev *dev, uint16_t idx)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 
+	if (idx >= priv->rxqs_n)
+		return NULL;
 	MLX5_ASSERT(priv->rxq_privs != NULL);
 	return (*priv->rxq_privs)[idx];
 }
@@ -2141,6 +2158,65 @@ mlx5_ext_rxq_get(struct rte_eth_dev *dev, uint16_t idx)
 
 	MLX5_ASSERT(mlx5_is_external_rxq(dev, idx));
 	return &priv->ext_rxqs[idx - MLX5_EXTERNAL_RX_QUEUE_ID_MIN];
+}
+
+/**
+ * Dereference a list of Rx queues.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param queues
+ *   List of Rx queues to deref.
+ * @param queues_n
+ *   Number of queues in the array.
+ */
+static void
+mlx5_rxqs_deref(struct rte_eth_dev *dev, uint16_t *queues,
+		const uint32_t queues_n)
+{
+	uint32_t i;
+
+	for (i = 0; i < queues_n; i++) {
+		if (mlx5_is_external_rxq(dev, queues[i]))
+			claim_nonzero(mlx5_ext_rxq_deref(dev, queues[i]));
+		else
+			claim_nonzero(mlx5_rxq_deref(dev, queues[i]));
+	}
+}
+
+/**
+ * Increase reference count for list of Rx queues.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param queues
+ *   List of Rx queues to ref.
+ * @param queues_n
+ *   Number of queues in the array.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+mlx5_rxqs_ref(struct rte_eth_dev *dev, uint16_t *queues,
+	      const uint32_t queues_n)
+{
+	uint32_t i;
+
+	for (i = 0; i != queues_n; ++i) {
+		if (mlx5_is_external_rxq(dev, queues[i])) {
+			if (mlx5_ext_rxq_ref(dev, queues[i]) == NULL)
+				goto error;
+		} else {
+			if (mlx5_rxq_ref(dev, queues[i]) == NULL)
+				goto error;
+		}
+	}
+	return 0;
+error:
+	mlx5_rxqs_deref(dev, queues, i);
+	rte_errno = EINVAL;
+	return -rte_errno;
 }
 
 /**
@@ -2271,13 +2347,12 @@ mlx5_ext_rxq_verify(struct rte_eth_dev *dev)
 bool
 mlx5_rxq_is_hairpin(struct rte_eth_dev *dev, uint16_t idx)
 {
-	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_rxq_ctrl *rxq_ctrl;
 
 	if (mlx5_is_external_rxq(dev, idx))
 		return false;
 	rxq_ctrl = mlx5_rxq_ctrl_get(dev, idx);
-	return (idx < priv->rxqs_n && rxq_ctrl != NULL && rxq_ctrl->is_hairpin);
+	return (rxq_ctrl != NULL && rxq_ctrl->is_hairpin);
 }
 
 /*
@@ -2294,9 +2369,12 @@ mlx5_rxq_is_hairpin(struct rte_eth_dev *dev, uint16_t idx)
 const struct rte_eth_hairpin_conf *
 mlx5_rxq_get_hairpin_conf(struct rte_eth_dev *dev, uint16_t idx)
 {
-	struct mlx5_rxq_priv *rxq = mlx5_rxq_get(dev, idx);
+	if (mlx5_rxq_is_hairpin(dev, idx)) {
+		struct mlx5_rxq_priv *rxq = mlx5_rxq_get(dev, idx);
 
-	return mlx5_rxq_is_hairpin(dev, idx) ? &rxq->hairpin_conf : NULL;
+		return rxq != NULL ? &rxq->hairpin_conf : NULL;
+	}
+	return NULL;
 }
 
 /**
@@ -2306,7 +2384,7 @@ mlx5_rxq_get_hairpin_conf(struct rte_eth_dev *dev, uint16_t idx)
  * @param ind_tbl
  *   Pointer to indirection table to match.
  * @param queues
- *   Queues to match to ques in indirection table.
+ *   Queues to match to queues in indirection table.
  * @param queues_n
  *   Number of queues in the array.
  *
@@ -2315,11 +2393,11 @@ mlx5_rxq_get_hairpin_conf(struct rte_eth_dev *dev, uint16_t idx)
  */
 static int
 mlx5_ind_table_obj_match_queues(const struct mlx5_ind_table_obj *ind_tbl,
-		       const uint16_t *queues, uint32_t queues_n)
+				const uint16_t *queues, uint32_t queues_n)
 {
-		return (ind_tbl->queues_n == queues_n) &&
-		    (!memcmp(ind_tbl->queues, queues,
-			    ind_tbl->queues_n * sizeof(ind_tbl->queues[0])));
+	return (ind_tbl->queues_n == queues_n) &&
+		(!memcmp(ind_tbl->queues, queues,
+			 ind_tbl->queues_n * sizeof(ind_tbl->queues[0])));
 }
 
 /**
@@ -2377,7 +2455,7 @@ mlx5_ind_table_obj_release(struct rte_eth_dev *dev,
 			   bool deref_rxqs)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
-	unsigned int i, ret;
+	unsigned int ret;
 
 	rte_rwlock_write_lock(&priv->ind_tbls_lock);
 	ret = __atomic_sub_fetch(&ind_tbl->refcnt, 1, __ATOMIC_RELAXED);
@@ -2387,10 +2465,8 @@ mlx5_ind_table_obj_release(struct rte_eth_dev *dev,
 	if (ret)
 		return 1;
 	priv->obj_ops.ind_table_destroy(ind_tbl);
-	if (deref_rxqs) {
-		for (i = 0; i != ind_tbl->queues_n; ++i)
-			claim_nonzero(mlx5_rxq_deref(dev, ind_tbl->queues[i]));
-	}
+	if (deref_rxqs)
+		mlx5_rxqs_deref(dev, ind_tbl->queues, ind_tbl->queues_n);
 	mlx5_free(ind_tbl);
 	return 0;
 }
@@ -2442,46 +2518,30 @@ mlx5_ind_table_obj_setup(struct rte_eth_dev *dev,
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 	uint32_t queues_n = ind_tbl->queues_n;
-	uint16_t *queues = ind_tbl->queues;
-	unsigned int i = 0, j;
-	int ret = 0, err;
+	int ret;
 	const unsigned int n = rte_is_power_of_2(queues_n) ?
 			       log2above(queues_n) :
 			       log2above(priv->sh->dev_cap.ind_table_max_size);
 
-	if (ref_qs)
-		for (i = 0; i != queues_n; ++i) {
-			if (mlx5_is_external_rxq(dev, queues[i])) {
-				if (mlx5_ext_rxq_ref(dev, queues[i]) == NULL) {
-					ret = -rte_errno;
-					goto error;
-				}
-			} else {
-				if (mlx5_rxq_ref(dev, queues[i]) == NULL) {
-					ret = -rte_errno;
-					goto error;
-				}
-			}
-		}
+	if (ref_qs && mlx5_rxqs_ref(dev, ind_tbl->queues, queues_n) < 0) {
+		DRV_LOG(DEBUG, "Port %u invalid indirection table queues.",
+			dev->data->port_id);
+		return -rte_errno;
+	}
 	ret = priv->obj_ops.ind_table_new(dev, n, ind_tbl);
-	if (ret)
-		goto error;
+	if (ret) {
+		DRV_LOG(DEBUG, "Port %u cannot create a new indirection table.",
+			dev->data->port_id);
+		if (ref_qs) {
+			int err = rte_errno;
+
+			mlx5_rxqs_deref(dev, ind_tbl->queues, queues_n);
+			rte_errno = err;
+		}
+		return ret;
+	}
 	__atomic_fetch_add(&ind_tbl->refcnt, 1, __ATOMIC_RELAXED);
 	return 0;
-error:
-	if (ref_qs) {
-		err = rte_errno;
-		for (j = 0; j < i; j++) {
-			if (mlx5_is_external_rxq(dev, queues[j]))
-				mlx5_ext_rxq_deref(dev, queues[j]);
-			else
-				mlx5_rxq_deref(dev, queues[j]);
-		}
-		rte_errno = err;
-	}
-	DRV_LOG(DEBUG, "Port %u cannot setup indirection table.",
-		dev->data->port_id);
-	return ret;
 }
 
 /**
@@ -2586,8 +2646,7 @@ mlx5_ind_table_obj_modify(struct rte_eth_dev *dev,
 			  bool standalone, bool ref_new_qs, bool deref_old_qs)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
-	unsigned int i = 0, j;
-	int ret = 0, err;
+	int ret;
 	const unsigned int n = rte_is_power_of_2(queues_n) ?
 			       log2above(queues_n) :
 			       log2above(priv->sh->dev_cap.ind_table_max_size);
@@ -2596,33 +2655,29 @@ mlx5_ind_table_obj_modify(struct rte_eth_dev *dev,
 	RTE_SET_USED(standalone);
 	if (mlx5_ind_table_obj_check_standalone(dev, ind_tbl) < 0)
 		return -rte_errno;
-	if (ref_new_qs)
-		for (i = 0; i != queues_n; ++i) {
-			if (!mlx5_rxq_ref(dev, queues[i])) {
-				ret = -rte_errno;
-				goto error;
-			}
-		}
+	if (ref_new_qs && mlx5_rxqs_ref(dev, queues, queues_n) < 0) {
+		DRV_LOG(DEBUG, "Port %u invalid indirection table queues.",
+			dev->data->port_id);
+		return -rte_errno;
+	}
 	MLX5_ASSERT(priv->obj_ops.ind_table_modify);
 	ret = priv->obj_ops.ind_table_modify(dev, n, queues, queues_n, ind_tbl);
-	if (ret)
-		goto error;
+	if (ret) {
+		DRV_LOG(DEBUG, "Port %u cannot modify indirection table.",
+			dev->data->port_id);
+		if (ref_new_qs) {
+			int err = rte_errno;
+
+			mlx5_rxqs_deref(dev, queues, queues_n);
+			rte_errno = err;
+		}
+		return ret;
+	}
 	if (deref_old_qs)
-		for (i = 0; i < ind_tbl->queues_n; i++)
-			claim_nonzero(mlx5_rxq_deref(dev, ind_tbl->queues[i]));
+		mlx5_rxqs_deref(dev, ind_tbl->queues, ind_tbl->queues_n);
 	ind_tbl->queues_n = queues_n;
 	ind_tbl->queues = queues;
 	return 0;
-error:
-	if (ref_new_qs) {
-		err = rte_errno;
-		for (j = 0; j < i; j++)
-			mlx5_rxq_deref(dev, queues[j]);
-		rte_errno = err;
-	}
-	DRV_LOG(DEBUG, "Port %u cannot setup indirection table.",
-		dev->data->port_id);
-	return ret;
 }
 
 /**
@@ -3023,7 +3078,7 @@ mlx5_drop_action_create(struct rte_eth_dev *dev)
 
 	if (priv->drop_queue.hrxq)
 		return priv->drop_queue.hrxq;
-	hrxq = mlx5_malloc(MLX5_MEM_ZERO, sizeof(*hrxq), 0, SOCKET_ID_ANY);
+	hrxq = mlx5_malloc(MLX5_MEM_ZERO, sizeof(*hrxq) + MLX5_RSS_HASH_KEY_LEN, 0, SOCKET_ID_ANY);
 	if (!hrxq) {
 		DRV_LOG(WARNING,
 			"Port %u cannot allocate memory for drop queue.",

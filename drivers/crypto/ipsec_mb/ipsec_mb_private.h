@@ -5,9 +5,13 @@
 #ifndef _IPSEC_MB_PRIVATE_H_
 #define _IPSEC_MB_PRIVATE_H_
 
+#if defined(RTE_ARCH_ARM)
+#include <ipsec-mb.h>
+#else
 #include <intel-ipsec-mb.h>
+#endif
 #include <cryptodev_pmd.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 
 #if defined(RTE_LIB_SECURITY)
 #define IPSEC_MB_DOCSIS_SEC_ENABLED 1
@@ -26,7 +30,8 @@ enum ipsec_mb_vector_mode {
 	IPSEC_MB_SSE,
 	IPSEC_MB_AVX,
 	IPSEC_MB_AVX2,
-	IPSEC_MB_AVX512
+	IPSEC_MB_AVX512,
+	IPSEC_MB_ARM64,
 };
 
 extern enum ipsec_mb_vector_mode vector_mode;
@@ -120,7 +125,7 @@ struct ipsec_mb_dev_private {
 	/**< PMD  type */
 	uint32_t max_nb_queue_pairs;
 	/**< Max number of queue pairs supported by device */
-	__extension__ uint8_t priv[0];
+	__extension__ uint8_t priv[];
 };
 
 /** IPSEC Multi buffer queue pair common queue pair data for all PMDs */
@@ -147,7 +152,7 @@ struct ipsec_mb_qp {
 	/* Multi buffer manager */
 	const struct rte_memzone *mb_mgr_mz;
 	/* Shared memzone for storing mb_mgr */
-	__extension__ uint8_t additional_data[0];
+	__extension__ uint8_t additional_data[];
 	/**< Storing PMD specific additional data */
 };
 

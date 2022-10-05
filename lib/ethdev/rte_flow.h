@@ -17,7 +17,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <rte_arp.h>
 #include <rte_common.h>
 #include <rte_ether.h>
 #include <rte_icmp.h>
@@ -26,18 +25,17 @@
 #include <rte_tcp.h>
 #include <rte_udp.h>
 #include <rte_vxlan.h>
-#include <rte_byteorder.h>
 #include <rte_esp.h>
 #include <rte_higig.h>
 #include <rte_ecpri.h>
 #include <rte_bitops.h>
-#include <rte_mbuf.h>
 #include <rte_mbuf_dyn.h>
 #include <rte_meter.h>
 #include <rte_gtp.h>
 #include <rte_l2tpv2.h>
 #include <rte_ppp.h>
 #include <rte_gre.h>
+#include <rte_macsec.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -190,48 +188,6 @@ enum rte_flow_item_type {
 	 * See struct rte_flow_item_any.
 	 */
 	RTE_FLOW_ITEM_TYPE_ANY,
-
-	/**
-	 * @deprecated
-	 * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
-	 * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
-	 *
-	 * [META]
-	 *
-	 * Matches traffic originating from (ingress) or going to (egress)
-	 * the physical function of the current device.
-	 *
-	 * No associated specification structure.
-	 */
-	RTE_FLOW_ITEM_TYPE_PF,
-
-	/**
-	 * @deprecated
-	 * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
-	 * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
-	 *
-	 * [META]
-	 *
-	 * Matches traffic originating from (ingress) or going to (egress) a
-	 * given virtual function of the current device.
-	 *
-	 * See struct rte_flow_item_vf.
-	 */
-	RTE_FLOW_ITEM_TYPE_VF,
-
-	/**
-	 * @deprecated
-	 * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
-	 * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
-	 *
-	 * [META]
-	 *
-	 * Matches traffic originating from (ingress) or going to (egress) a
-	 * physical port of the underlying device.
-	 *
-	 * See struct rte_flow_item_phy_port.
-	 */
-	RTE_FLOW_ITEM_TYPE_PHY_PORT,
 
 	/**
 	 * @deprecated
@@ -671,6 +627,13 @@ enum rte_flow_item_type {
 	 * See struct rte_flow_item_gre_opt.
 	 */
 	RTE_FLOW_ITEM_TYPE_GRE_OPTION,
+
+	/**
+	 * Matches MACsec Ethernet Header.
+	 *
+	 * See struct rte_flow_item_macsec.
+	 */
+	RTE_FLOW_ITEM_TYPE_MACSEC,
 };
 
 /**
@@ -722,74 +685,6 @@ static const struct rte_flow_item_any rte_flow_item_any_mask = {
  * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
  * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
  *
- * RTE_FLOW_ITEM_TYPE_VF
- *
- * Matches traffic originating from (ingress) or going to (egress) a given
- * virtual function of the current device.
- *
- * If supported, should work even if the virtual function is not managed by
- * the application and thus not associated with a DPDK port ID.
- *
- * Note this pattern item does not match VF representors traffic which, as
- * separate entities, should be addressed through their own DPDK port IDs.
- *
- * - Can be specified multiple times to match traffic addressed to several
- *   VF IDs.
- * - Can be combined with a PF item to match both PF and VF traffic.
- *
- * A zeroed mask can be used to match any VF ID.
- */
-struct rte_flow_item_vf {
-	uint32_t id; /**< VF ID. */
-};
-
-/** Default mask for RTE_FLOW_ITEM_TYPE_VF. */
-#ifndef __cplusplus
-static const struct rte_flow_item_vf rte_flow_item_vf_mask = {
-	.id = 0x00000000,
-};
-#endif
-
-/**
- * @deprecated
- * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
- * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
- *
- * RTE_FLOW_ITEM_TYPE_PHY_PORT
- *
- * Matches traffic originating from (ingress) or going to (egress) a
- * physical port of the underlying device.
- *
- * The first PHY_PORT item overrides the physical port normally associated
- * with the specified DPDK input port (port_id). This item can be provided
- * several times to match additional physical ports.
- *
- * Note that physical ports are not necessarily tied to DPDK input ports
- * (port_id) when those are not under DPDK control. Possible values are
- * specific to each device, they are not necessarily indexed from zero and
- * may not be contiguous.
- *
- * As a device property, the list of allowed values as well as the value
- * associated with a port_id should be retrieved by other means.
- *
- * A zeroed mask can be used to match any port index.
- */
-struct rte_flow_item_phy_port {
-	uint32_t index; /**< Physical port index. */
-};
-
-/** Default mask for RTE_FLOW_ITEM_TYPE_PHY_PORT. */
-#ifndef __cplusplus
-static const struct rte_flow_item_phy_port rte_flow_item_phy_port_mask = {
-	.index = 0x00000000,
-};
-#endif
-
-/**
- * @deprecated
- * @see RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR
- * @see RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT
- *
  * RTE_FLOW_ITEM_TYPE_PORT_ID
  *
  * Matches traffic originating from (ingress) or going to (egress) a given
@@ -798,11 +693,6 @@ static const struct rte_flow_item_phy_port rte_flow_item_phy_port_mask = {
  * Normally only supported if the port ID in question is known by the
  * underlying PMD and related to the device the flow rule is created
  * against.
- *
- * This must not be confused with @p PHY_PORT which refers to the physical
- * port of a device, whereas @p PORT_ID refers to a struct rte_eth_dev
- * object on the application side (also known as "port representor"
- * depending on the kind of underlying device).
  */
 struct rte_flow_item_port_id {
 	uint32_t id; /**< DPDK port ID. */
@@ -1215,6 +1105,15 @@ struct rte_flow_item_gre_opt {
 	struct rte_gre_hdr_opt_checksum_rsvd checksum_rsvd;
 	struct rte_gre_hdr_opt_key key;
 	struct rte_gre_hdr_opt_sequence sequence;
+};
+
+/**
+ * RTE_FLOW_ITEM_TYPE_MACSEC.
+ *
+ * Matches MACsec header.
+ */
+struct rte_flow_item_macsec {
+	struct rte_macsec_hdr macsec_hdr;
 };
 
 /**
@@ -1921,9 +1820,6 @@ static const struct rte_flow_item_conntrack rte_flow_item_conntrack_mask = {
 #endif
 
 /**
- * @warning
- * @b EXPERIMENTAL: this structure may change without prior notice
- *
  * Provides an ethdev port ID for use with the following items:
  * RTE_FLOW_ITEM_TYPE_PORT_REPRESENTOR,
  * RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT.
@@ -2344,18 +2240,6 @@ enum rte_flow_action_type {
 	 * See struct rte_flow_action_vf.
 	 */
 	RTE_FLOW_ACTION_TYPE_VF,
-
-	/**
-	 * @deprecated
-	 * @see RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR
-	 * @see RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT
-	 *
-	 * Directs packets to a given physical port index of the underlying
-	 * device.
-	 *
-	 * See struct rte_flow_action_phy_port.
-	 */
-	RTE_FLOW_ACTION_TYPE_PHY_PORT,
 
 	/**
 	 * @deprecated
@@ -3086,24 +2970,6 @@ struct rte_flow_action_vf {
  * @see RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR
  * @see RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT
  *
- * RTE_FLOW_ACTION_TYPE_PHY_PORT
- *
- * Directs packets to a given physical port index of the underlying
- * device.
- *
- * @see RTE_FLOW_ITEM_TYPE_PHY_PORT
- */
-struct rte_flow_action_phy_port {
-	uint32_t original:1; /**< Use original port index if possible. */
-	uint32_t reserved:31; /**< Reserved, must be zero. */
-	uint32_t index; /**< Physical port index. */
-};
-
-/**
- * @deprecated
- * @see RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR
- * @see RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT
- *
  * RTE_FLOW_ACTION_TYPE_PORT_ID
  *
  * Directs matching traffic to a given DPDK port ID.
@@ -3646,9 +3512,6 @@ struct rte_flow_action_meter_color {
 };
 
 /**
- * @warning
- * @b EXPERIMENTAL: this structure may change without prior notice
- *
  * Provides an ethdev port ID for use with the following actions:
  * RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR,
  * RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT.
@@ -3690,6 +3553,9 @@ enum rte_flow_field_id {
 	RTE_FLOW_FIELD_META,		/**< Metadata value. */
 	RTE_FLOW_FIELD_POINTER,		/**< Memory pointer. */
 	RTE_FLOW_FIELD_VALUE,		/**< Immediate value. */
+	RTE_FLOW_FIELD_IPV4_ECN,	/**< IPv4 ECN. */
+	RTE_FLOW_FIELD_IPV6_ECN,	/**< IPv6 ECN. */
+	RTE_FLOW_FIELD_GTP_PSC_QFI,	/**< GTP QFI. */
 };
 
 /**
@@ -3762,11 +3628,7 @@ extern uint64_t rte_flow_dynf_metadata_mask;
 
 /* Mbuf dynamic flags for metadata. */
 #define RTE_MBUF_DYNFLAG_RX_METADATA (rte_flow_dynf_metadata_mask)
-#define PKT_RX_DYNF_METADATA RTE_DEPRECATED(PKT_RX_DYNF_METADATA) \
-		RTE_MBUF_DYNFLAG_RX_METADATA
 #define RTE_MBUF_DYNFLAG_TX_METADATA (rte_flow_dynf_metadata_mask)
-#define PKT_TX_DYNF_METADATA RTE_DEPRECATED(PKT_TX_DYNF_METADATA) \
-		RTE_MBUF_DYNFLAG_TX_METADATA
 
 __rte_experimental
 static inline uint32_t
@@ -4799,9 +4661,6 @@ rte_flow_tunnel_item_release(uint16_t port_id,
 			     struct rte_flow_error *error);
 
 /**
- * @warning
- * @b EXPERIMENTAL: this API may change without prior notice.
- *
  * Get a proxy port to manage "transfer" flows.
  *
  * Managing "transfer" flows requires that the user communicate them
@@ -4826,7 +4685,6 @@ rte_flow_tunnel_item_release(uint16_t port_id,
  * @return
  *   0 on success, a negative error code otherwise
  */
-__rte_experimental
 int
 rte_flow_pick_transfer_proxy(uint16_t port_id, uint16_t *proxy_port_id,
 			     struct rte_flow_error *error);
@@ -4903,6 +4761,11 @@ struct rte_flow_port_info {
 	 * @see RTE_FLOW_ACTION_TYPE_METER
 	 */
 	uint32_t max_nb_meters;
+	/**
+	 * Maximum number connection trackings.
+	 * @see RTE_FLOW_ACTION_TYPE_CONNTRACK
+	 */
+	uint32_t max_nb_conn_tracks;
 };
 
 /**
@@ -4972,6 +4835,11 @@ struct rte_flow_port_attr {
 	 * @see RTE_FLOW_ACTION_TYPE_METER
 	 */
 	uint32_t nb_meters;
+	/**
+	 * Number of connection trackings to configure.
+	 * @see RTE_FLOW_ACTION_TYPE_CONNTRACK
+	 */
+	uint32_t nb_conn_tracks;
 };
 
 /**
@@ -5613,6 +5481,51 @@ rte_flow_async_action_handle_update(uint16_t port_id,
 		const void *update,
 		void *user_data,
 		struct rte_flow_error *error);
+
+/**
+ * @warning
+ * @b EXPERIMENTAL: this API may change without prior notice.
+ *
+ * Enqueue indirect action query operation.
+ *
+ * Retrieve action-specific data such as counters.
+ * Data is gathered by special action which may be present/referenced in
+ * more than one flow rule definition.
+ * Data will be available only when completion event returns.
+ *
+ * @see rte_flow_async_action_handle_query
+ *
+ * @param port_id
+ *   Port identifier of Ethernet device.
+ * @param[in] queue_id
+ *   Flow queue which is used to query the action.
+ * @param[in] op_attr
+ *   Indirect action update operation attributes.
+ * @param[in] action_handle
+ *   Handle for the action object to query.
+ * @param[in, out] data
+ *   Pointer to storage for the associated query data type.
+ *   The out data will be available only when completion event returns
+ *   from rte_flow_pull.
+ * @param[in] user_data
+ *   The user data that will be returned on the completion events.
+ * @param[out] error
+ *   Perform verbose error reporting if not NULL. PMDs initialize this
+ *   structure in case of error only.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+__rte_experimental
+int
+rte_flow_async_action_handle_query(uint16_t port_id,
+		uint32_t queue_id,
+		const struct rte_flow_op_attr *op_attr,
+		const struct rte_flow_action_handle *action_handle,
+		void *data,
+		void *user_data,
+		struct rte_flow_error *error);
+
 #ifdef __cplusplus
 }
 #endif

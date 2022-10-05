@@ -262,6 +262,9 @@
 /* Maximum number of DS in WQE. Limited by 6-bit field. */
 #define MLX5_DSEG_MAX 63
 
+/* The 32 bit syndrome offset in struct mlx5_err_cqe. */
+#define MLX5_ERROR_CQE_SYNDROME_OFFSET 52
+
 /* The completion mode offset in the WQE control segment line 2. */
 #define MLX5_COMP_MODE_OFFSET 2
 
@@ -557,7 +560,7 @@ struct mlx5_umr_wqe {
 struct mlx5_rdma_write_wqe {
 	struct mlx5_wqe_cseg ctr;
 	struct mlx5_wqe_rseg rseg;
-	struct mlx5_wqe_dseg dseg[0];
+	struct mlx5_wqe_dseg dseg[];
 } __rte_packed;
 
 #ifdef PEDANTIC
@@ -581,6 +584,8 @@ struct mlx5_rdma_write_wqe {
 #define MLX5_GGA_COMP_LOG_BLOCK_SIZE_MAX 15u
 #define MLX5_GGA_COMP_LOG_DYNAMIC_SIZE_MAX 15u
 #define MLX5_GGA_COMP_LOG_DYNAMIC_SIZE_MIN 0u
+#define MLX5_GGA_COMP_OUT_OF_SPACE_SYNDROME_BE 0x29D0084
+#define MLX5_GGA_COMP_MISSING_BFINAL_SYNDROME_BE 0x29D0011
 
 struct mlx5_wqe_metadata_seg {
 	uint32_t mmo_control_31_0; /* mmo_control_63_32 is in ctrl_seg.imm */
@@ -739,6 +744,7 @@ enum mlx5_modification_field {
 	MLX5_MODI_OUT_TCP_ACK_NUM,
 	MLX5_MODI_IN_TCP_ACK_NUM = 0x5C,
 	MLX5_MODI_GTP_TEID = 0x6E,
+	MLX5_MODI_OUT_IP_ECN = 0x73,
 };
 
 /* Total number of metadata reg_c's. */
@@ -894,7 +900,10 @@ struct mlx5_ifc_fte_match_set_misc_bits {
 	u8 reserved_at_120[0xa];
 	u8 geneve_opt_len[0x6];
 	u8 geneve_protocol_type[0x10];
-	u8 reserved_at_140[0xc0];
+	u8 reserved_at_140[0x20];
+	u8 inner_esp_spi[0x20];
+	u8 outer_esp_spi[0x20];
+	u8 reserved_at_1a0[0x60];
 };
 
 struct mlx5_ifc_ipv4_layout_bits {
@@ -1288,6 +1297,7 @@ enum {
 	MLX5_GET_HCA_CAP_OP_MOD_NIC_FLOW_TABLE = 0x7 << 1,
 	MLX5_SET_HCA_CAP_OP_MOD_ESW = 0x9 << 1,
 	MLX5_GET_HCA_CAP_OP_MOD_VDPA_EMULATION = 0x13 << 1,
+	MLX5_GET_HCA_CAP_OP_MOD_CRYPTO = 0x1A << 1,
 	MLX5_GET_HCA_CAP_OP_MOD_PARSE_GRAPH_NODE_CAP = 0x1C << 1,
 	MLX5_GET_HCA_CAP_OP_MOD_GENERAL_DEVICE_2 = 0x20 << 1,
 };
@@ -1793,7 +1803,9 @@ struct mlx5_ifc_virtio_emulation_cap_bits {
 	u8 virtio_queue_type[0x8];
 	u8 reserved_at_20[0x13];
 	u8 log_doorbell_stride[0x5];
-	u8 reserved_at_3b[0x3];
+	u8 vnet_modify_ext[0x1];
+	u8 virtio_net_q_addr_modify[0x1];
+	u8 virtio_q_index_modify[0x1];
 	u8 log_doorbell_bar_size[0x5];
 	u8 doorbell_bar_offset[0x40];
 	u8 reserved_at_80[0x8];
@@ -1879,6 +1891,62 @@ struct mlx5_ifc_roce_caps_bits {
 	u8 reserved_at_20[0x7e0];
 };
 
+struct mlx5_ifc_ft_fields_support_bits {
+	u8 outer_dmac[0x1];
+	u8 outer_smac[0x1];
+	u8 outer_ether_type[0x1];
+	u8 reserved_at_3[0x1];
+	u8 outer_first_prio[0x1];
+	u8 outer_first_cfi[0x1];
+	u8 outer_first_vid[0x1];
+	u8 reserved_at_7[0x1];
+	u8 outer_second_prio[0x1];
+	u8 outer_second_cfi[0x1];
+	u8 outer_second_vid[0x1];
+	u8 reserved_at_b[0x1];
+	u8 outer_sip[0x1];
+	u8 outer_dip[0x1];
+	u8 outer_frag[0x1];
+	u8 outer_ip_protocol[0x1];
+	u8 outer_ip_ecn[0x1];
+	u8 outer_ip_dscp[0x1];
+	u8 outer_udp_sport[0x1];
+	u8 outer_udp_dport[0x1];
+	u8 outer_tcp_sport[0x1];
+	u8 outer_tcp_dport[0x1];
+	u8 outer_tcp_flags[0x1];
+	u8 outer_gre_protocol[0x1];
+	u8 outer_gre_key[0x1];
+	u8 outer_vxlan_vni[0x1];
+	u8 reserved_at_1a[0x5];
+	u8 source_eswitch_port[0x1];
+	u8 inner_dmac[0x1];
+	u8 inner_smac[0x1];
+	u8 inner_ether_type[0x1];
+	u8 reserved_at_23[0x1];
+	u8 inner_first_prio[0x1];
+	u8 inner_first_cfi[0x1];
+	u8 inner_first_vid[0x1];
+	u8 reserved_at_27[0x1];
+	u8 inner_second_prio[0x1];
+	u8 inner_second_cfi[0x1];
+	u8 inner_second_vid[0x1];
+	u8 reserved_at_2b[0x1];
+	u8 inner_sip[0x1];
+	u8 inner_dip[0x1];
+	u8 inner_frag[0x1];
+	u8 inner_ip_protocol[0x1];
+	u8 inner_ip_ecn[0x1];
+	u8 inner_ip_dscp[0x1];
+	u8 inner_udp_sport[0x1];
+	u8 inner_udp_dport[0x1];
+	u8 inner_tcp_sport[0x1];
+	u8 inner_tcp_dport[0x1];
+	u8 inner_tcp_flags[0x1];
+	u8 reserved_at_37[0x9];
+	u8 reserved_at_40[0x40];
+};
+
 /*
  * Table 1872 - Flow Table Fields Supported 2 Format
  */
@@ -1918,7 +1986,10 @@ struct mlx5_ifc_flow_table_nic_cap_bits {
 		flow_table_properties_nic_transmit_rdma;
 	struct mlx5_ifc_flow_table_prop_layout_bits
 		flow_table_properties_nic_transmit_sniffer;
-	u8 reserved_at_e00[0x600];
+	u8 reserved_at_e00[0x200];
+	struct mlx5_ifc_ft_fields_support_bits
+		ft_header_modify_nic_receive;
+	u8 reserved_at_1080[0x380];
 	struct mlx5_ifc_ft_fields_support_2_bits
 		ft_field_support_2_nic_receive;
 };
@@ -3015,6 +3086,15 @@ enum {
 	MLX5_VIRTQ_MODIFY_TYPE_STATE = (1UL << 0),
 	MLX5_VIRTQ_MODIFY_TYPE_DIRTY_BITMAP_PARAMS = (1UL << 3),
 	MLX5_VIRTQ_MODIFY_TYPE_DIRTY_BITMAP_DUMP_ENABLE = (1UL << 4),
+	MLX5_VIRTQ_MODIFY_TYPE_QUEUE_PERIOD = (1UL << 5),
+	MLX5_VIRTQ_MODIFY_TYPE_ADDR = (1UL << 6),
+	MLX5_VIRTQ_MODIFY_TYPE_HW_AVAILABLE_INDEX = (1UL << 7),
+	MLX5_VIRTQ_MODIFY_TYPE_HW_USED_INDEX = (1UL << 8),
+	MLX5_VIRTQ_MODIFY_TYPE_Q_TYPE = (1UL << 9),
+	MLX5_VIRTQ_MODIFY_TYPE_VERSION_1_0 = (1UL << 10),
+	MLX5_VIRTQ_MODIFY_TYPE_Q_MKEY = (1UL << 11),
+	MLX5_VIRTQ_MODIFY_TYPE_QUEUE_FEATURE_BIT_MASK = (1UL << 12),
+	MLX5_VIRTQ_MODIFY_TYPE_EVENT_MODE = (1UL << 13),
 };
 
 struct mlx5_ifc_virtio_q_bits {
@@ -3285,6 +3365,7 @@ struct mlx5_aso_wqe {
 
 enum {
 	MLX5_EVENT_TYPE_OBJECT_CHANGE = 0x27,
+	MLX5_EVENT_TYPE_SRQ_LIMIT_REACHED = 0x14,
 };
 
 enum {
@@ -3470,7 +3551,7 @@ struct mlx5_ifc_qpc_pas_list_bits {
 #endif
 struct mlx5_ifc_qpc_extension_and_pas_list_bits {
 	struct mlx5_ifc_qpc_extension_bits qpc_data_extension;
-	u8 pas[0][0x40];
+	u8 pas[][0x40];
 };
 
 
@@ -3648,6 +3729,23 @@ struct mlx5_ifc_init2init_qp_in_bits {
 	u8 reserved_at_800[0x80];
 };
 
+struct mlx5_ifc_2rst_qp_out_bits {
+	u8 status[0x8];
+	u8 reserved_at_8[0x18];
+	u8 syndrome[0x20];
+	u8 reserved_at_40[0x40];
+};
+
+struct mlx5_ifc_2rst_qp_in_bits {
+	u8 opcode[0x10];
+	u8 uid[0x10];
+	u8 vhca_tunnel_id[0x10];
+	u8 op_mod[0x10];
+	u8 reserved_at_80[0x8];
+	u8 qpn[0x18];
+	u8 reserved_at_a0[0x20];
+};
+
 struct mlx5_ifc_dealloc_pd_out_bits {
 	u8 status[0x8];
 	u8 reserved_0[0x18];
@@ -3694,7 +3792,7 @@ struct mlx5_ifc_query_qp_out_bits {
 	u8 reserved_at_a0[0x20];
 	struct mlx5_ifc_qpc_bits qpc;
 	u8 reserved_at_800[0x80];
-	u8 pas[0][0x40];
+	u8 pas[][0x40];
 };
 #ifdef PEDANTIC
 #pragma GCC diagnostic error "-Wpedantic"
@@ -3734,7 +3832,7 @@ struct mlx5_ifc_access_register_out_bits {
 	u8 reserved_at_8[0x18];
 	u8 syndrome[0x20];
 	u8 reserved_at_40[0x40];
-	u8 register_data[0][0x20];
+	u8 register_data[][0x20];
 };
 
 struct mlx5_ifc_access_register_in_bits {
@@ -3745,7 +3843,7 @@ struct mlx5_ifc_access_register_in_bits {
 	u8 reserved_at_40[0x10];
 	u8 register_id[0x10];
 	u8 argument[0x20];
-	u8 register_data[0][0x20];
+	u8 register_data[][0x20];
 };
 #ifdef PEDANTIC
 #pragma GCC diagnostic error "-Wpedantic"
@@ -3762,6 +3860,7 @@ enum {
 	MLX5_CRYPTO_COMMISSIONING_REGISTER_ID = 0xC003,
 	MLX5_IMPORT_KEK_HANDLE_REGISTER_ID = 0xC004,
 	MLX5_CREDENTIAL_HANDLE_REGISTER_ID = 0xC005,
+	MLX5_QSHR_REGISTER_ID = 0x4030,
 };
 
 struct mlx5_ifc_register_mtutc_bits {
@@ -3776,6 +3875,30 @@ struct mlx5_ifc_register_mtutc_bits {
 	u8 time_adjustment[0x20];
 };
 
+struct mlx5_ifc_ets_global_config_register_bits {
+	u8 reserved_at_0[0x2];
+	u8 rate_limit_update[0x1];
+	u8 reserved_at_3[0x29];
+	u8 max_bw_units[0x4];
+	u8 reserved_at_48[0x8];
+	u8 max_bw_value[0x8];
+};
+
+#define ETS_GLOBAL_CONFIG_BW_UNIT_DISABLED      0x0
+#define ETS_GLOBAL_CONFIG_BW_UNIT_HUNDREDS_MBPS 0x3
+#define ETS_GLOBAL_CONFIG_BW_UNIT_GBPS          0x4
+
+struct mlx5_ifc_register_qshr_bits {
+	u8 reserved_at_0[0x4];
+	u8 connected_host[0x1];
+	u8 vqos[0x1];
+	u8 fast_response[0x1];
+	u8 reserved_at_7[0x1];
+	u8 local_port[0x8];
+	u8 reserved_at_16[0x230];
+	struct mlx5_ifc_ets_global_config_register_bits global_config;
+};
+
 #define MLX5_MTUTC_TIMESTAMP_MODE_INTERNAL_TIMER 0
 #define MLX5_MTUTC_TIMESTAMP_MODE_REAL_TIME 1
 
@@ -3787,6 +3910,34 @@ struct mlx5_ifc_crypto_operational_register_bits {
 	u8 credential[0x140];
 	u8 kek[0x100];
 	u8 reserved_at_280[0x180];
+};
+
+struct mlx5_ifc_crypto_caps_bits {
+	u8 wrapped_crypto_operational[0x1];
+	u8 wrapped_crypto_going_to_commissioning[0x1];
+	u8 sw_wrapped_dek[0x1];
+	u8 synchronize_dek[0x1];
+	u8 int_kek_manual[0x1];
+	u8 int_kek_auto[0x1];
+	u8 reserved_at_6[0x12];
+	u8 wrapped_import_method[0x8];
+	u8 reserved_at_20[0x3];
+	u8 log_dek_max_alloc[0x5];
+	u8 reserved_at_28[0x3];
+	u8 log_max_num_deks[0x5];
+	u8 reserved_at_30[0x3];
+	u8 log_max_num_import_keks[0x5];
+	u8 reserved_at_38[0x3];
+	u8 log_max_num_creds[0x5];
+	u8 failed_selftests[0x10];
+	u8 num_nv_import_keks[0x8];
+	u8 num_nv_credentials[0x8];
+	u8 reserved_at_60[0x3];
+	u8 log_dek_granularity[0x5];
+	u8 reserved_at_68[0x3];
+	u8 log_max_num_int_kek[0x5];
+	u8 reserved_at_70[0x10];
+	u8 reserved_at_80[0x780];
 };
 
 struct mlx5_ifc_crypto_commissioning_register_bits {

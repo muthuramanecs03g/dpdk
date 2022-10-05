@@ -160,12 +160,19 @@ enum rte_crypto_cipher_algorithm {
 	 * for m_src and m_dst in the rte_crypto_sym_op must be NULL.
 	 */
 
-	RTE_CRYPTO_CIPHER_DES_DOCSISBPI
+	RTE_CRYPTO_CIPHER_DES_DOCSISBPI,
 	/**< DES algorithm using modes required by
 	 * DOCSIS Baseline Privacy Plus Spec.
 	 * Chained mbufs are not supported in this mode, i.e. rte_mbuf.next
 	 * for m_src and m_dst in the rte_crypto_sym_op must be NULL.
 	 */
+
+	RTE_CRYPTO_CIPHER_SM4_ECB,
+	/**< ShangMi 4 (SM4) algorithm in ECB mode */
+	RTE_CRYPTO_CIPHER_SM4_CBC,
+	/**< ShangMi 4 (SM4) algorithm in CBC mode */
+	RTE_CRYPTO_CIPHER_SM4_CTR
+	/**< ShangMi 4 (SM4) algorithm in CTR mode */
 };
 
 /** Cipher algorithm name strings */
@@ -363,8 +370,10 @@ enum rte_crypto_auth_algorithm {
 	/**< HMAC using 384 bit SHA3 algorithm. */
 	RTE_CRYPTO_AUTH_SHA3_512,
 	/**< 512 bit SHA3 algorithm. */
-	RTE_CRYPTO_AUTH_SHA3_512_HMAC
+	RTE_CRYPTO_AUTH_SHA3_512_HMAC,
 	/**< HMAC using 512 bit SHA3 algorithm. */
+	RTE_CRYPTO_AUTH_SM3
+	/**< ShangMi 3 (SM3) algorithm */
 };
 
 /** Authentication algorithm name strings */

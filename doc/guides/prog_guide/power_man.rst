@@ -252,6 +252,30 @@ API Overview for Ethernet PMD Power Management
 
 * **Queue Disable**: Disable power scheme for certain queue/port/core.
 
+* **Get Emptypoll Max**: Get the configured number of empty polls to wait before
+  entering sleep state.
+
+* **Set Emptypoll Max**: Set the number of empty polls to wait before entering
+  sleep state.
+
+* **Get Pause Duration**: Get the configured duration (microseconds) to be used
+  in the Pause callback.
+
+* **Set Pause Duration**: Set the duration of the pause (microseconds) used in
+  the Pause mode callback.
+
+* **Get Scaling Min Freq**: Get the configured minimum frequency (kHz) to be used
+  in Frequency Scaling mode.
+
+* **Set Scaling Min Freq**: Set the minimum frequency (kHz) to be used in Frequency
+  Scaling mode.
+
+* **Get Scaling Max Freq**: Get the configured maximum frequency (kHz) to be used
+  in Frequency Scaling mode.
+
+* **Set Scaling Max Freq**: Set the maximum frequency (kHz) to be used in Frequency
+  Scaling mode.
+
 References
 ----------
 

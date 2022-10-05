@@ -13,7 +13,6 @@
 #define NIX_DEF_SQB	     ((uint16_t)16)
 #define NIX_MIN_SQB	     ((uint16_t)8)
 #define NIX_SQB_LIST_SPACE   ((uint16_t)2)
-#define NIX_SQB_LOWER_THRESH ((uint16_t)70)
 
 /* Apply BP/DROP when CQ is 95% full */
 #define NIX_CQ_THRESH_LEVEL	(5 * 256 / 100)
@@ -100,6 +99,7 @@ struct nix_tm_node {
 	/* Last stats */
 	uint64_t last_pkts;
 	uint64_t last_bytes;
+	uint32_t tc_refcnt;
 };
 
 struct nix_tm_shaper_profile {
@@ -181,6 +181,7 @@ struct nix {
 	uint16_t tm_root_lvl;
 	uint16_t tm_flags;
 	uint16_t tm_link_cfg_lvl;
+	uint8_t tm_aggr_lvl_rr_prio;
 	uint16_t contig_rsvd[NIX_TXSCH_LVL_CNT];
 	uint16_t discontig_rsvd[NIX_TXSCH_LVL_CNT];
 	uint64_t tm_markfmt_en;
@@ -201,6 +202,7 @@ struct nix {
 	uint16_t nb_cpt_lf;
 	uint16_t outb_se_ring_cnt;
 	uint16_t outb_se_ring_base;
+	bool need_meta_aura;
 	/* Mode provided by driver */
 	bool inb_inl_dev;
 
@@ -284,7 +286,6 @@ void nix_unregister_irqs(struct nix *nix);
 
 /* Default TL1 priority and Quantum from AF */
 #define NIX_TM_TL1_DFLT_RR_QTM	((1 << 24) - 1)
-#define NIX_TM_TL1_DFLT_RR_PRIO 1
 
 struct nix_tm_shaper_data {
 	uint64_t burst_exponent;
@@ -357,6 +358,8 @@ nix_tm_tree2str(enum roc_nix_tm_tree tree)
 		return "Default Tree";
 	else if (tree == ROC_NIX_TM_RLIMIT)
 		return "Rate Limit Tree";
+	else if (tree == ROC_NIX_TM_PFC)
+		return "PFC Tree";
 	else if (tree == ROC_NIX_TM_USER)
 		return "User Tree";
 	return "???";
@@ -400,7 +403,7 @@ int nix_rq_cfg(struct dev *dev, struct roc_nix_rq *rq, uint16_t qints, bool cfg,
 int nix_rq_ena_dis(struct dev *dev, struct roc_nix_rq *rq, bool enable);
 int nix_tm_bp_config_get(struct roc_nix *roc_nix, bool *is_enabled);
 int nix_tm_bp_config_set(struct roc_nix *roc_nix, uint16_t sq, uint16_t tc,
-			 bool enable);
+			 bool enable, bool force_flush);
 void nix_rq_vwqe_flush(struct roc_nix_rq *rq, uint16_t vwqe_interval);
 int nix_tm_mark_init(struct nix *nix);
 
@@ -432,7 +435,8 @@ bool nix_tm_child_res_valid(struct nix_tm_node_list *list,
 			    struct nix_tm_node *parent);
 uint16_t nix_tm_resource_estimate(struct nix *nix, uint16_t *schq_contig,
 				  uint16_t *schq, enum roc_nix_tm_tree tree);
-uint8_t nix_tm_tl1_default_prep(uint32_t schq, volatile uint64_t *reg,
+uint8_t nix_tm_tl1_default_prep(struct nix *nix, uint32_t schq,
+				volatile uint64_t *reg,
 				volatile uint64_t *regval);
 uint8_t nix_tm_topology_reg_prep(struct nix *nix, struct nix_tm_node *node,
 				 volatile uint64_t *reg,
@@ -451,7 +455,7 @@ struct nix_tm_shaper_profile *nix_tm_shaper_profile_alloc(void);
 void nix_tm_shaper_profile_free(struct nix_tm_shaper_profile *profile);
 
 uint64_t nix_get_blkaddr(struct dev *dev);
-void nix_lf_rq_dump(__io struct nix_cn10k_rq_ctx_s *ctx);
+void nix_lf_rq_dump(__io struct nix_cn10k_rq_ctx_s *ctx, FILE *file);
 int nix_lf_gen_reg_dump(uintptr_t nix_lf_base, uint64_t *data);
 int nix_lf_stat_reg_dump(uintptr_t nix_lf_base, uint64_t *data,
 			 uint8_t lf_tx_stats, uint8_t lf_rx_stats);

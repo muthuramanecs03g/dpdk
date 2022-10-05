@@ -3,6 +3,7 @@
  * Copyright(c) 2014 6WIND S.A.
  */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -579,7 +580,6 @@ int
 rte_eal_init(int argc, char **argv)
 {
 	int i, fctret, ret;
-	pthread_t thread_id;
 	static uint32_t run_once;
 	uint32_t has_run = 0;
 	char cpuset[RTE_CPU_AFFINITY_STR_LEN];
@@ -603,8 +603,6 @@ rte_eal_init(int argc, char **argv)
 		rte_errno = EALREADY;
 		return -1;
 	}
-
-	thread_id = pthread_self();
 
 	eal_reset_internal_config(internal_conf);
 
@@ -794,8 +792,8 @@ rte_eal_init(int argc, char **argv)
 
 	ret = eal_thread_dump_current_affinity(cpuset, sizeof(cpuset));
 
-	RTE_LOG(DEBUG, EAL, "Main lcore %u is ready (tid=%p;cpuset=[%s%s])\n",
-		config->main_lcore, thread_id, cpuset,
+	RTE_LOG(DEBUG, EAL, "Main lcore %u is ready (tid=%zx;cpuset=[%s%s])\n",
+		config->main_lcore, (uintptr_t)pthread_self(), cpuset,
 		ret == 0 ? "" : "...");
 
 	RTE_LCORE_FOREACH_WORKER(i) {
@@ -813,13 +811,13 @@ rte_eal_init(int argc, char **argv)
 
 		/* create a thread for each lcore */
 		ret = pthread_create(&lcore_config[i].thread_id, NULL,
-				     eal_thread_loop, NULL);
+				     eal_thread_loop, (void *)(uintptr_t)i);
 		if (ret != 0)
 			rte_panic("Cannot create thread\n");
 
 		/* Set thread_name for aid in debugging. */
 		snprintf(thread_name, sizeof(thread_name),
-				"lcore-worker-%d", i);
+				"rte-worker-%d", i);
 		rte_thread_setname(lcore_config[i].thread_id, thread_name);
 
 		ret = pthread_setaffinity_np(lcore_config[i].thread_id,
@@ -896,11 +894,11 @@ rte_eal_cleanup(void)
 		eal_get_internal_configuration();
 	rte_service_finalize();
 	rte_mp_channel_cleanup();
+	rte_trace_save();
+	eal_trace_fini();
 	/* after this point, any DPDK pointers will become dangling */
 	rte_eal_memory_detach();
 	rte_eal_alarm_cleanup();
-	rte_trace_save();
-	eal_trace_fini();
 	eal_cleanup_config(internal_conf);
 	return 0;
 }

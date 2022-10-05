@@ -47,7 +47,7 @@
 #define MLX5_ALARM_TIMEOUT_US 100000
 
 /* Maximum number of extended statistics counters. */
-#define MLX5_MAX_XSTATS 32
+#define MLX5_MAX_XSTATS 64
 
 /* Maximum Packet headers size (L2+L3+L4) for TSO. */
 #define MLX5_MAX_TSO_HEADER 192U
@@ -90,7 +90,7 @@
 
 /* Supported RSS */
 #define MLX5_RSS_HF_MASK (~(RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP | \
-			    MLX5_RSS_SRC_DST_ONLY))
+			    MLX5_RSS_SRC_DST_ONLY | RTE_ETH_RSS_ESP))
 
 /* Timeout in seconds to get a valid link status. */
 #define MLX5_LINK_STATUS_TIMEOUT 10

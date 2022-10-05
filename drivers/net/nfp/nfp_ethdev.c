@@ -16,7 +16,7 @@
 #include <rte_common.h>
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_ether.h>
 #include <rte_malloc.h>
 #include <rte_memzone.h>
@@ -37,28 +37,6 @@
 #include "nfp_logs.h"
 #include "nfp_ctrl.h"
 #include "nfp_cpp_bridge.h"
-
-
-static int nfp_net_pf_read_mac(struct nfp_pf_dev *pf_dev, int port);
-static int nfp_net_start(struct rte_eth_dev *dev);
-static int nfp_net_stop(struct rte_eth_dev *dev);
-static int nfp_net_set_link_up(struct rte_eth_dev *dev);
-static int nfp_net_set_link_down(struct rte_eth_dev *dev);
-static int nfp_net_close(struct rte_eth_dev *dev);
-static int nfp_net_init(struct rte_eth_dev *eth_dev);
-static int nfp_fw_upload(struct rte_pci_device *dev,
-			 struct nfp_nsp *nsp, char *card);
-static int nfp_fw_setup(struct rte_pci_device *dev,
-			struct nfp_cpp *cpp,
-			struct nfp_eth_table *nfp_eth_table,
-			struct nfp_hwinfo *hwinfo);
-static int nfp_init_phyports(struct nfp_pf_dev *pf_dev);
-static int nfp_pf_init(struct rte_pci_device *pci_dev);
-static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev);
-static int nfp_pf_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
-			    struct rte_pci_device *dev);
-static int nfp_pci_uninit(struct rte_eth_dev *eth_dev);
-static int eth_nfp_pci_remove(struct rte_pci_device *pci_dev);
 
 static int
 nfp_net_pf_read_mac(struct nfp_pf_dev *pf_dev, int port)
@@ -145,7 +123,10 @@ nfp_net_start(struct rte_eth_dev *dev)
 	if (rxmode->mq_mode & RTE_ETH_MQ_RX_RSS) {
 		nfp_net_rss_config_default(dev);
 		update |= NFP_NET_CFG_UPDATE_RSS;
-		new_ctrl |= NFP_NET_CFG_CTRL_RSS;
+		if (hw->cap & NFP_NET_CFG_CTRL_RSS2)
+			new_ctrl |= NFP_NET_CFG_CTRL_RSS2;
+		else
+			new_ctrl |= NFP_NET_CFG_CTRL_RSS;
 	}
 
 	/* Enable device */
@@ -203,10 +184,7 @@ error:
 static int
 nfp_net_stop(struct rte_eth_dev *dev)
 {
-	int i;
 	struct nfp_net_hw *hw;
-	struct nfp_net_txq *this_tx_q;
-	struct nfp_net_rxq *this_rx_q;
 
 	PMD_INIT_LOG(DEBUG, "Stop");
 
@@ -215,15 +193,9 @@ nfp_net_stop(struct rte_eth_dev *dev)
 	nfp_net_disable_queues(dev);
 
 	/* Clear queues */
-	for (i = 0; i < dev->data->nb_tx_queues; i++) {
-		this_tx_q = (struct nfp_net_txq *)dev->data->tx_queues[i];
-		nfp_net_reset_tx_queue(this_tx_q);
-	}
+	nfp_net_stop_tx_queue(dev);
 
-	for (i = 0; i < dev->data->nb_rx_queues; i++) {
-		this_rx_q = (struct nfp_net_rxq *)dev->data->rx_queues[i];
-		nfp_net_reset_rx_queue(this_rx_q);
-	}
+	nfp_net_stop_rx_queue(dev);
 
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
 		/* Configure the physical port down */
@@ -278,8 +250,6 @@ nfp_net_close(struct rte_eth_dev *dev)
 	struct nfp_net_hw *hw;
 	struct rte_pci_device *pci_dev;
 	struct nfp_pf_dev *pf_dev;
-	struct nfp_net_txq *this_tx_q;
-	struct nfp_net_rxq *this_rx_q;
 	int i;
 
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -299,17 +269,9 @@ nfp_net_close(struct rte_eth_dev *dev)
 	nfp_net_disable_queues(dev);
 
 	/* Clear queues */
-	for (i = 0; i < dev->data->nb_tx_queues; i++) {
-		this_tx_q = (struct nfp_net_txq *)dev->data->tx_queues[i];
-		nfp_net_reset_tx_queue(this_tx_q);
-		nfp_net_tx_queue_release(dev, i);
-	}
+	nfp_net_close_tx_queue(dev);
 
-	for (i = 0; i < dev->data->nb_rx_queues; i++) {
-		this_rx_q = (struct nfp_net_rxq *)dev->data->rx_queues[i];
-		nfp_net_reset_rx_queue(this_rx_q);
-		nfp_net_rx_queue_release(dev, i);
-	}
+	nfp_net_close_rx_queue(dev);
 
 	/* Cancel possible impending LSC work here before releasing the port*/
 	rte_eal_alarm_cancel(nfp_net_dev_interrupt_delayed_handler,
@@ -340,8 +302,7 @@ nfp_net_close(struct rte_eth_dev *dev)
 
 	/* unregister callback func from eal lib */
 	rte_intr_callback_unregister(pci_dev->intr_handle,
-				     nfp_net_dev_interrupt_handler,
-				     (void *)dev);
+			nfp_net_dev_interrupt_handler, (void *)dev);
 
 	/*
 	 * The ixgbe PMD disables the pcie master on the
@@ -352,7 +313,7 @@ nfp_net_close(struct rte_eth_dev *dev)
 }
 
 /* Initialise and register driver with DPDK Application */
-static const struct eth_dev_ops nfp_net_eth_dev_ops = {
+static const struct eth_dev_ops nfp_net_nfd3_eth_dev_ops = {
 	.dev_configure		= nfp_net_configure,
 	.dev_start		= nfp_net_start,
 	.dev_stop		= nfp_net_stop,
@@ -367,7 +328,7 @@ static const struct eth_dev_ops nfp_net_eth_dev_ops = {
 	.dev_infos_get		= nfp_net_infos_get,
 	.dev_supported_ptypes_get = nfp_net_supported_ptypes_get,
 	.mtu_set		= nfp_net_dev_mtu_set,
-	.mac_addr_set           = nfp_set_mac_addr,
+	.mac_addr_set		= nfp_net_set_mac_addr,
 	.vlan_offload_set	= nfp_net_vlan_offload_set,
 	.reta_update		= nfp_net_reta_update,
 	.reta_query		= nfp_net_reta_query,
@@ -375,11 +336,68 @@ static const struct eth_dev_ops nfp_net_eth_dev_ops = {
 	.rss_hash_conf_get	= nfp_net_rss_hash_conf_get,
 	.rx_queue_setup		= nfp_net_rx_queue_setup,
 	.rx_queue_release	= nfp_net_rx_queue_release,
-	.tx_queue_setup		= nfp_net_tx_queue_setup,
+	.tx_queue_setup		= nfp_net_nfd3_tx_queue_setup,
 	.tx_queue_release	= nfp_net_tx_queue_release,
 	.rx_queue_intr_enable   = nfp_rx_queue_intr_enable,
 	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
 };
+
+static const struct eth_dev_ops nfp_net_nfdk_eth_dev_ops = {
+	.dev_configure		= nfp_net_configure,
+	.dev_start		= nfp_net_start,
+	.dev_stop		= nfp_net_stop,
+	.dev_set_link_up	= nfp_net_set_link_up,
+	.dev_set_link_down	= nfp_net_set_link_down,
+	.dev_close		= nfp_net_close,
+	.promiscuous_enable	= nfp_net_promisc_enable,
+	.promiscuous_disable	= nfp_net_promisc_disable,
+	.link_update		= nfp_net_link_update,
+	.stats_get		= nfp_net_stats_get,
+	.stats_reset		= nfp_net_stats_reset,
+	.dev_infos_get		= nfp_net_infos_get,
+	.dev_supported_ptypes_get = nfp_net_supported_ptypes_get,
+	.mtu_set		= nfp_net_dev_mtu_set,
+	.mac_addr_set		= nfp_net_set_mac_addr,
+	.vlan_offload_set	= nfp_net_vlan_offload_set,
+	.reta_update		= nfp_net_reta_update,
+	.reta_query		= nfp_net_reta_query,
+	.rss_hash_update	= nfp_net_rss_hash_update,
+	.rss_hash_conf_get	= nfp_net_rss_hash_conf_get,
+	.rx_queue_setup		= nfp_net_rx_queue_setup,
+	.rx_queue_release	= nfp_net_rx_queue_release,
+	.tx_queue_setup		= nfp_net_nfdk_tx_queue_setup,
+	.tx_queue_release	= nfp_net_tx_queue_release,
+	.rx_queue_intr_enable   = nfp_rx_queue_intr_enable,
+	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
+};
+
+static inline int
+nfp_net_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
+{
+	switch (NFD_CFG_CLASS_VER_of(hw->ver)) {
+	case NFP_NET_CFG_VERSION_DP_NFD3:
+		eth_dev->dev_ops = &nfp_net_nfd3_eth_dev_ops;
+		eth_dev->tx_pkt_burst = &nfp_net_nfd3_xmit_pkts;
+		break;
+	case NFP_NET_CFG_VERSION_DP_NFDK:
+		if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 5) {
+			PMD_DRV_LOG(ERR, "NFDK must use ABI 5 or newer, found: %d",
+				NFD_CFG_MAJOR_VERSION_of(hw->ver));
+			return -EINVAL;
+		}
+		eth_dev->dev_ops = &nfp_net_nfdk_eth_dev_ops;
+		eth_dev->tx_pkt_burst = &nfp_net_nfdk_xmit_pkts;
+		break;
+	default:
+		PMD_DRV_LOG(ERR, "The version of firmware is not correct.");
+		return -EINVAL;
+	}
+
+	eth_dev->rx_queue_count = nfp_net_rx_queue_count;
+	eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
+
+	return 0;
+}
 
 static int
 nfp_net_init(struct rte_eth_dev *eth_dev)
@@ -388,8 +406,8 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	struct nfp_pf_dev *pf_dev;
 	struct nfp_net_hw *hw;
 	struct rte_ether_addr *tmp_ether_addr;
-
-	uint64_t tx_bar_off = 0, rx_bar_off = 0;
+	uint64_t rx_bar_off = 0;
+	uint64_t tx_bar_off = 0;
 	uint32_t start_q;
 	int stride = 4;
 	int port = 0;
@@ -404,11 +422,11 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 
 	/* NFP can not handle DMA addresses requiring more than 40 bits */
 	if (rte_mem_check_dma_mask(40)) {
-		RTE_LOG(ERR, PMD, "device %s can not be used:",
-				   pci_dev->device.name);
-		RTE_LOG(ERR, PMD, "\trestricted dma mask to 40 bits!\n");
+		RTE_LOG(ERR, PMD,
+			"device %s can not be used: restricted dma mask to 40 bits!\n",
+			pci_dev->device.name);
 		return -ENODEV;
-	};
+	}
 
 	port = ((struct nfp_net_hw *)eth_dev->data->dev_private)->idx;
 	if (port < 0 || port > 7) {
@@ -416,19 +434,14 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 		return -ENODEV;
 	}
 
-	/* Use PF array of physical ports to get pointer to
+	/*
+	 * Use PF array of physical ports to get pointer to
 	 * this specific port
 	 */
 	hw = pf_dev->ports[port];
 
 	PMD_INIT_LOG(DEBUG, "Working with physical port number: %d, "
-			    "NFP internal port number: %d",
-			    port, hw->nfp_idx);
-
-	eth_dev->dev_ops = &nfp_net_eth_dev_ops;
-	eth_dev->rx_queue_count = nfp_net_rx_queue_count;
-	eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
-	eth_dev->tx_pkt_burst = &nfp_net_xmit_pkts;
+			"NFP internal port number: %d", port, hw->nfp_idx);
 
 	/* For secondary processes, the primary has done all the work */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -456,28 +469,31 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	if (port == 0) {
 		hw->ctrl_bar = pf_dev->ctrl_bar;
 	} else {
-		if (!pf_dev->ctrl_bar)
+		if (pf_dev->ctrl_bar == NULL)
 			return -ENODEV;
-		/* Use port offset in pf ctrl_bar for this
-		 * ports control bar
-		 */
-		hw->ctrl_bar = pf_dev->ctrl_bar +
-			       (port * NFP_PF_CSR_SLICE_SIZE);
+		/* Use port offset in pf ctrl_bar for this ports control bar */
+		hw->ctrl_bar = pf_dev->ctrl_bar + (port * NFP_PF_CSR_SLICE_SIZE);
 	}
 
 	PMD_INIT_LOG(DEBUG, "ctrl bar: %p", hw->ctrl_bar);
+
+	hw->ver = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
+
+	if (nfp_net_ethdev_ops_mount(hw, eth_dev))
+		return -EINVAL;
 
 	hw->max_rx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_RXRINGS);
 	hw->max_tx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_TXRINGS);
 
 	/* Work out where in the BAR the queues start. */
 	switch (pci_dev->id.device_id) {
+	case PCI_DEVICE_ID_NFP3800_PF_NIC:
 	case PCI_DEVICE_ID_NFP4000_PF_NIC:
 	case PCI_DEVICE_ID_NFP6000_PF_NIC:
 		start_q = nn_cfg_readl(hw, NFP_NET_CFG_START_TXQ);
-		tx_bar_off = (uint64_t)start_q * NFP_QCP_QUEUE_ADDR_SZ;
+		tx_bar_off = nfp_pci_queue(pci_dev, start_q);
 		start_q = nn_cfg_readl(hw, NFP_NET_CFG_START_RXQ);
-		rx_bar_off = (uint64_t)start_q * NFP_QCP_QUEUE_ADDR_SZ;
+		rx_bar_off = nfp_pci_queue(pci_dev, start_q);
 		break;
 	default:
 		PMD_DRV_LOG(ERR, "nfp_net: no device ID matching");
@@ -498,10 +514,10 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	nfp_net_cfg_queue_setup(hw);
 
 	/* Get some of the read-only fields from the config BAR */
-	hw->ver = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
 	hw->cap = nn_cfg_readl(hw, NFP_NET_CFG_CAP);
 	hw->max_mtu = nn_cfg_readl(hw, NFP_NET_CFG_MAX_MTU);
 	hw->mtu = RTE_ETHER_MTU;
+	hw->flbufsz = RTE_ETHER_MTU;
 
 	/* VLAN insertion is incompatible with LSOv2 */
 	if (hw->cap & NFP_NET_CFG_CTRL_LSO2)
@@ -557,8 +573,7 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 
 	tmp_ether_addr = (struct rte_ether_addr *)&hw->mac_addr;
 	if (!rte_is_valid_assigned_ether_addr(tmp_ether_addr)) {
-		PMD_INIT_LOG(INFO, "Using random mac address for port %d",
-				   port);
+		PMD_INIT_LOG(INFO, "Using random mac address for port %d", port);
 		/* Using random mac addresses for VFs */
 		rte_eth_random_addr(&hw->mac_addr[0]);
 		nfp_net_write_mac(hw, (uint8_t *)&hw->mac_addr);
@@ -583,8 +598,7 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
 		/* Registering LSC interrupt handler */
 		rte_intr_callback_register(pci_dev->intr_handle,
-					   nfp_net_dev_interrupt_handler,
-					   (void *)eth_dev);
+				nfp_net_dev_interrupt_handler, (void *)eth_dev);
 		/* Telling the firmware about the LSC interrupt entry */
 		nn_cfg_writeb(hw, NFP_NET_CFG_LSC, NFP_NET_IRQ_LSC_IDX);
 		/* Recording current stats counters values */
@@ -656,15 +670,19 @@ load_fw:
 }
 
 static int
-nfp_fw_setup(struct rte_pci_device *dev, struct nfp_cpp *cpp,
-	     struct nfp_eth_table *nfp_eth_table, struct nfp_hwinfo *hwinfo)
+nfp_fw_setup(struct rte_pci_device *dev,
+		struct nfp_cpp *cpp,
+		struct nfp_eth_table *nfp_eth_table,
+		struct nfp_hwinfo *hwinfo)
 {
 	struct nfp_nsp *nsp;
 	const char *nfp_fw_model;
 	char card_desc[100];
 	int err = 0;
 
-	nfp_fw_model = nfp_hwinfo_lookup(hwinfo, "assembly.partno");
+	nfp_fw_model = nfp_hwinfo_lookup(hwinfo, "nffw.partno");
+	if (nfp_fw_model == NULL)
+		nfp_fw_model = nfp_hwinfo_lookup(hwinfo, "assembly.partno");
 
 	if (nfp_fw_model) {
 		PMD_DRV_LOG(INFO, "firmware model found: %s", nfp_fw_model);
@@ -675,12 +693,12 @@ nfp_fw_setup(struct rte_pci_device *dev, struct nfp_cpp *cpp,
 
 	if (nfp_eth_table->count == 0 || nfp_eth_table->count > 8) {
 		PMD_DRV_LOG(ERR, "NFP ethernet table reports wrong ports: %u",
-		       nfp_eth_table->count);
+			nfp_eth_table->count);
 		return -EIO;
 	}
 
 	PMD_DRV_LOG(INFO, "NFP ethernet port table reports %u ports",
-			   nfp_eth_table->count);
+			nfp_eth_table->count);
 
 	PMD_DRV_LOG(INFO, "Port speed: %u", nfp_eth_table->ports[0].speed);
 
@@ -689,7 +707,7 @@ nfp_fw_setup(struct rte_pci_device *dev, struct nfp_cpp *cpp,
 			nfp_eth_table->ports[0].speed / 1000);
 
 	nsp = nfp_nsp_open(cpp);
-	if (!nsp) {
+	if (nsp == NULL) {
 		PMD_DRV_LOG(ERR, "NFP error when obtaining NSP handle");
 		return -EIO;
 	}
@@ -701,19 +719,19 @@ nfp_fw_setup(struct rte_pci_device *dev, struct nfp_cpp *cpp,
 	return err;
 }
 
-static int nfp_init_phyports(struct nfp_pf_dev *pf_dev)
+static int
+nfp_init_phyports(struct nfp_pf_dev *pf_dev)
 {
+	int i;
+	int ret = 0;
 	struct nfp_net_hw *hw;
 	struct rte_eth_dev *eth_dev;
-	struct nfp_eth_table *nfp_eth_table = NULL;
-	int ret = 0;
-	int i;
+	struct nfp_eth_table *nfp_eth_table;
 
 	nfp_eth_table = nfp_eth_read_ports(pf_dev->cpp);
-	if (!nfp_eth_table) {
+	if (nfp_eth_table == NULL) {
 		PMD_INIT_LOG(ERR, "Error reading NFP ethernet table");
-		ret = -EIO;
-		goto error;
+		return -EIO;
 	}
 
 	/* Loop through all physical ports on PF */
@@ -726,7 +744,7 @@ static int nfp_init_phyports(struct nfp_pf_dev *pf_dev)
 
 		/* Allocate a eth_dev for this phyport */
 		eth_dev = rte_eth_dev_allocate(port_name);
-		if (!eth_dev) {
+		if (eth_dev == NULL) {
 			ret = -ENODEV;
 			goto port_cleanup;
 		}
@@ -734,8 +752,8 @@ static int nfp_init_phyports(struct nfp_pf_dev *pf_dev)
 		/* Allocate memory for this phyport */
 		eth_dev->data->dev_private =
 			rte_zmalloc_socket(port_name, sizeof(struct nfp_net_hw),
-					   RTE_CACHE_LINE_SIZE, numa_node);
-		if (!eth_dev->data->dev_private) {
+				RTE_CACHE_LINE_SIZE, numa_node);
+		if (eth_dev->data->dev_private == NULL) {
 			ret = -ENOMEM;
 			rte_eth_dev_release_port(eth_dev);
 			goto port_cleanup;
@@ -759,7 +777,6 @@ static int nfp_init_phyports(struct nfp_pf_dev *pf_dev)
 		 * nfp_net_init
 		 */
 		ret = nfp_net_init(eth_dev);
-
 		if (ret) {
 			ret = -ENODEV;
 			goto port_cleanup;
@@ -782,24 +799,26 @@ port_cleanup:
 	}
 eth_table_cleanup:
 	free(nfp_eth_table);
-error:
+
 	return ret;
 }
 
-static int nfp_pf_init(struct rte_pci_device *pci_dev)
+static int
+nfp_pf_init(struct rte_pci_device *pci_dev)
 {
-	struct nfp_pf_dev *pf_dev = NULL;
-	struct nfp_cpp *cpp;
-	struct nfp_hwinfo *hwinfo;
-	struct nfp_rtsym_table *sym_tbl;
-	struct nfp_eth_table *nfp_eth_table = NULL;
-	char name[RTE_ETH_NAME_MAX_LEN];
-	int total_ports;
-	int ret = -ENODEV;
 	int err;
+	int ret = 0;
+	uint64_t addr;
+	int total_ports;
+	struct nfp_cpp *cpp;
+	struct nfp_pf_dev *pf_dev;
+	struct nfp_hwinfo *hwinfo;
+	char name[RTE_ETH_NAME_MAX_LEN];
+	struct nfp_rtsym_table *sym_tbl;
+	struct nfp_eth_table *nfp_eth_table;
 
-	if (!pci_dev)
-		return ret;
+	if (pci_dev == NULL)
+		return -ENODEV;
 
 	/*
 	 * When device bound to UIO, the device could be used, by mistake,
@@ -813,21 +832,21 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 	else
 		cpp = nfp_cpp_from_device_name(pci_dev, 1);
 
-	if (!cpp) {
+	if (cpp == NULL) {
 		PMD_INIT_LOG(ERR, "A CPP handle can not be obtained");
 		ret = -EIO;
 		goto error;
 	}
 
 	hwinfo = nfp_hwinfo_read(cpp);
-	if (!hwinfo) {
+	if (hwinfo == NULL) {
 		PMD_INIT_LOG(ERR, "Error reading hwinfo table");
 		ret = -EIO;
 		goto error;
 	}
 
 	nfp_eth_table = nfp_eth_read_ports(cpp);
-	if (!nfp_eth_table) {
+	if (nfp_eth_table == NULL) {
 		PMD_INIT_LOG(ERR, "Error reading NFP ethernet table");
 		ret = -EIO;
 		goto hwinfo_cleanup;
@@ -841,7 +860,7 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 
 	/* Now the symbol table should be there */
 	sym_tbl = nfp_rtsym_table_read(cpp);
-	if (!sym_tbl) {
+	if (sym_tbl == NULL) {
 		PMD_INIT_LOG(ERR, "Something is wrong with the firmware"
 				" symbol table");
 		ret = -EIO;
@@ -865,7 +884,7 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 	/* Allocate memory for the PF "device" */
 	snprintf(name, sizeof(name), "nfp_pf%d", 0);
 	pf_dev = rte_zmalloc(name, sizeof(*pf_dev), 0);
-	if (!pf_dev) {
+	if (pf_dev == NULL) {
 		ret = -ENOMEM;
 		goto sym_tbl_cleanup;
 	}
@@ -883,9 +902,8 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 
 	/* Map the symbol table */
 	pf_dev->ctrl_bar = nfp_rtsym_map(pf_dev->sym_tbl, "_pf0_net_bar0",
-				     pf_dev->total_phyports * 32768,
-				     &pf_dev->ctrl_area);
-	if (!pf_dev->ctrl_bar) {
+			pf_dev->total_phyports * 32768, &pf_dev->ctrl_area);
+	if (pf_dev->ctrl_bar == NULL) {
 		PMD_INIT_LOG(ERR, "nfp_rtsym_map fails for _pf0_net_ctrl_bar");
 		ret = -EIO;
 		goto pf_cleanup;
@@ -894,11 +912,26 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 	PMD_INIT_LOG(DEBUG, "ctrl bar: %p", pf_dev->ctrl_bar);
 
 	/* configure access to tx/rx vNIC BARs */
+	switch (pci_dev->id.device_id) {
+	case PCI_DEVICE_ID_NFP3800_PF_NIC:
+		addr = NFP_PCIE_QUEUE(NFP_PCIE_QCP_NFP3800_OFFSET,
+					0, NFP_PCIE_QUEUE_NFP3800_MASK);
+		break;
+	case PCI_DEVICE_ID_NFP4000_PF_NIC:
+	case PCI_DEVICE_ID_NFP6000_PF_NIC:
+		addr = NFP_PCIE_QUEUE(NFP_PCIE_QCP_NFP6000_OFFSET,
+					0, NFP_PCIE_QUEUE_NFP6000_MASK);
+		break;
+	default:
+		PMD_INIT_LOG(ERR, "nfp_net: no device ID matching");
+		err = -ENODEV;
+		goto ctrl_area_cleanup;
+	}
+
 	pf_dev->hw_queues = nfp_cpp_map_area(pf_dev->cpp, 0, 0,
-					      NFP_PCIE_QUEUE(0),
-					      NFP_QCP_QUEUE_AREA_SZ,
-					      &pf_dev->hwqueues_area);
-	if (!pf_dev->hw_queues) {
+			addr, NFP_QCP_QUEUE_AREA_SZ,
+			&pf_dev->hwqueues_area);
+	if (pf_dev->hw_queues == NULL) {
 		PMD_INIT_LOG(ERR, "nfp_rtsym_map fails for net.qc");
 		ret = -EIO;
 		goto ctrl_area_cleanup;
@@ -906,7 +939,8 @@ static int nfp_pf_init(struct rte_pci_device *pci_dev)
 
 	PMD_INIT_LOG(DEBUG, "tx/rx bar address: 0x%p", pf_dev->hw_queues);
 
-	/* Initialize and prep physical ports now
+	/*
+	 * Initialize and prep physical ports now
 	 * This will loop through all physical ports
 	 */
 	ret = nfp_init_phyports(pf_dev);
@@ -941,15 +975,17 @@ error:
  * is no need to initialise the PF again. Only minimal work is required
  * here
  */
-static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
+static int
+nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
 {
-	struct nfp_cpp *cpp;
-	struct nfp_rtsym_table *sym_tbl;
-	int total_ports;
 	int i;
 	int err;
+	int total_ports;
+	struct nfp_cpp *cpp;
+	struct nfp_net_hw *hw;
+	struct nfp_rtsym_table *sym_tbl;
 
-	if (!pci_dev)
+	if (pci_dev == NULL)
 		return -ENODEV;
 
 	/*
@@ -964,7 +1000,7 @@ static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
 	else
 		cpp = nfp_cpp_from_device_name(pci_dev, 1);
 
-	if (!cpp) {
+	if (cpp == NULL) {
 		PMD_INIT_LOG(ERR, "A CPP handle can not be obtained");
 		return -EIO;
 	}
@@ -974,7 +1010,7 @@ static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
 	 * here so we have to read the number of ports from firmware
 	 */
 	sym_tbl = nfp_rtsym_table_read(cpp);
-	if (!sym_tbl) {
+	if (sym_tbl == NULL) {
 		PMD_INIT_LOG(ERR, "Something is wrong with the firmware"
 				" symbol table");
 		return -EIO;
@@ -989,20 +1025,21 @@ static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
 		snprintf(port_name, sizeof(port_name), "%s_port%d",
 			 pci_dev->device.name, i);
 
-		PMD_DRV_LOG(DEBUG, "Secondary attaching to port %s",
-		    port_name);
+		PMD_DRV_LOG(DEBUG, "Secondary attaching to port %s", port_name);
 		eth_dev = rte_eth_dev_attach_secondary(port_name);
-		if (!eth_dev) {
+		if (eth_dev == NULL) {
 			RTE_LOG(ERR, EAL,
-			"secondary process attach failed, "
-			"ethdev doesn't exist");
+				"secondary process attach failed, ethdev doesn't exist");
 			return -ENODEV;
 		}
+
+		hw = NFP_NET_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
+
+		if (nfp_net_ethdev_ops_mount(hw, eth_dev))
+			return -EINVAL;
+
 		eth_dev->process_private = cpp;
-		eth_dev->dev_ops = &nfp_net_eth_dev_ops;
-		eth_dev->rx_queue_count = nfp_net_rx_queue_count;
-		eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
-		eth_dev->tx_pkt_burst = &nfp_net_xmit_pkts;
+
 		rte_eth_dev_probing_finish(eth_dev);
 	}
 
@@ -1012,8 +1049,9 @@ static int nfp_pf_secondary_init(struct rte_pci_device *pci_dev)
 	return 0;
 }
 
-static int nfp_pf_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
-			    struct rte_pci_device *dev)
+static int
+nfp_pf_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
+		struct rte_pci_device *dev)
 {
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
 		return nfp_pf_init(dev);
@@ -1024,6 +1062,10 @@ static int nfp_pf_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 static const struct rte_pci_id pci_id_nfp_pf_net_map[] = {
 	{
 		RTE_PCI_DEVICE(PCI_VENDOR_ID_NETRONOME,
+			       PCI_DEVICE_ID_NFP3800_PF_NIC)
+	},
+	{
+		RTE_PCI_DEVICE(PCI_VENDOR_ID_NETRONOME,
 			       PCI_DEVICE_ID_NFP4000_PF_NIC)
 	},
 	{
@@ -1031,11 +1073,24 @@ static const struct rte_pci_id pci_id_nfp_pf_net_map[] = {
 			       PCI_DEVICE_ID_NFP6000_PF_NIC)
 	},
 	{
+		RTE_PCI_DEVICE(PCI_VENDOR_ID_CORIGINE,
+			       PCI_DEVICE_ID_NFP3800_PF_NIC)
+	},
+	{
+		RTE_PCI_DEVICE(PCI_VENDOR_ID_CORIGINE,
+			       PCI_DEVICE_ID_NFP4000_PF_NIC)
+	},
+	{
+		RTE_PCI_DEVICE(PCI_VENDOR_ID_CORIGINE,
+			       PCI_DEVICE_ID_NFP6000_PF_NIC)
+	},
+	{
 		.vendor_id = 0,
 	},
 };
 
-static int nfp_pci_uninit(struct rte_eth_dev *eth_dev)
+static int
+nfp_pci_uninit(struct rte_eth_dev *eth_dev)
 {
 	struct rte_pci_device *pci_dev;
 	uint16_t port_id;
@@ -1052,7 +1107,8 @@ static int nfp_pci_uninit(struct rte_eth_dev *eth_dev)
 	return -ENOTSUP;
 }
 
-static int eth_nfp_pci_remove(struct rte_pci_device *pci_dev)
+static int
+eth_nfp_pci_remove(struct rte_pci_device *pci_dev)
 {
 	return rte_eth_dev_pci_generic_remove(pci_dev, nfp_pci_uninit);
 }

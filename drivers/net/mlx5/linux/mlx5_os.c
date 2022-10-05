@@ -19,8 +19,9 @@
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
-#include <rte_bus_auxiliary.h>
+#include <bus_driver.h>
+#include <bus_pci_driver.h>
+#include <bus_auxiliary_driver.h>
 #include <rte_common.h>
 #include <rte_kvargs.h>
 #include <rte_rwlock.h>
@@ -369,15 +370,6 @@ mlx5_os_capabilities_prepare(struct mlx5_dev_ctx_shared *sh)
 		"DevX does not provide UAR offset, can't create queues for packet pacing.");
 	sh->dev_cap.txpp_en = 0;
 #endif
-	/* Check for LRO support. */
-	if (mlx5_devx_obj_ops_en(sh) && hca_attr->lro_cap) {
-		/* TBD check tunnel lro caps. */
-		sh->dev_cap.lro_supported = 1;
-		DRV_LOG(DEBUG, "Device supports LRO.");
-		DRV_LOG(DEBUG,
-			"LRO minimal size of TCP segment required for coalescing is %d bytes.",
-			hca_attr->lro_min_mss_size);
-	}
 	sh->dev_cap.scatter_fcs_w_decap_disable =
 					hca_attr->scatter_fcs_w_decap_disable;
 	sh->dev_cap.rq_delay_drop_en = hca_attr->rq_delay_drop;
@@ -1079,6 +1071,7 @@ mlx5_dev_spawn(struct rte_device *dpdk_dev,
 	DRV_LOG(DEBUG, "naming Ethernet device \"%s\"", name);
 	if (rte_eal_process_type() == RTE_PROC_SECONDARY) {
 		struct mlx5_mp_id mp_id;
+		int fd;
 
 		eth_dev = rte_eth_dev_attach_secondary(name);
 		if (eth_dev == NULL) {
@@ -1095,11 +1088,12 @@ mlx5_dev_spawn(struct rte_device *dpdk_dev,
 			return NULL;
 		mlx5_mp_id_init(&mp_id, eth_dev->data->port_id);
 		/* Receive command fd from primary process */
-		err = mlx5_mp_req_verbs_cmd_fd(&mp_id);
-		if (err < 0)
+		fd = mlx5_mp_req_verbs_cmd_fd(&mp_id);
+		if (fd < 0)
 			goto err_secondary;
 		/* Remap UAR for Tx queues. */
-		err = mlx5_tx_uar_init_secondary(eth_dev, err);
+		err = mlx5_tx_uar_init_secondary(eth_dev, fd);
+		close(fd);
 		if (err)
 			goto err_secondary;
 		/*
@@ -1117,7 +1111,7 @@ err_secondary:
 	sh = mlx5_alloc_shared_dev_ctx(spawn, mkvlist);
 	if (!sh)
 		return NULL;
-	nl_rdma = mlx5_nl_init(NETLINK_RDMA);
+	nl_rdma = mlx5_nl_init(NETLINK_RDMA, 0);
 	/* Check port status. */
 	if (spawn->phys_port <= UINT8_MAX) {
 		/* Legacy Verbs api only support u8 port number. */
@@ -1180,7 +1174,7 @@ err_secondary:
 	priv->mtu = RTE_ETHER_MTU;
 	/* Some internal functions rely on Netlink sockets, open them now. */
 	priv->nl_socket_rdma = nl_rdma;
-	priv->nl_socket_route =	mlx5_nl_init(NETLINK_ROUTE);
+	priv->nl_socket_route =	mlx5_nl_init(NETLINK_ROUTE, 0);
 	priv->representor = !!switch_info->representor;
 	priv->master = !!switch_info->master;
 	priv->domain_id = RTE_ETH_DEV_SWITCH_DOMAIN_ID_INVALID;
@@ -1483,13 +1477,12 @@ err_secondary:
 	/* Bring Ethernet device up. */
 	DRV_LOG(DEBUG, "port %u forcing Ethernet interface up",
 		eth_dev->data->port_id);
-	mlx5_set_link_up(eth_dev);
-	/*
-	 * Even though the interrupt handler is not installed yet,
-	 * interrupts will still trigger on the async_fd from
-	 * Verbs context returned by ibv_open_device().
-	 */
+	/* Read link status in case it is up and there will be no event. */
 	mlx5_link_update(eth_dev, 0);
+	/* Watch LSC interrupts between port probe and port start. */
+	priv->sh->port[priv->dev_port - 1].nl_ih_port_id =
+							eth_dev->data->port_id;
+	mlx5_set_link_up(eth_dev);
 	for (i = 0; i < MLX5_FLOW_TYPE_MAXI; i++) {
 		icfg[i].release_mem_en = !!sh->config.reclaim_mode;
 		if (sh->config.reclaim_mode)
@@ -1927,8 +1920,8 @@ mlx5_os_pci_probe_pf(struct mlx5_common_device *cdev,
 	 * matching ones, gathering into the list.
 	 */
 	struct ibv_device *ibv_match[ret + 1];
-	int nl_route = mlx5_nl_init(NETLINK_ROUTE);
-	int nl_rdma = mlx5_nl_init(NETLINK_RDMA);
+	int nl_route = mlx5_nl_init(NETLINK_ROUTE, 0);
+	int nl_rdma = mlx5_nl_init(NETLINK_RDMA, 0);
 	unsigned int i;
 
 	while (ret-- > 0) {
@@ -1980,9 +1973,9 @@ mlx5_os_pci_probe_pf(struct mlx5_common_device *cdev,
 	if (!nd) {
 		/* No device matches, just complain and bail out. */
 		DRV_LOG(WARNING,
-			"No Verbs device matches PCI device " PCI_PRI_FMT ","
+			"PF %u doesn't have Verbs device matches PCI device " PCI_PRI_FMT ","
 			" are kernel drivers loaded?",
-			owner_pci.domain, owner_pci.bus,
+			owner_id, owner_pci.domain, owner_pci.bus,
 			owner_pci.devid, owner_pci.function);
 		rte_errno = ENOENT;
 		ret = -rte_errno;
@@ -2388,16 +2381,16 @@ mlx5_os_pci_probe(struct mlx5_common_device *cdev,
 		for (p = 0; p < eth_da.nb_ports; p++) {
 			ret = mlx5_os_pci_probe_pf(cdev, &eth_da,
 						   eth_da.ports[p], mkvlist);
-			if (ret)
-				break;
-		}
-		if (ret) {
-			DRV_LOG(ERR, "Probe of PCI device " PCI_PRI_FMT " "
-				"aborted due to prodding failure of PF %u",
-				pci_dev->addr.domain, pci_dev->addr.bus,
-				pci_dev->addr.devid, pci_dev->addr.function,
-				eth_da.ports[p]);
-			mlx5_net_remove(cdev);
+			if (ret) {
+				DRV_LOG(INFO, "Probe of PCI device " PCI_PRI_FMT " "
+					"aborted due to proding failure of PF %u",
+					pci_dev->addr.domain, pci_dev->addr.bus,
+					pci_dev->addr.devid, pci_dev->addr.function,
+					eth_da.ports[p]);
+				mlx5_net_remove(cdev);
+				if (p != 0)
+					break;
+			}
 		}
 	} else {
 		ret = mlx5_os_pci_probe_pf(cdev, &eth_da, 0, mkvlist);
@@ -2506,63 +2499,46 @@ mlx5_os_net_cleanup(void)
 void
 mlx5_os_dev_shared_handler_install(struct mlx5_dev_ctx_shared *sh)
 {
-	int ret;
-	int flags;
 	struct ibv_context *ctx = sh->cdev->ctx;
+	int nlsk_fd;
 
-	sh->intr_handle = rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
-	if (sh->intr_handle == NULL) {
-		DRV_LOG(ERR, "Fail to allocate intr_handle");
-		rte_errno = ENOMEM;
+	sh->intr_handle = mlx5_os_interrupt_handler_create
+		(RTE_INTR_INSTANCE_F_SHARED, true,
+		 ctx->async_fd, mlx5_dev_interrupt_handler, sh);
+	if (!sh->intr_handle) {
+		DRV_LOG(ERR, "Failed to allocate intr_handle.");
 		return;
 	}
-	rte_intr_fd_set(sh->intr_handle, -1);
-
-	flags = fcntl(ctx->async_fd, F_GETFL);
-	ret = fcntl(ctx->async_fd, F_SETFL, flags | O_NONBLOCK);
-	if (ret) {
-		DRV_LOG(INFO, "failed to change file descriptor async event"
-			" queue");
-	} else {
-		rte_intr_fd_set(sh->intr_handle, ctx->async_fd);
-		rte_intr_type_set(sh->intr_handle, RTE_INTR_HANDLE_EXT);
-		if (rte_intr_callback_register(sh->intr_handle,
-					mlx5_dev_interrupt_handler, sh)) {
-			DRV_LOG(INFO, "Fail to install the shared interrupt.");
-			rte_intr_fd_set(sh->intr_handle, -1);
-		}
+	nlsk_fd = mlx5_nl_init(NETLINK_ROUTE, RTMGRP_LINK);
+	if (nlsk_fd < 0) {
+		DRV_LOG(ERR, "Failed to create a socket for Netlink events: %s",
+			rte_strerror(rte_errno));
+		return;
+	}
+	sh->intr_handle_nl = mlx5_os_interrupt_handler_create
+		(RTE_INTR_INSTANCE_F_SHARED, true,
+		 nlsk_fd, mlx5_dev_interrupt_handler_nl, sh);
+	if (sh->intr_handle_nl == NULL) {
+		DRV_LOG(ERR, "Fail to allocate intr_handle");
+		return;
 	}
 	if (sh->cdev->config.devx) {
 #ifdef HAVE_IBV_DEVX_ASYNC
-		sh->intr_handle_devx =
-			rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
-		if (!sh->intr_handle_devx) {
-			DRV_LOG(ERR, "Fail to allocate intr_handle");
-			rte_errno = ENOMEM;
-			return;
-		}
-		rte_intr_fd_set(sh->intr_handle_devx, -1);
+		struct mlx5dv_devx_cmd_comp *devx_comp;
+
 		sh->devx_comp = (void *)mlx5_glue->devx_create_cmd_comp(ctx);
-		struct mlx5dv_devx_cmd_comp *devx_comp = sh->devx_comp;
+		devx_comp = sh->devx_comp;
 		if (!devx_comp) {
 			DRV_LOG(INFO, "failed to allocate devx_comp.");
 			return;
 		}
-		flags = fcntl(devx_comp->fd, F_GETFL);
-		ret = fcntl(devx_comp->fd, F_SETFL, flags | O_NONBLOCK);
-		if (ret) {
-			DRV_LOG(INFO, "failed to change file descriptor"
-				" devx comp");
+		sh->intr_handle_devx = mlx5_os_interrupt_handler_create
+			(RTE_INTR_INSTANCE_F_SHARED, true,
+			 devx_comp->fd,
+			 mlx5_dev_interrupt_handler_devx, sh);
+		if (!sh->intr_handle_devx) {
+			DRV_LOG(ERR, "Failed to allocate intr_handle.");
 			return;
-		}
-		rte_intr_fd_set(sh->intr_handle_devx, devx_comp->fd);
-		rte_intr_type_set(sh->intr_handle_devx,
-					 RTE_INTR_HANDLE_EXT);
-		if (rte_intr_callback_register(sh->intr_handle_devx,
-					mlx5_dev_interrupt_handler_devx, sh)) {
-			DRV_LOG(INFO, "Fail to install the devx shared"
-				" interrupt.");
-			rte_intr_fd_set(sh->intr_handle_devx, -1);
 		}
 #endif /* HAVE_IBV_DEVX_ASYNC */
 	}
@@ -2579,15 +2555,13 @@ mlx5_os_dev_shared_handler_install(struct mlx5_dev_ctx_shared *sh)
 void
 mlx5_os_dev_shared_handler_uninstall(struct mlx5_dev_ctx_shared *sh)
 {
-	if (rte_intr_fd_get(sh->intr_handle) >= 0)
-		mlx5_intr_callback_unregister(sh->intr_handle,
-					      mlx5_dev_interrupt_handler, sh);
-	rte_intr_instance_free(sh->intr_handle);
+	mlx5_os_interrupt_handler_destroy(sh->intr_handle,
+					  mlx5_dev_interrupt_handler, sh);
+	mlx5_os_interrupt_handler_destroy(sh->intr_handle_nl,
+					  mlx5_dev_interrupt_handler_nl, sh);
 #ifdef HAVE_IBV_DEVX_ASYNC
-	if (rte_intr_fd_get(sh->intr_handle_devx) >= 0)
-		rte_intr_callback_unregister(sh->intr_handle_devx,
-				  mlx5_dev_interrupt_handler_devx, sh);
-	rte_intr_instance_free(sh->intr_handle_devx);
+	mlx5_os_interrupt_handler_destroy(sh->intr_handle_devx,
+					  mlx5_dev_interrupt_handler_devx, sh);
 	if (sh->devx_comp)
 		mlx5_glue->devx_destroy_cmd_comp(sh->devx_comp);
 #endif

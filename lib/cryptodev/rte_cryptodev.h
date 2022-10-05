@@ -168,7 +168,13 @@ struct rte_cryptodev_asymmetric_xform_capability {
 	/**< Transform type: RSA/MODEXP/DH/DSA/MODINV */
 
 	uint32_t op_types;
-	/**< bitmask for supported rte_crypto_asym_op_type */
+	/**<
+	 * Bitmask for supported rte_crypto_asym_op_type or
+	 * rte_crypto_asym_ke_type. Which enum is used is determined
+	 * by the rte_crypto_asym_xform_type. For key exchange algorithms
+	 * like Diffie-Hellman it is rte_crypto_asym_ke_type, for others
+	 * it is rte_crypto_asym_op_type.
+	 */
 
 	__extension__
 	union {
@@ -912,7 +918,7 @@ struct rte_cryptodev_sym_session {
 	__extension__ struct {
 		void *data;
 		uint16_t refcnt;
-	} sess_data[0];
+	} sess_data[];
 	/**< Driver specific session material, variable size */
 };
 
@@ -1268,6 +1274,28 @@ rte_cryptodev_sym_cpu_crypto_process(uint8_t dev_id,
 __rte_experimental
 int
 rte_cryptodev_get_raw_dp_ctx_size(uint8_t dev_id);
+
+/**
+ * Set session event meta data
+ *
+ * @param	dev_id		The device identifier.
+ * @param	sess            Crypto or security session.
+ * @param	op_type         Operation type.
+ * @param	sess_type       Session type.
+ * @param	ev_mdata	Pointer to the event crypto meta data
+ *				(aka *union rte_event_crypto_metadata*)
+ * @param	size            Size of ev_mdata.
+ *
+ * @return
+ *  - On success, zero.
+ *  - On failure, a negative value.
+ */
+__rte_experimental
+int
+rte_cryptodev_session_event_mdata_set(uint8_t dev_id, void *sess,
+	enum rte_crypto_op_type op_type,
+	enum rte_crypto_op_sess_type sess_type,
+	void *ev_mdata, uint16_t size);
 
 /**
  * Union of different crypto session types, including session-less xform

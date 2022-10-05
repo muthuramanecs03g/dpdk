@@ -15,7 +15,7 @@
 #include <rte_ip_frag.h>
 #include <rte_devargs.h>
 #include <rte_kvargs.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_alarm.h>
 #include <rte_cycles.h>
 #include <rte_string_fns.h>
@@ -82,7 +82,7 @@ bond_ethdev_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 					 bufs + num_rx_total, nb_pkts);
 		num_rx_total += num_rx_slave;
 		nb_pkts -= num_rx_slave;
-		if (++active_slave == slave_count)
+		if (++active_slave >= slave_count)
 			active_slave = 0;
 	}
 
@@ -1707,6 +1707,12 @@ slave_configure(struct rte_eth_dev *bonded_eth_dev,
 				bonded_eth_dev->data->dev_conf.rx_adv_conf.rss_conf.rss_hf;
 		slave_eth_dev->data->dev_conf.rxmode.mq_mode =
 				bonded_eth_dev->data->dev_conf.rxmode.mq_mode;
+	} else {
+		slave_eth_dev->data->dev_conf.rx_adv_conf.rss_conf.rss_key_len = 0;
+		slave_eth_dev->data->dev_conf.rx_adv_conf.rss_conf.rss_key = NULL;
+		slave_eth_dev->data->dev_conf.rx_adv_conf.rss_conf.rss_hf = 0;
+		slave_eth_dev->data->dev_conf.rxmode.mq_mode =
+				bonded_eth_dev->data->dev_conf.rxmode.mq_mode;
 	}
 
 	slave_eth_dev->data->dev_conf.rxmode.mtu =
@@ -2118,18 +2124,20 @@ bond_ethdev_stop(struct rte_eth_dev *eth_dev)
 	internals->link_status_polling_enabled = 0;
 	for (i = 0; i < internals->slave_count; i++) {
 		uint16_t slave_id = internals->slaves[i].port_id;
+
+		internals->slaves[i].last_link_status = 0;
+		ret = rte_eth_dev_stop(slave_id);
+		if (ret != 0) {
+			RTE_BOND_LOG(ERR, "Failed to stop device on port %u",
+				     slave_id);
+			return ret;
+		}
+
+		/* active slaves need to be deactivated. */
 		if (find_slave_by_id(internals->active_slaves,
 				internals->active_slave_count, slave_id) !=
-						internals->active_slave_count) {
-			internals->slaves[i].last_link_status = 0;
-			ret = rte_eth_dev_stop(slave_id);
-			if (ret != 0) {
-				RTE_BOND_LOG(ERR, "Failed to stop device on port %u",
-					     slave_id);
-				return ret;
-			}
+					internals->active_slave_count)
 			deactivate_slave(eth_dev, slave_id);
-		}
 	}
 
 	return 0;
@@ -2154,6 +2162,7 @@ bond_ethdev_close(struct rte_eth_dev *dev)
 			RTE_BOND_LOG(ERR, "Failed to stop device on port %u",
 				     port_id);
 			skipped++;
+			continue;
 		}
 
 		if (rte_eth_bond_slave_remove(bond_port_id, port_id) != 0) {
@@ -2409,9 +2418,6 @@ bond_ethdev_slave_link_status_change_monitor(void *cb_arg)
 			 * event callback */
 			if (slave_ethdev->data->dev_link.link_status !=
 					internals->slaves[i].last_link_status) {
-				internals->slaves[i].last_link_status =
-						slave_ethdev->data->dev_link.link_status;
-
 				bond_ethdev_lsc_event_callback(internals->slaves[i].port_id,
 						RTE_ETH_EVENT_INTR_LSC,
 						&bonded_ethdev->data->port_id,
@@ -2910,7 +2916,7 @@ bond_ethdev_lsc_event_callback(uint16_t port_id, enum rte_eth_event_type type,
 
 	uint8_t lsc_flag = 0;
 	int valid_slave = 0;
-	uint16_t active_pos;
+	uint16_t active_pos, slave_idx;
 	uint16_t i;
 
 	if (type != RTE_ETH_EVENT_INTR_LSC || param == NULL)
@@ -2931,6 +2937,7 @@ bond_ethdev_lsc_event_callback(uint16_t port_id, enum rte_eth_event_type type,
 	for (i = 0; i < internals->slave_count; i++) {
 		if (internals->slaves[i].port_id == port_id) {
 			valid_slave = 1;
+			slave_idx = i;
 			break;
 		}
 	}
@@ -3019,6 +3026,7 @@ link_update:
 	 * slaves
 	 */
 	bond_ethdev_link_update(bonded_eth_dev, 0);
+	internals->slaves[slave_idx].last_link_status = link.link_status;
 
 	if (lsc_flag) {
 		/* Cancel any possible outstanding interrupts if delays are enabled */
@@ -3580,6 +3588,7 @@ bond_ethdev_configure(struct rte_eth_dev *dev)
 	const char *name = dev->device->name;
 	struct bond_dev_private *internals = dev->data->dev_private;
 	struct rte_kvargs *kvlist = internals->kvlist;
+	uint64_t offloads;
 	int arg_count;
 	uint16_t port_id = dev - rte_eth_devices;
 	uint8_t agg_mode;
@@ -3617,13 +3626,18 @@ bond_ethdev_configure(struct rte_eth_dev *dev)
 			       internals->rss_key_len);
 		} else {
 			if (internals->rss_key_len > sizeof(default_rss_key)) {
-				RTE_BOND_LOG(ERR,
-				       "There is no suitable default hash key");
-				return -EINVAL;
+				/*
+				 * If the rss_key includes standard_rss_key and
+				 * extended_hash_key, the rss key length will be
+				 * larger than default rss key length, so it should
+				 * re-calculate the hash key.
+				 */
+				for (i = 0; i < internals->rss_key_len; i++)
+					internals->rss_key[i] = (uint8_t)rte_rand();
+			} else {
+				memcpy(internals->rss_key, default_rss_key,
+					internals->rss_key_len);
 			}
-
-			memcpy(internals->rss_key, default_rss_key,
-			       internals->rss_key_len);
 		}
 
 		for (i = 0; i < RTE_DIM(internals->reta_conf); i++) {
@@ -3633,6 +3647,16 @@ bond_ethdev_configure(struct rte_eth_dev *dev)
 						(i * RTE_ETH_RETA_GROUP_SIZE + j) %
 						dev->data->nb_rx_queues;
 		}
+	}
+
+	offloads = dev->data->dev_conf.txmode.offloads;
+	if ((offloads & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE) &&
+			(internals->mode == BONDING_MODE_8023AD ||
+			internals->mode == BONDING_MODE_BROADCAST)) {
+		RTE_BOND_LOG(WARNING,
+			"bond mode broadcast & 8023AD don't support MBUF_FAST_FREE offload, force disable it.");
+		offloads &= ~RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+		dev->data->dev_conf.txmode.offloads = offloads;
 	}
 
 	/* set the max_rx_pktlen */

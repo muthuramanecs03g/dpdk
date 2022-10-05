@@ -4,20 +4,27 @@
 
 .. include:: <isonum.txt>
 
-MLX5 Common Driver
-==================
+NVIDIA MLX5 Common Driver
+=========================
+
+.. note::
+
+   NVIDIA acquired Mellanox Technologies in 2020.
+   The DPDK documentation and code might still include instances
+   of or references to Mellanox trademarks (like BlueField and ConnectX)
+   that are now NVIDIA trademarks.
 
 The mlx5 common driver library (**librte_common_mlx5**) provides support for
-**Mellanox ConnectX-4**, **Mellanox ConnectX-4 Lx**, **Mellanox ConnectX-5**,
-**Mellanox ConnectX-6**, **Mellanox ConnectX-6 Dx**, **Mellanox ConnectX-6 Lx**,
-**Mellanox BlueField** and **Mellanox BlueField-2** families of
+**NVIDIA ConnectX-4**, **NVIDIA ConnectX-4 Lx**, **NVIDIA ConnectX-5**,
+**NVIDIA ConnectX-6**, **NVIDIA ConnectX-6 Dx**, **NVIDIA ConnectX-6 Lx**,
+**NVIDIA ConnectX-7**, **NVIDIA BlueField**, and **NVIDIA BlueField-2** families of
 10/25/40/50/100/200 Gb/s adapters.
 
 Information and documentation for these adapters can be found on the
 `NVIDIA website <https://www.nvidia.com/en-us/networking/>`_.
 Help is also provided by the
-`Mellanox community <http://community.mellanox.com/welcome>`_.
-In addition, there is a `web section dedicated to the Poll Mode Driver
+`NVIDIA Networking forum <https://forums.developer.nvidia.com/c/infrastructure/369/>`_.
+In addition, there is a `web section dedicated to DPDK
 <https://developer.nvidia.com/networking/dpdk>`_.
 
 
@@ -107,7 +114,7 @@ The following dependencies are not part of DPDK and must be installed separately
 
 - **libmlx5**
 
-  Low-level user space driver library for Mellanox devices,
+  Low-level user space driver library for NVIDIA devices,
   it is automatically loaded by ``libibverbs``.
 
   This library basically implements send/receive calls to the hardware queues.
@@ -121,20 +128,20 @@ The following dependencies are not part of DPDK and must be installed separately
   Unlike most other PMDs, these modules must remain loaded and bound to
   their devices:
 
-  - ``mlx5_core``: hardware driver managing Mellanox devices
+  - ``mlx5_core``: hardware driver managing NVIDIA devices
     and related Ethernet kernel network devices.
   - ``mlx5_ib``: InfiniBand device driver.
   - ``ib_uverbs``: user space driver for Verbs (entry point for ``libibverbs``).
 
 - **Firmware update**
 
-  Mellanox OFED/EN releases include firmware updates.
+  NVIDIA MLNX_OFED/EN releases include firmware updates.
 
   Because each release provides new features, these updates must be applied to
   match the kernel modules and libraries they come with.
 
 Libraries and kernel modules can be provided either by the Linux distribution,
-or by installing Mellanox OFED/EN which provides compatibility with older kernels.
+or by installing NVIDIA MLNX_OFED/EN which provides compatibility with older kernels.
 
 
 Upstream Dependencies
@@ -159,15 +166,15 @@ It is possible to build rdma-core as static libraries starting with version 21::
     ninja
 
 
-Mellanox OFED/EN
-^^^^^^^^^^^^^^^^
+NVIDIA MLNX_OFED/EN
+^^^^^^^^^^^^^^^^^^^
 
 The kernel modules and libraries are packaged with other tools
-in Mellanox OFED or Mellanox EN.
+in NVIDIA MLNX_OFED or NVIDIA MLNX_EN.
 The minimal supported versions are:
 
-- Mellanox OFED version: **4.5** and above.
-- Mellanox EN version: **4.5** and above.
+- NVIDIA MLNX_OFED version: **4.5** and above.
+- NVIDIA MLNX_EN version: **4.5** and above.
 - Firmware version:
 
   - ConnectX-4: **12.21.1000** and above.
@@ -176,17 +183,19 @@ The minimal supported versions are:
   - ConnectX-5 Ex: **16.21.1000** and above.
   - ConnectX-6: **20.27.0090** and above.
   - ConnectX-6 Dx: **22.27.0090** and above.
+  - ConnectX-6 Lx: **26.27.0090** and above.
+  - ConnectX-7: **28.33.2028** and above.
   - BlueField: **18.25.1010** and above.
   - BlueField-2: **24.28.1002** and above.
 
 The firmware, the libraries libibverbs, libmlx5, and mlnx-ofed-kernel modules
-are packaged in `Mellanox OFED
+are packaged in `NVIDIA MLNX_OFED
 <https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/>`_.
 After downloading, it can be installed with this command::
 
    ./mlnxofedinstall --dpdk
 
-`Mellanox EN
+`NVIDIA MLNX_EN
 <https://network.nvidia.com/products/ethernet-drivers/linux/mlnx_en/>`_
 is a smaller package including what is needed for DPDK.
 After downloading, it can be installed with this command::
@@ -199,7 +208,7 @@ After installing, the firmware version can be checked::
 
 .. note::
 
-   Several versions of Mellanox OFED/EN are available. Installing the version
+   Several versions of NVIDIA MLNX_OFED/EN are available. Installing the version
    this DPDK release was developed and tested against is strongly recommended.
    Please check the "Tested Platforms" section in the :doc:`../../rel_notes/index`.
 
@@ -289,8 +298,8 @@ Some runtime behaviours may be configured through environment variables.
    but it depends on CPU design.
 
 
-Port Link with OFED/EN
-^^^^^^^^^^^^^^^^^^^^^^
+Port Link with MLNX_OFED/EN
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Ports links must be set to Ethernet::
 
@@ -313,8 +322,8 @@ If link type was changed, firmware must be reset as well::
 
 .. _mlx5_vf:
 
-SR-IOV Virtual Function with OFED/EN
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SR-IOV Virtual Function with MLNX_OFED/EN
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 SR-IOV must be enabled on the NIC.
 It can be checked in the following command::
@@ -342,8 +351,8 @@ Then the virtual functions can be instantiated::
 
 .. _mlx5_sub_function:
 
-Sub-Function with OFED/EN
-^^^^^^^^^^^^^^^^^^^^^^^^^
+Sub-Function with MLNX_OFED/EN
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Sub-Function is a portion of the PCI device,
 it has its own dedicated queues.
@@ -351,7 +360,7 @@ An SF shares PCI-level resources with other SFs and/or with its parent PCI funct
 
 0. Requirement::
 
-      OFED version >= 5.4-0.3.3.0
+      MLNX_OFED version >= 5.4-0.3.3.0
 
 1. Configure SF feature::
 
@@ -404,25 +413,30 @@ The device can be bound again at this point.
 Run as Non-Root
 ^^^^^^^^^^^^^^^
 
-In order to run as a non-root user,
-some capabilities must be granted to the application::
+Hugepage and resource limit setup are documented
+in the :ref:`common Linux guide <Running_Without_Root_Privileges>`.
+This PMD can operate without access to physical addresses,
+therefore it does not require ``SYS_ADMIN`` to access ``/proc/self/pagemaps``.
+Note that this requirement may still come from other drivers.
 
-   setcap cap_sys_admin,cap_net_admin,cap_net_raw,cap_ipc_lock+ep <dpdk-app>
+Below are additional capabilities that must be granted to the application
+with the reasons for the need of each capability:
 
-Below are the reasons for the need of each capability:
+``NET_RAW``
+   For raw Ethernet queue allocation through the kernel driver.
 
-``cap_sys_admin``
-   When using physical addresses (PA mode), with Linux >= 4.0,
-   for access to ``/proc/self/pagemap``.
+``NET_ADMIN``
+   For device configuration, like setting link status or MTU.
 
-``cap_net_admin``
-   For device configuration.
+``SYS_RAWIO``
+   For using group 1 and above (software steering) in Flow API.
 
-``cap_net_raw``
-   For raw ethernet queue allocation through kernel driver.
+They can be manually granted for a specific executable file::
 
-``cap_ipc_lock``
-   For DMA memory pinning.
+   setcap cap_net_raw,cap_net_admin,cap_sys_rawio+ep <executable>
+
+Alternatively, a service manager or a container runtime
+may configure the capabilities for a process.
 
 
 Windows Environment

@@ -52,6 +52,8 @@ if cc.has_argument('-Wno-format-truncation')
     default_cflags += '-Wno-format-truncation'
 endif
 
+dpdk_drivers_build_dir = meson.current_build_dir()
+
 foreach subpath:subdirs
     drivers = []
     std_deps = []
@@ -89,6 +91,7 @@ foreach subpath:subdirs
         name = drv
         sources = []
         headers = []
+        driver_sdk_headers = [] # public headers included by drivers
         objs = []
         cflags = default_cflags
         includes = [include_directories(drv_path)]
@@ -102,6 +105,7 @@ foreach subpath:subdirs
         # static builds.
         ext_deps = []
         pkgconfig_extra_libs = []
+        testpmd_sources = []
 
         if not enable_drivers.contains(drv_path)
             build = false
@@ -157,6 +161,9 @@ foreach subpath:subdirs
         dpdk_extra_ldflags += pkgconfig_extra_libs
 
         install_headers(headers)
+        if get_option('enable_driver_sdk')
+            install_headers(driver_sdk_headers)
+        endif
 
         # generate pmdinfo sources by building a temporary
         # lib and then running pmdinfogen on the contents of
@@ -245,7 +252,15 @@ foreach subpath:subdirs
 
         set_variable('shared_@0@'.format(lib_name), shared_dep)
         set_variable('static_@0@'.format(lib_name), static_dep)
+        # for drivers, we only need to add dependency objects for static libs,
+        # shared lib drivers are not linked in
+        dpdk_static_lib_deps += static_dep
+
         dependency_name = ''.join(lib_name.split('rte_'))
+        if testpmd_sources.length() != 0
+            testpmd_drivers_sources += testpmd_sources
+            testpmd_drivers_deps += dependency_name
+        endif
         if developer_mode
             message('drivers/@0@: Defining dependency "@1@"'.format(
                     drv_path, dependency_name))

@@ -503,6 +503,12 @@ struct hns3_hw {
 	uint32_t mac_stats_reg_num;
 	struct hns3_rx_missed_stats imissed_stats;
 	uint64_t oerror_stats;
+	/*
+	 * The lock is used to protect statistics update in stats APIs and
+	 * periodic task.
+	 */
+	rte_spinlock_t stats_lock;
+
 	uint32_t fw_version;
 	uint16_t pf_vf_if_version;  /* version of communication interface */
 
@@ -520,7 +526,6 @@ struct hns3_hw {
 
 	/* The configuration info of RSS */
 	struct hns3_rss_conf rss_info;
-	bool rss_dis_flag; /* disable rss flag. true: disable, false: enable */
 	uint16_t rss_ind_tbl_size;
 	uint16_t rss_key_size;
 
@@ -874,7 +879,7 @@ struct hns3_adapter {
 
 #define HNS3_DEVARG_MBX_TIME_LIMIT_MS	"mbx_time_limit_ms"
 
-enum {
+enum hns3_dev_cap {
 	HNS3_DEV_SUPPORT_DCB_B,
 	HNS3_DEV_SUPPORT_COPPER_B,
 	HNS3_DEV_SUPPORT_FD_QUEUE_REGION_B,

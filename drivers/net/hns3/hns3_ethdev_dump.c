@@ -2,37 +2,38 @@
  * Copyright(C) 2022 HiSilicon Limited
  */
 
-#include <rte_kvargs.h>
-#include <rte_bus_pci.h>
-#include <ethdev_pci.h>
-#include <rte_pci.h>
-
 #include "hns3_common.h"
 #include "hns3_logs.h"
 #include "hns3_regs.h"
 #include "hns3_rxtx.h"
+#include "hns3_ethdev.h"
 
 static const char *
-get_adapter_state_name(uint32_t state)
+get_adapter_state_name(enum hns3_adapter_state state)
 {
-	static const char * const state_name[] = {
-		"UNINITIALIZED",
-		"INITIALIZED",
-		"CONFIGURING",
-		"CONFIGURED",
-		"STARTING",
-		"STARTED",
-		"STOPPING",
-		"CLOSING",
-		"CLOSED",
-		"REMOVED",
-		"NSTATES"
+	const struct {
+		enum hns3_adapter_state state;
+		const char *name;
+	} adapter_state_name[] = {
+		{HNS3_NIC_UNINITIALIZED, "UNINITIALIZED"},
+		{HNS3_NIC_INITIALIZED, "INITIALIZED"},
+		{HNS3_NIC_CONFIGURING, "CONFIGURING"},
+		{HNS3_NIC_CONFIGURED, "CONFIGURED"},
+		{HNS3_NIC_STARTING, "STARTING"},
+		{HNS3_NIC_STARTED, "STARTED"},
+		{HNS3_NIC_STOPPING, "STOPPING"},
+		{HNS3_NIC_CLOSING, "CLOSING"},
+		{HNS3_NIC_CLOSED, "CLOSED"},
+		{HNS3_NIC_REMOVED, "REMOVED"},
+		{HNS3_NIC_NSTATES, "NSTATES"},
 	};
+	uint32_t i;
 
-	if (state < RTE_DIM(state_name))
-		return state_name[state];
-	else
-		return "unknown";
+	for (i = 0; i < RTE_DIM(adapter_state_name); i++)
+		if (state == adapter_state_name[i].state)
+			return adapter_state_name[i].name;
+
+	return "Unknown";
 }
 
 static const char *
@@ -79,27 +80,29 @@ get_dev_mac_info(FILE *file, struct hns3_adapter *hns)
 static void
 get_dev_feature_capability(FILE *file, struct hns3_hw *hw)
 {
-	const char * const caps_name[] = {
-		"DCB",
-		"COPPER",
-		"FD QUEUE REGION",
-		"PTP",
-		"TX PUSH",
-		"INDEP TXRX",
-		"STASH",
-		"SIMPLE BD",
-		"RXD Advanced Layout",
-		"OUTER UDP CKSUM",
-		"RAS IMP",
-		"TM",
-		"VF VLAN FILTER MOD",
+	const struct {
+		enum hns3_dev_cap cap;
+		const char *name;
+	} caps_name[] = {
+		{HNS3_DEV_SUPPORT_DCB_B, "DCB"},
+		{HNS3_DEV_SUPPORT_COPPER_B, "COPPER"},
+		{HNS3_DEV_SUPPORT_FD_QUEUE_REGION_B, "FD QUEUE REGION"},
+		{HNS3_DEV_SUPPORT_PTP_B, "PTP"},
+		{HNS3_DEV_SUPPORT_TX_PUSH_B, "TX PUSH"},
+		{HNS3_DEV_SUPPORT_INDEP_TXRX_B, "INDEP TXRX"},
+		{HNS3_DEV_SUPPORT_STASH_B, "STASH"},
+		{HNS3_DEV_SUPPORT_RXD_ADV_LAYOUT_B, "RXD Advanced Layout"},
+		{HNS3_DEV_SUPPORT_OUTER_UDP_CKSUM_B, "OUTER UDP CKSUM"},
+		{HNS3_DEV_SUPPORT_RAS_IMP_B, "RAS IMP"},
+		{HNS3_DEV_SUPPORT_TM_B, "TM"},
 	};
 	uint32_t i;
 
 	fprintf(file, "  - Dev Capability:\n");
 	for (i = 0; i < RTE_DIM(caps_name); i++)
-		fprintf(file, "\t  -- support %s: %s\n", caps_name[i],
-			hw->capability & BIT(i) ? "yes" : "no");
+		fprintf(file, "\t  -- support %s: %s\n", caps_name[i].name,
+			hns3_get_bit(hw->capability, caps_name[i].cap) ? "Yes" :
+									 "No");
 }
 
 static const char *
@@ -221,99 +224,94 @@ get_device_basic_info(FILE *file, struct rte_eth_dev *dev)
 		dev->data->dev_conf.intr_conf.rxq);
 }
 
-/*
- * Note: caller must make sure queue_id < nb_queues
- *       nb_queues = RTE_MAX(eth_dev->data->nb_rx_queues,
- *                           eth_dev->data->nb_tx_queues)
- */
 static struct hns3_rx_queue *
-get_rx_queue(struct rte_eth_dev *dev, unsigned int queue_id)
+get_rx_queue(struct rte_eth_dev *dev)
 {
-	struct hns3_adapter *hns = dev->data->dev_private;
-	struct hns3_hw *hw = &hns->hw;
-	unsigned int offset;
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct hns3_rx_queue *rxq;
+	uint32_t queue_id;
 	void **rx_queues;
 
-	if (queue_id < dev->data->nb_rx_queues) {
+	for (queue_id = 0; queue_id < dev->data->nb_rx_queues; queue_id++) {
 		rx_queues = dev->data->rx_queues;
-		offset = queue_id;
-	} else {
-		/*
-		 * For kunpeng930, fake queue is not exist. But since the queues
-		 * are usually accessd in pairs, this branch may still exist.
-		 */
-		if (hns3_dev_get_support(hw, INDEP_TXRX))
+		if (rx_queues == NULL || rx_queues[queue_id] == NULL) {
+			hns3_err(hw, "detect rx_queues is NULL!\n");
 			return NULL;
+		}
 
-		rx_queues = hw->fkq_data.rx_queues;
-		offset = queue_id - dev->data->nb_rx_queues;
+		rxq = (struct hns3_rx_queue *)rx_queues[queue_id];
+		if (rxq->rx_deferred_start)
+			continue;
+
+		return rx_queues[queue_id];
 	}
 
-	if (rx_queues != NULL && rx_queues[offset] != NULL)
-		return rx_queues[offset];
-
-	hns3_err(hw, "Detect rx_queues is NULL!\n");
 	return NULL;
 }
 
-/*
- * Note: caller must make sure queue_id < nb_queues
- *       nb_queues = RTE_MAX(eth_dev->data->nb_rx_queues,
- *                           eth_dev->data->nb_tx_queues)
- */
 static struct hns3_tx_queue *
-get_tx_queue(struct rte_eth_dev *dev, unsigned int queue_id)
+get_tx_queue(struct rte_eth_dev *dev)
 {
-	struct hns3_adapter *hns = dev->data->dev_private;
-	struct hns3_hw *hw = &hns->hw;
-	unsigned int offset;
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct hns3_tx_queue *txq;
+	uint32_t queue_id;
 	void **tx_queues;
 
-	if (queue_id < dev->data->nb_tx_queues) {
+	for (queue_id = 0; queue_id < dev->data->nb_tx_queues; queue_id++) {
 		tx_queues = dev->data->tx_queues;
-		offset = queue_id;
-	} else {
-		/*
-		 * For kunpeng930, fake queue is not exist. But since the queues
-		 * are usually accessd in pairs, this branch may still exist.
-		 */
-		if (hns3_dev_get_support(hw, INDEP_TXRX))
+		if (tx_queues == NULL || tx_queues[queue_id] == NULL) {
+			hns3_err(hw, "detect tx_queues is NULL!\n");
 			return NULL;
-		tx_queues = hw->fkq_data.tx_queues;
-		offset = queue_id - dev->data->nb_tx_queues;
+		}
+
+		txq = (struct hns3_tx_queue *)tx_queues[queue_id];
+		if (txq->tx_deferred_start)
+			continue;
+
+		return tx_queues[queue_id];
 	}
 
-	if (tx_queues != NULL && tx_queues[offset] != NULL)
-		return tx_queues[offset];
-
-	hns3_err(hw, "Detect tx_queues is NULL!\n");
 	return NULL;
 }
 
 static void
 get_rxtx_fake_queue_info(FILE *file, struct rte_eth_dev *dev)
 {
-	struct hns3_adapter *hns = dev->data->dev_private;
-	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(hns);
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct hns3_rx_queue *rxq;
 	struct hns3_tx_queue *txq;
-	unsigned int queue_id;
+	uint32_t queue_id = 0;
+	void **rx_queues;
+	void **tx_queues;
 
-	if (dev->data->nb_rx_queues != dev->data->nb_tx_queues &&
-	    !hns3_dev_get_support(hw, INDEP_TXRX)) {
-		queue_id = RTE_MIN(dev->data->nb_rx_queues,
-				   dev->data->nb_tx_queues);
-		rxq = get_rx_queue(dev, queue_id);
-		if (rxq == NULL)
+	if (hns3_dev_get_support(hw, INDEP_TXRX))
+		return;
+
+	if (dev->data->nb_rx_queues < dev->data->nb_tx_queues) {
+		rx_queues = hw->fkq_data.rx_queues;
+		if (rx_queues == NULL || rx_queues[queue_id] == NULL) {
+			hns3_err(hw, "detect rx_queues is NULL!\n");
 			return;
-		txq = get_tx_queue(dev, queue_id);
-		if (txq == NULL)
-			return;
+		}
+		rxq = (struct hns3_rx_queue *)rx_queues[queue_id];
+
 		fprintf(file,
-			"\t  -- first fake_queue rxtx info:\n"
-			"\t       rx: port=%u nb_desc=%u free_thresh=%u\n"
-			"\t       tx: port=%u nb_desc=%u\n",
-			rxq->port_id, rxq->nb_rx_desc, rxq->rx_free_thresh,
+			"\t  -- first fake_queue info:\n"
+			"\t       Rx: port=%u nb_desc=%u free_thresh=%u\n",
+			rxq->port_id, rxq->nb_rx_desc, rxq->rx_free_thresh);
+	} else if (dev->data->nb_rx_queues > dev->data->nb_tx_queues) {
+		tx_queues = hw->fkq_data.tx_queues;
+		queue_id = 0;
+
+		if (tx_queues == NULL || tx_queues[queue_id] == NULL) {
+			hns3_err(hw, "detect tx_queues is NULL!\n");
+			return;
+		}
+		txq = (struct hns3_tx_queue *)tx_queues[queue_id];
+
+		fprintf(file,
+			"\t  -- first fake_queue info:\n"
+			"\t	  Tx: port=%u nb_desc=%u\n",
 			txq->port_id, txq->nb_tx_desc);
 	}
 }
@@ -419,23 +417,19 @@ get_rxtx_queue_info(FILE *file, struct rte_eth_dev *dev)
 {
 	struct hns3_rx_queue *rxq;
 	struct hns3_tx_queue *txq;
-	unsigned int queue_id = 0;
 
-	rxq = get_rx_queue(dev, queue_id);
+	rxq = get_rx_queue(dev);
 	if (rxq == NULL)
 		return;
-	txq = get_tx_queue(dev, queue_id);
+	txq = get_tx_queue(dev);
 	if (txq == NULL)
 		return;
 	fprintf(file, "  - Rx/Tx Queue Info:\n");
 	fprintf(file,
-		"\t  -- nb_rx_queues=%u nb_tx_queues=%u, "
-		"first queue rxtx info:\n"
-		"\t       rx: port=%u nb_desc=%u free_thresh=%u\n"
-		"\t       tx: port=%u nb_desc=%u\n"
+		"\t  -- first queue rxtx info:\n"
+		"\t       Rx: port=%u nb_desc=%u free_thresh=%u\n"
+		"\t       Tx: port=%u nb_desc=%u\n"
 		"\t  -- tx push: %s\n",
-		dev->data->nb_rx_queues,
-		dev->data->nb_tx_queues,
 		rxq->port_id, rxq->nb_rx_desc, rxq->rx_free_thresh,
 		txq->port_id, txq->nb_tx_desc,
 		txq->tx_push_enable ? "enabled" : "disabled");
@@ -635,8 +629,6 @@ get_vlan_config_info(FILE *file, struct hns3_hw *hw)
 	ret = get_vlan_tx_offload_cfg(file, hw);
 	if (ret < 0)
 		return;
-
-	get_port_pvid_info(file, hw);
 }
 
 static void
@@ -715,7 +707,6 @@ get_tm_conf_queue_format_info(FILE *file, struct hns3_tm_node **queue_node,
 #define PERLINE_STRIDE	8
 #define LINE_BUF_SIZE	1024
 	uint32_t i, j, line_num, start_queue, end_queue;
-	char tmpbuf[LINE_BUF_SIZE] = {0};
 
 	line_num = (nb_tx_queues + PERLINE_QUEUES - 1) / PERLINE_QUEUES;
 	for (i = 0; i < line_num; i++) {
@@ -733,7 +724,7 @@ get_tm_conf_queue_format_info(FILE *file, struct hns3_tm_node **queue_node,
 				queue_node[j] ? queue_node_tc[j] :
 				HNS3_MAX_TC_NUM);
 		}
-		fprintf(file, "%s\n", tmpbuf);
+		fprintf(file, "\n");
 	}
 }
 
@@ -773,8 +764,12 @@ get_tm_conf_queue_node_info(FILE *file, struct hns3_tm_conf *conf,
 static void
 get_tm_conf_info(FILE *file, struct rte_eth_dev *dev)
 {
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct hns3_pf *pf = HNS3_DEV_PRIVATE_TO_PF(dev->data->dev_private);
 	struct hns3_tm_conf *conf = &pf->tm_conf;
+
+	if (!hns3_dev_get_support(hw, TM))
+		return;
 
 	fprintf(file, "  - TM config info:\n");
 	fprintf(file,
@@ -901,13 +896,14 @@ hns3_eth_dev_priv_dump(struct rte_eth_dev *dev, FILE *file)
 
 	get_device_basic_info(file, dev);
 	get_dev_feature_capability(file, hw);
+	get_rxtx_queue_info(file, dev);
+	get_port_pvid_info(file, hw);
 
 	/* VF only supports dumping basic info and feaure capability */
 	if (hns->is_vf)
 		return 0;
 
 	get_dev_mac_info(file, hns);
-	get_rxtx_queue_info(file, dev);
 	get_vlan_config_info(file, hw);
 	get_fdir_basic_info(file, &hns->pf);
 	get_tm_conf_info(file, dev);

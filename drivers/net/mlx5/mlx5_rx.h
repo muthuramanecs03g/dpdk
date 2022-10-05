@@ -126,6 +126,7 @@ struct mlx5_rxq_data {
 	struct mlx5_dev_ctx_shared *sh; /* Shared context. */
 	uint16_t idx; /* Queue index. */
 	struct mlx5_rxq_stats stats;
+	struct mlx5_rxq_stats stats_reset; /* stats on last reset. */
 	rte_xmm_t mbuf_initializer; /* Default rearm/flags for vectorized Rx. */
 	struct rte_mbuf fake_mbuf; /* elts padding for vectorized Rx. */
 	struct mlx5_uar_data uar_data; /* CQ doorbell. */
@@ -174,6 +175,9 @@ struct mlx5_rxq_priv {
 	struct mlx5_devx_rq devx_rq;
 	struct rte_eth_hairpin_conf hairpin_conf; /* Hairpin configuration. */
 	uint32_t hairpin_status; /* Hairpin binding status. */
+	uint32_t lwm:16;
+	uint32_t lwm_event_pending:1;
+	uint32_t lwm_devx_subscribed:1;
 };
 
 /* External RX queue descriptor. */
@@ -209,7 +213,7 @@ struct mlx5_rxq_ctrl *mlx5_rxq_new(struct rte_eth_dev *dev, uint16_t idx,
 				   uint16_t desc, unsigned int socket,
 				   const struct rte_eth_rxconf *conf,
 				   const struct rte_eth_rxseg_split *rx_seg,
-				   uint16_t n_seg);
+				   uint16_t n_seg, bool is_extmem);
 struct mlx5_rxq_ctrl *mlx5_rxq_hairpin_new
 	(struct rte_eth_dev *dev, struct mlx5_rxq_priv *rxq, uint16_t desc,
 	 const struct rte_eth_hairpin_conf *hairpin_conf);
@@ -293,6 +297,11 @@ void mlx5_rxq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
 int mlx5_rx_burst_mode_get(struct rte_eth_dev *dev, uint16_t rx_queue_id,
 			   struct rte_eth_burst_mode *mode);
 int mlx5_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc);
+void mlx5_dev_interrupt_handler_lwm(void *args);
+int mlx5_rx_queue_lwm_set(struct rte_eth_dev *dev, uint16_t rx_queue_id,
+			  uint8_t lwm);
+int mlx5_rx_queue_lwm_query(struct rte_eth_dev *dev, uint16_t *rx_queue_id,
+			    uint8_t *lwm);
 
 /* Vectorized version of mlx5_rx.c */
 int mlx5_rxq_check_vec_support(struct mlx5_rxq_data *rxq_data);
@@ -672,5 +681,10 @@ mlx5_is_external_rxq(struct rte_eth_dev *dev, uint16_t queue_idx)
 	rxq = &priv->ext_rxqs[queue_idx - MLX5_EXTERNAL_RX_QUEUE_ID_MIN];
 	return !!__atomic_load_n(&rxq->refcnt, __ATOMIC_RELAXED);
 }
+
+#define LWM_COOKIE_RXQID_OFFSET 0
+#define LWM_COOKIE_RXQID_MASK 0xffff
+#define LWM_COOKIE_PORTID_OFFSET 16
+#define LWM_COOKIE_PORTID_MASK 0xffff
 
 #endif /* RTE_PMD_MLX5_RX_H_ */

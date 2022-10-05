@@ -62,7 +62,7 @@ mlx5_rxq_obj_modify_rq_vlan_strip(struct mlx5_rxq_priv *rxq, int on)
  * @return
  *   0 on success, a negative errno value otherwise and rte_errno is set.
  */
-static int
+int
 mlx5_devx_modify_rq(struct mlx5_rxq_priv *rxq, uint8_t type)
 {
 	struct mlx5_devx_modify_rq_attr rq_attr;
@@ -76,6 +76,11 @@ mlx5_devx_modify_rq(struct mlx5_rxq_priv *rxq, uint8_t type)
 	case MLX5_RXQ_MOD_RST2RDY:
 		rq_attr.rq_state = MLX5_RQC_STATE_RST;
 		rq_attr.state = MLX5_RQC_STATE_RDY;
+		if (rxq->lwm) {
+			rq_attr.modify_bitmask |=
+				MLX5_MODIFY_RQ_IN_MODIFY_BITMASK_WQ_LWM;
+			rq_attr.lwm = rxq->lwm;
+		}
 		break;
 	case MLX5_RXQ_MOD_RDY2ERR:
 		rq_attr.rq_state = MLX5_RQC_STATE_RDY;
@@ -84,6 +89,12 @@ mlx5_devx_modify_rq(struct mlx5_rxq_priv *rxq, uint8_t type)
 	case MLX5_RXQ_MOD_RDY2RST:
 		rq_attr.rq_state = MLX5_RQC_STATE_RDY;
 		rq_attr.state = MLX5_RQC_STATE_RST;
+		break;
+	case MLX5_RXQ_MOD_RDY2RDY:
+		rq_attr.rq_state = MLX5_RQC_STATE_RDY;
+		rq_attr.state = MLX5_RQC_STATE_RDY;
+		rq_attr.modify_bitmask |= MLX5_MODIFY_RQ_IN_MODIFY_BITMASK_WQ_LWM;
+		rq_attr.lwm = rxq->lwm;
 		break;
 	default:
 		break;
@@ -216,6 +227,52 @@ mlx5_rx_devx_get_event(struct mlx5_rxq_obj *rxq_obj)
 	return 0;
 #else
 	(void)rxq_obj;
+	rte_errno = ENOTSUP;
+	return -rte_errno;
+#endif /* HAVE_IBV_DEVX_EVENT */
+}
+
+/**
+ * Get LWM event for shared context, return the correct port/rxq for this event.
+ *
+ * @param priv
+ *   Mlx5_priv object.
+ * @param rxq_idx [out]
+ *   Which rxq gets this event.
+ * @param port_id [out]
+ *   Which port gets this event.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+mlx5_rx_devx_get_event_lwm(struct mlx5_priv *priv, int *rxq_idx, int *port_id)
+{
+#ifdef HAVE_IBV_DEVX_EVENT
+	union {
+		struct mlx5dv_devx_async_event_hdr event_resp;
+		uint8_t buf[sizeof(struct mlx5dv_devx_async_event_hdr) + 128];
+	} out;
+	int ret;
+
+	memset(&out, 0, sizeof(out));
+	ret = mlx5_glue->devx_get_event(priv->sh->devx_channel_lwm,
+					&out.event_resp,
+					sizeof(out.buf));
+	if (ret < 0) {
+		rte_errno = errno;
+		DRV_LOG(WARNING, "%s err\n", __func__);
+		return -rte_errno;
+	}
+	*port_id = (((uint32_t)out.event_resp.cookie) >>
+		    LWM_COOKIE_PORTID_OFFSET) & LWM_COOKIE_PORTID_MASK;
+	*rxq_idx = (((uint32_t)out.event_resp.cookie) >>
+		    LWM_COOKIE_RXQID_OFFSET) & LWM_COOKIE_RXQID_MASK;
+	return 0;
+#else
+	(void)priv;
+	(void)rxq_idx;
+	(void)port_id;
 	rte_errno = ENOTSUP;
 	return -rte_errno;
 #endif /* HAVE_IBV_DEVX_EVENT */
@@ -715,7 +772,7 @@ mlx5_devx_tir_attr_set(struct rte_eth_dev *dev, const uint8_t *rss_key,
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 	bool is_hairpin;
-	bool lro = true;
+	bool lro = false;
 	uint32_t i;
 
 	/* NULL queues designate drop queue. */
@@ -724,9 +781,9 @@ mlx5_devx_tir_attr_set(struct rte_eth_dev *dev, const uint8_t *rss_key,
 	} else if (mlx5_is_external_rxq(dev, ind_tbl->queues[0])) {
 		/* External RxQ supports neither Hairpin nor LRO. */
 		is_hairpin = false;
-		lro = false;
 	} else {
 		is_hairpin = mlx5_rxq_is_hairpin(dev, ind_tbl->queues[0]);
+		lro = true;
 		/* Enable TIR LRO only if all the queues were configured for. */
 		for (i = 0; i < ind_tbl->queues_n; ++i) {
 			struct mlx5_rxq_data *rxq_i =
@@ -765,7 +822,9 @@ mlx5_devx_tir_attr_set(struct rte_eth_dev *dev, const uint8_t *rss_key,
 			(!!(hash_fields & MLX5_L4_SRC_IBV_RX_HASH)) <<
 			 MLX5_RX_HASH_FIELD_SELECT_SELECTED_FIELDS_L4_SPORT |
 			(!!(hash_fields & MLX5_L4_DST_IBV_RX_HASH)) <<
-			 MLX5_RX_HASH_FIELD_SELECT_SELECTED_FIELDS_L4_DPORT;
+			 MLX5_RX_HASH_FIELD_SELECT_SELECTED_FIELDS_L4_DPORT |
+			(!!(hash_fields & IBV_RX_HASH_IPSEC_SPI)) <<
+			 MLX5_RX_HASH_FIELD_SELECT_SELECTED_FIELDS_IPSEC_SPI;
 	}
 	if (is_hairpin)
 		tir_attr->transport_domain = priv->sh->td->id;
@@ -776,6 +835,7 @@ mlx5_devx_tir_attr_set(struct rte_eth_dev *dev, const uint8_t *rss_key,
 	if (dev->data->dev_conf.lpbk_mode)
 		tir_attr->self_lb_block = MLX5_TIRC_SELF_LB_BLOCK_BLOCK_UNICAST;
 	if (lro) {
+		MLX5_ASSERT(priv->sh->config.lro_allowed);
 		tir_attr->lro_timeout_period_usecs = priv->config.lro_timeout;
 		tir_attr->lro_max_msg_sz = priv->max_lro_msg_size;
 		tir_attr->lro_enable_mask =
@@ -947,6 +1007,8 @@ mlx5_rxq_devx_obj_drop_create(struct rte_eth_dev *dev)
 		rte_errno = ENOMEM;
 		goto error;
 	}
+	/* set the CPU socket ID where the rxq_ctrl was allocated */
+	rxq_ctrl->socket = socket_id;
 	rxq_obj->rxq_ctrl = rxq_ctrl;
 	rxq_ctrl->is_hairpin = false;
 	rxq_ctrl->sh = priv->sh;
@@ -1405,6 +1467,7 @@ struct mlx5_obj_ops devx_obj_ops = {
 	.rxq_event_get = mlx5_rx_devx_get_event,
 	.rxq_obj_modify = mlx5_devx_modify_rq,
 	.rxq_obj_release = mlx5_rxq_devx_obj_release,
+	.rxq_event_get_lwm = mlx5_rx_devx_get_event_lwm,
 	.ind_table_new = mlx5_devx_ind_table_new,
 	.ind_table_modify = mlx5_devx_ind_table_modify,
 	.ind_table_destroy = mlx5_devx_ind_table_destroy,

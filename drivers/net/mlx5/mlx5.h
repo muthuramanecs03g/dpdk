@@ -151,7 +151,6 @@ struct mlx5_dev_cap {
 	/* HW has bug working with tunnel packet decap and scatter FCS. */
 	uint32_t hw_fcs_strip:1; /* FCS stripping is supported. */
 	uint32_t rt_timestamp:1; /* Realtime timestamp format. */
-	uint32_t lro_supported:1; /* Whether LRO is supported. */
 	uint32_t rq_delay_drop_en:1; /* Enable RxQ delay drop. */
 	uint32_t tunnel_en:3;
 	/* Whether tunnel stateless offloads are supported. */
@@ -308,6 +307,7 @@ struct mlx5_sh_config {
 	uint32_t decap_en:1; /* Whether decap will be used or not. */
 	uint32_t hw_fcs_strip:1; /* FCS stripping is supported. */
 	uint32_t allow_duplicate_pattern:1;
+	uint32_t lro_allowed:1; /* Whether LRO is allowed. */
 	/* Allow/Prevent the duplicate rules pattern. */
 };
 
@@ -637,6 +637,7 @@ struct mlx5_age_info {
 struct mlx5_dev_shared_port {
 	uint32_t ih_port_id;
 	uint32_t devx_ih_port_id;
+	uint32_t nl_ih_port_id;
 	/*
 	 * Interrupt handler port_id. Used by shared interrupt
 	 * handler to find the corresponding rte_eth device
@@ -774,10 +775,14 @@ struct mlx5_flow_meter_policy {
 	/* Is queue action in policy table. */
 	uint32_t is_hierarchy:1;
 	/* Is meter action in policy table. */
+	uint32_t hierarchy_drop_cnt:1;
+	/* Is any meter in hierarchy contains drop_cnt. */
 	uint32_t skip_y:1;
 	/* If yellow color policy is skipped. */
 	uint32_t skip_g:1;
 	/* If green color policy is skipped. */
+	uint32_t mark:1;
+	/* If policy contains mark action. */
 	rte_spinlock_t sl;
 	uint32_t ref_cnt;
 	/* Use count. */
@@ -847,7 +852,7 @@ struct mlx5_flow_meter_info {
 	 * applications) at the device level.
 	 *
 	 * It complements the behavior of some pattern items such as
-	 * RTE_FLOW_ITEM_TYPE_PHY_PORT and is meaningless without them.
+	 * RTE_FLOW_ITEM_TYPE_REPRESENTED_PORT and is meaningless without them.
 	 *
 	 * When transferring flow rules, ingress and egress attributes keep
 	 * their original meaning, as if processing traffic emitted or
@@ -856,6 +861,8 @@ struct mlx5_flow_meter_info {
 	uint32_t transfer:1;
 	uint32_t def_policy:1;
 	/* Meter points to default policy. */
+	uint32_t color_aware:1;
+	/* Meter is color aware mode. */
 	void *drop_rule[MLX5_MTR_DOMAIN_MAX];
 	/* Meter drop rule in drop table. */
 	uint32_t drop_cnt;
@@ -864,8 +871,10 @@ struct mlx5_flow_meter_info {
 	/**< Use count. */
 	struct mlx5_indexed_pool *flow_ipool;
 	/**< Index pool for flow id. */
-	void *meter_action;
+	void *meter_action_g;
 	/**< Flow meter action. */
+	void *meter_action_y;
+	/**< Flow meter action for yellow init_color. */
 };
 
 /* PPS(packets per second) map to BPS(Bytes per second).
@@ -992,7 +1001,6 @@ union mlx5_flow_tbl_key {
 /* Table structure. */
 struct mlx5_flow_tbl_resource {
 	void *obj; /**< Pointer to DR table object. */
-	uint32_t refcnt; /**< Reference counter. */
 };
 
 #define MLX5_MAX_TABLES UINT16_MAX
@@ -1239,6 +1247,7 @@ struct mlx5_dev_ctx_shared {
 	/* Shared interrupt handler section. */
 	struct rte_intr_handle *intr_handle; /* Interrupt handler for device. */
 	struct rte_intr_handle *intr_handle_devx; /* DEVX interrupt handler. */
+	struct rte_intr_handle *intr_handle_nl; /* Netlink interrupt handler. */
 	void *devx_comp; /* DEVX async comp obj. */
 	struct mlx5_devx_obj *tis[16]; /* TIS object. */
 	struct mlx5_devx_obj *td; /* Transport domain. */
@@ -1261,6 +1270,11 @@ struct mlx5_dev_ctx_shared {
 	struct mlx5_lb_ctx self_lb; /* QP to enable self loopback for Devx. */
 	unsigned int flow_max_priority;
 	enum modify_reg flow_mreg_c[MLX5_MREG_C_NUM];
+	void *devx_channel_lwm;
+	struct rte_intr_handle *intr_handle_lwm;
+	pthread_mutex_t lwm_config_lock;
+	uint32_t host_shaper_rate:8;
+	uint32_t lwm_triggered:1;
 	/* Availability of mreg_c's. */
 	struct mlx5_dev_shared_port port[]; /* per device port data array. */
 };
@@ -1388,6 +1402,7 @@ enum mlx5_rxq_modify_type {
 	MLX5_RXQ_MOD_RST2RDY, /* modify state from reset to ready. */
 	MLX5_RXQ_MOD_RDY2ERR, /* modify state from ready to error. */
 	MLX5_RXQ_MOD_RDY2RST, /* modify state from ready to reset. */
+	MLX5_RXQ_MOD_RDY2RDY, /* modify state from ready to ready. */
 };
 
 enum mlx5_txq_modify_type {
@@ -1397,6 +1412,7 @@ enum mlx5_txq_modify_type {
 };
 
 struct mlx5_rxq_priv;
+struct mlx5_priv;
 
 /* HW objects operations structure. */
 struct mlx5_obj_ops {
@@ -1405,6 +1421,7 @@ struct mlx5_obj_ops {
 	int (*rxq_event_get)(struct mlx5_rxq_obj *rxq_obj);
 	int (*rxq_obj_modify)(struct mlx5_rxq_priv *rxq, uint8_t type);
 	void (*rxq_obj_release)(struct mlx5_rxq_priv *rxq);
+	int (*rxq_event_get_lwm)(struct mlx5_priv *priv, int *rxq_idx, int *port_id);
 	int (*ind_table_new)(struct rte_eth_dev *dev, const unsigned int log_n,
 			     struct mlx5_ind_table_obj *ind_tbl);
 	int (*ind_table_modify)(struct rte_eth_dev *dev,
@@ -1595,6 +1612,8 @@ int mlx5_net_remove(struct mlx5_common_device *cdev);
 bool mlx5_is_hpf(struct rte_eth_dev *dev);
 bool mlx5_is_sf_repr(struct rte_eth_dev *dev);
 void mlx5_age_event_prepare(struct mlx5_dev_ctx_shared *sh);
+int mlx5_lwm_setup(struct mlx5_priv *priv);
+void mlx5_lwm_unset(struct mlx5_dev_ctx_shared *sh);
 
 /* Macro to iterate over all valid ports for mlx5 driver. */
 #define MLX5_ETH_FOREACH_DEV(port_id, dev) \
@@ -1666,6 +1685,7 @@ int mlx5_dev_set_flow_ctrl(struct rte_eth_dev *dev,
 			   struct rte_eth_fc_conf *fc_conf);
 void mlx5_dev_interrupt_handler(void *arg);
 void mlx5_dev_interrupt_handler_devx(void *arg);
+void mlx5_dev_interrupt_handler_nl(void *arg);
 int mlx5_set_link_down(struct rte_eth_dev *dev);
 int mlx5_set_link_up(struct rte_eth_dev *dev);
 int mlx5_is_removed(struct rte_eth_dev *dev);
@@ -1673,8 +1693,6 @@ int mlx5_sysfs_switch_info(unsigned int ifindex,
 			   struct mlx5_switch_info *info);
 void mlx5_translate_port_name(const char *port_name_in,
 			      struct mlx5_switch_info *port_info_out);
-void mlx5_intr_callback_unregister(const struct rte_intr_handle *handle,
-				   rte_intr_callback_fn cb_fn, void *cb_arg);
 int mlx5_sysfs_bond_info(unsigned int pf_ifindex, unsigned int *ifindex,
 			 char *ifname);
 int mlx5_get_module_info(struct rte_eth_dev *dev,
@@ -1867,6 +1885,10 @@ struct mlx5_flow_meter_policy *mlx5_flow_meter_policy_find
 		(struct rte_eth_dev *dev,
 		uint32_t policy_id,
 		uint32_t *policy_idx);
+struct mlx5_flow_meter_info *
+mlx5_flow_meter_hierarchy_next_meter(struct mlx5_priv *priv,
+				     struct mlx5_flow_meter_policy *policy,
+				     uint32_t *mtr_idx);
 struct mlx5_flow_meter_policy *
 mlx5_flow_meter_hierarchy_get_final_policy(struct rte_eth_dev *dev,
 					struct mlx5_flow_meter_policy *policy);

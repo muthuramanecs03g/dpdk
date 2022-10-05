@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <rte_malloc.h>
@@ -382,7 +383,7 @@ cperf_verify_devices_capabilities(struct cperf_options *opts,
 				return -1;
 
 			ret = rte_cryptodev_asym_xform_capability_check_modlen(
-				asym_capability, sizeof(perf_mod_p));
+				asym_capability, opts->modex_data->modulus.len);
 			if (ret != 0)
 				return ret;
 
