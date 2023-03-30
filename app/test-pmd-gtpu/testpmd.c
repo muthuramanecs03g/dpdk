@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #ifndef RTE_EXEC_ENV_WINDOWS
 #include <sys/mman.h>
+#include <sys/select.h>
 #endif
 #include <sys/types.h>
 #include <errno.h>
@@ -32,6 +33,7 @@
 #include <rte_memory.h>
 #include <rte_memcpy.h>
 #include <rte_launch.h>
+#include <rte_bus.h>
 #include <rte_eal.h>
 #include <rte_alarm.h>
 #include <rte_per_lcore.h>
@@ -42,7 +44,6 @@
 #include <rte_mbuf.h>
 #include <rte_mbuf_pool_ops.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_dev.h>
@@ -66,6 +67,12 @@
 #ifdef RTE_EXEC_ENV_WINDOWS
 #include <process.h>
 #endif
+#ifdef RTE_NET_BOND
+#include <rte_eth_bond.h>
+#endif
+#ifdef RTE_NET_MLX5
+//#include "mlx5_testpmd.h"
+#endif
 
 #include "testpmd.h"
 
@@ -84,7 +91,13 @@
 #endif
 
 #define EXTMEM_HEAP_NAME "extmem"
-#define EXTBUF_ZONE_SIZE RTE_PGSIZE_2M
+/*
+ * Zone size with the malloc overhead (max of debug and release variants)
+ * must fit into the smallest supported hugepage size (2M),
+ * so that an IOVA-contiguous zone of this size can always be allocated
+ * if there are free 2M hugepages.
+ */
+#define EXTBUF_ZONE_SIZE (RTE_PGSIZE_2M - 4 * RTE_CACHE_LINE_SIZE)
 
 uint16_t verbose_level = 0; /**< Silent by default. */
 int testpmd_logtype; /**< Log type for testpmd logs */
@@ -219,7 +232,8 @@ unsigned int xstats_display_num; /**< Size of extended statistics to show */
  * In container, it cannot terminate the process which running with 'stats-period'
  * option. Set flag to exit stats period loop after received SIGINT/SIGTERM.
  */
-uint8_t f_quit;
+volatile uint8_t f_quit;
+uint8_t cl_quit; /* Quit testpmd from cmdline. */
 
 /*
  * Max Rx frame size, set by '--max-pkt-len' parameter.
@@ -234,6 +248,9 @@ uint16_t rx_pkt_seg_lengths[MAX_SEGS_BUFFER_SPLIT];
 uint8_t  rx_pkt_nb_segs; /**< Number of segments to split */
 uint16_t rx_pkt_seg_offsets[MAX_SEGS_BUFFER_SPLIT];
 uint8_t  rx_pkt_nb_offs; /**< Number of specified offsets */
+uint32_t rx_pkt_hdr_protos[MAX_SEGS_BUFFER_SPLIT];
+
+uint8_t multi_rx_mempool; /**< Enables multi-rx-mempool feature */
 
 /*
  * Configuration of packet segments used by the "txonly" processing engine.
@@ -275,10 +292,10 @@ queueid_t nb_txq = 1; /**< Number of TX queues per port. */
  * Configurable number of RX/TX ring descriptors.
  * Defaults are supplied by drivers via ethdev.
  */
-#define RTE_TEST_RX_DESC_DEFAULT 0
-#define RTE_TEST_TX_DESC_DEFAULT 0
-uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT; /**< Number of RX descriptors. */
-uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT; /**< Number of TX descriptors. */
+#define RX_DESC_DEFAULT 0
+#define TX_DESC_DEFAULT 0
+uint16_t nb_rxd = RX_DESC_DEFAULT; /**< Number of RX descriptors. */
+uint16_t nb_txd = TX_DESC_DEFAULT; /**< Number of TX descriptors. */
 
 #define RTE_PMD_PARAM_UNSET -1
 /*
@@ -368,6 +385,11 @@ uint8_t no_flush_rx = 0; /* flush by default */
 uint8_t flow_isolate_all;
 
 /*
+ * Disable port flow flush when stop port.
+ */
+uint8_t no_flow_flush = 0; /* do flow flush by default */
+
+/*
  * Avoids to check link status when starting/stopping a port.
  */
 uint8_t no_link_check = 0; /* check by default */
@@ -396,7 +418,7 @@ bool setup_on_probe_event = true;
 uint8_t clear_ptypes = true;
 
 /* Hairpin ports configuration mode. */
-uint16_t hairpin_mode;
+uint32_t hairpin_mode;
 
 /* Pretty printing of ethdev events */
 static const char * const eth_event_desc[] = {
@@ -411,6 +433,10 @@ static const char * const eth_event_desc[] = {
 	[RTE_ETH_EVENT_NEW] = "device probed",
 	[RTE_ETH_EVENT_DESTROY] = "device released",
 	[RTE_ETH_EVENT_FLOW_AGED] = "flow aged",
+	[RTE_ETH_EVENT_RX_AVAIL_THRESH] = "RxQ available descriptors threshold reached",
+	[RTE_ETH_EVENT_ERR_RECOVERING] = "error recovering",
+	[RTE_ETH_EVENT_RECOVERY_SUCCESS] = "error recovery successful",
+	[RTE_ETH_EVENT_RECOVERY_FAILED] = "error recovery failed",
 	[RTE_ETH_EVENT_MAX] = NULL,
 };
 
@@ -425,21 +451,14 @@ uint32_t event_print_mask = (UINT32_C(1) << RTE_ETH_EVENT_UNKNOWN) |
 			    (UINT32_C(1) << RTE_ETH_EVENT_IPSEC) |
 			    (UINT32_C(1) << RTE_ETH_EVENT_MACSEC) |
 			    (UINT32_C(1) << RTE_ETH_EVENT_INTR_RMV) |
-			    (UINT32_C(1) << RTE_ETH_EVENT_FLOW_AGED);
+			    (UINT32_C(1) << RTE_ETH_EVENT_FLOW_AGED) |
+			    (UINT32_C(1) << RTE_ETH_EVENT_ERR_RECOVERING) |
+			    (UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_SUCCESS) |
+			    (UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_FAILED);
 /*
  * Decide if all memory are locked for performance.
  */
 int do_mlockall = 0;
-
-/*
- * NIC bypass mode configuration options.
- */
-
-#if defined RTE_NET_IXGBE && defined RTE_LIBRTE_IXGBE_BYPASS
-/* The NIC bypass watchdog timeout. */
-uint32_t bypass_timeout = RTE_PMD_IXGBE_BYPASS_TMT_OFF;
-#endif
-
 
 #ifdef RTE_LIB_LATENCYSTATS
 
@@ -449,7 +468,7 @@ uint32_t bypass_timeout = RTE_PMD_IXGBE_BYPASS_TMT_OFF;
 uint8_t latencystats_enabled;
 
 /*
- * Lcore ID to serive latency statistics.
+ * Lcore ID to service latency statistics.
  */
 lcoreid_t latencystats_lcore_id = -1;
 
@@ -462,29 +481,6 @@ struct rte_eth_rxmode rx_mode;
 
 struct rte_eth_txmode tx_mode = {
 	.offloads = RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE,
-};
-
-struct rte_eth_fdir_conf fdir_conf = {
-	.mode = RTE_FDIR_MODE_NONE,
-	.pballoc = RTE_ETH_FDIR_PBALLOC_64K,
-	.status = RTE_FDIR_REPORT_STATUS,
-	.mask = {
-		.vlan_tci_mask = 0xFFEF,
-		.ipv4_mask     = {
-			.src_ip = 0xFFFFFFFF,
-			.dst_ip = 0xFFFFFFFF,
-		},
-		.ipv6_mask     = {
-			.src_ip = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF},
-			.dst_ip = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF},
-		},
-		.src_port_mask = 0xFFFF,
-		.dst_port_mask = 0xFFFF,
-		.mac_addr_byte_mask = 0xFF,
-		.tunnel_type_mask = 1,
-		.tunnel_id_mask = 0xFFFFFFFF,
-	},
-	.drop_queue = 127,
 };
 
 volatile int test_done = 1; /* stop packet forwarding when set to 1. */
@@ -592,10 +588,57 @@ eth_dev_configure_mp(uint16_t port_id, uint16_t nb_rx_q, uint16_t nb_tx_q,
 }
 
 static int
+change_bonding_slave_port_status(portid_t bond_pid, bool is_stop)
+{
+#ifdef RTE_NET_BOND
+
+	portid_t slave_pids[RTE_MAX_ETHPORTS];
+	struct rte_port *port;
+	int num_slaves;
+	portid_t slave_pid;
+	int i;
+
+	num_slaves = rte_eth_bond_slaves_get(bond_pid, slave_pids,
+						RTE_MAX_ETHPORTS);
+	if (num_slaves < 0) {
+		fprintf(stderr, "Failed to get slave list for port = %u\n",
+			bond_pid);
+		return num_slaves;
+	}
+
+	for (i = 0; i < num_slaves; i++) {
+		slave_pid = slave_pids[i];
+		port = &ports[slave_pid];
+		port->port_status =
+			is_stop ? RTE_PORT_STOPPED : RTE_PORT_STARTED;
+	}
+#else
+	RTE_SET_USED(bond_pid);
+	RTE_SET_USED(is_stop);
+#endif
+	return 0;
+}
+
+static int
 eth_dev_start_mp(uint16_t port_id)
 {
-	if (is_proc_primary())
-		return rte_eth_dev_start(port_id);
+	int ret;
+
+	if (is_proc_primary()) {
+		ret = rte_eth_dev_start(port_id);
+		if (ret != 0)
+			return ret;
+
+		struct rte_port *port = &ports[port_id];
+
+		/*
+		 * Starting a bonded port also starts all slaves under the bonded
+		 * device. So if this port is bond device, we need to modify the
+		 * port status of these slaves.
+		 */
+		if (port->bond_flag == 1)
+			return change_bonding_slave_port_status(port_id, false);
+	}
 
 	return 0;
 }
@@ -603,8 +646,23 @@ eth_dev_start_mp(uint16_t port_id)
 static int
 eth_dev_stop_mp(uint16_t port_id)
 {
-	if (is_proc_primary())
-		return rte_eth_dev_stop(port_id);
+	int ret;
+
+	if (is_proc_primary()) {
+		ret = rte_eth_dev_stop(port_id);
+		if (ret != 0)
+			return ret;
+
+		struct rte_port *port = &ports[port_id];
+
+		/*
+		 * Stopping a bonded port also stops all slaves under the bonded
+		 * device. So if this port is bond device, we need to modify the
+		 * port status of these slaves.
+		 */
+		if (port->bond_flag == 1)
+			return change_bonding_slave_port_status(port_id, true);
+	}
 
 	return 0;
 }
@@ -902,8 +960,7 @@ create_extmem(uint32_t nb_mbufs, uint32_t mbuf_sz, struct extmem_param *param,
 
 	return 0;
 fail:
-	if (iovas)
-		free(iovas);
+	free(iovas);
 	if (addr)
 		munmap(addr, mem_sz);
 
@@ -982,7 +1039,7 @@ dma_unmap_cb(struct rte_mempool *mp __rte_unused, void *opaque __rte_unused,
 			TESTPMD_LOG(DEBUG,
 				    "unable to DMA unmap addr 0x%p "
 				    "for device %s\n",
-				    memhdr->addr, dev_info.device->name);
+				    memhdr->addr, rte_dev_name(dev_info.device));
 		}
 	}
 	ret = rte_extmem_unregister(memhdr->addr, memhdr->len);
@@ -1023,7 +1080,7 @@ dma_map_cb(struct rte_mempool *mp __rte_unused, void *opaque __rte_unused,
 			TESTPMD_LOG(DEBUG,
 				    "unable to DMA map addr 0x%p "
 				    "for device %s\n",
-				    memhdr->addr, dev_info.device->name);
+				    memhdr->addr, rte_dev_name(dev_info.device));
 		}
 	}
 }
@@ -1061,12 +1118,11 @@ setup_extbuf(uint32_t nb_mbufs, uint16_t mbuf_sz, unsigned int socket_id,
 			ext_num = 0;
 			break;
 		}
-		mz = rte_memzone_reserve_aligned(mz_name, EXTBUF_ZONE_SIZE,
-						 socket_id,
-						 RTE_MEMZONE_IOVA_CONTIG |
-						 RTE_MEMZONE_1GB |
-						 RTE_MEMZONE_SIZE_HINT_ONLY,
-						 EXTBUF_ZONE_SIZE);
+		mz = rte_memzone_reserve(mz_name, EXTBUF_ZONE_SIZE,
+					 socket_id,
+					 RTE_MEMZONE_IOVA_CONTIG |
+					 RTE_MEMZONE_1GB |
+					 RTE_MEMZONE_SIZE_HINT_ONLY);
 		if (mz == NULL) {
 			/*
 			 * The caller exits on external buffer creation
@@ -1569,10 +1625,10 @@ init_config_port_offloads(portid_t pid, uint32_t socket_id)
 
 	/* Apply Rx offloads configuration */
 	for (i = 0; i < port->dev_info.max_rx_queues; i++)
-		port->rx_conf[i].offloads = port->dev_conf.rxmode.offloads;
+		port->rxq[i].conf.offloads = port->dev_conf.rxmode.offloads;
 	/* Apply Tx offloads configuration */
 	for (i = 0; i < port->dev_info.max_tx_queues; i++)
-		port->tx_conf[i].offloads = port->dev_conf.txmode.offloads;
+		port->txq[i].conf.offloads = port->dev_conf.txmode.offloads;
 
 	if (eth_link_speed)
 		port->dev_conf.link_speeds = eth_link_speed;
@@ -1678,9 +1734,9 @@ init_config(void)
 	if (param_total_num_mbufs)
 		nb_mbuf_per_pool = param_total_num_mbufs;
 	else {
-		nb_mbuf_per_pool = RTE_TEST_RX_DESC_MAX +
+		nb_mbuf_per_pool = RX_DESC_MAX +
 			(nb_lcores * mb_mempool_cache) +
-			RTE_TEST_TX_DESC_MAX + MAX_PKT_BURST;
+			TX_DESC_MAX + MAX_PKT_BURST;
 		nb_mbuf_per_pool *= RTE_MAX_ETHPORTS;
 	}
 
@@ -1758,7 +1814,6 @@ reconfig(portid_t new_port_id, unsigned socket_id)
 	init_config_port_offloads(new_port_id, socket_id);
 	init_port_config();
 }
-
 
 int
 init_fwd_streams(void)
@@ -1978,6 +2033,7 @@ fwd_stats_display(void)
 	struct rte_port *port;
 	streamid_t sm_id;
 	portid_t pt_id;
+	int ret;
 	int i;
 
 	memset(ports_stats, 0, sizeof(ports_stats));
@@ -2003,13 +2059,21 @@ fwd_stats_display(void)
 				fs->rx_bad_outer_ip_csum;
 
 		if (record_core_cycles)
-			fwd_cycles += fs->core_cycles;
+			fwd_cycles += fs->busy_cycles;
 	}
 	for (i = 0; i < cur_fwd_config.nb_fwd_ports; i++) {
+		uint64_t tx_dropped = 0;
+
 		pt_id = fwd_ports_ids[i];
 		port = &ports[pt_id];
 
-		rte_eth_stats_get(pt_id, &stats);
+		ret = rte_eth_stats_get(pt_id, &stats);
+		if (ret != 0) {
+			fprintf(stderr,
+				"%s: Error: failed to get stats (port %u): %d",
+				__func__, pt_id, ret);
+			continue;
+		}
 		stats.ipackets -= port->stats.ipackets;
 		stats.opackets -= port->stats.opackets;
 		stats.ibytes -= port->stats.ibytes;
@@ -2021,8 +2085,9 @@ fwd_stats_display(void)
 		total_recv += stats.ipackets;
 		total_xmit += stats.opackets;
 		total_rx_dropped += stats.imissed;
-		total_tx_dropped += ports_stats[pt_id].tx_dropped;
-		total_tx_dropped += stats.oerrors;
+		tx_dropped += ports_stats[pt_id].tx_dropped;
+		tx_dropped += stats.oerrors;
+		total_tx_dropped += tx_dropped;
 		total_rx_nombuf  += stats.rx_nombuf;
 
 		printf("\n  %s Forward statistics for port %-2d %s\n",
@@ -2049,8 +2114,8 @@ fwd_stats_display(void)
 
 		printf("  TX-packets: %-14"PRIu64" TX-dropped: %-14"PRIu64
 		       "TX-total: %-"PRIu64"\n",
-		       stats.opackets, ports_stats[pt_id].tx_dropped,
-		       stats.opackets + ports_stats[pt_id].tx_dropped);
+		       stats.opackets, tx_dropped,
+		       stats.opackets + tx_dropped);
 
 		if (record_burst_stats) {
 			if (ports_stats[pt_id].rx_stream)
@@ -2089,7 +2154,7 @@ fwd_stats_display(void)
 			else
 				total_pkts = total_recv;
 
-			printf("\n  CPU cycles/packet=%.2F (total cycles="
+			printf("\n  CPU cycles/packet=%.2F (busy cycles="
 			       "%"PRIu64" / total %s packets=%"PRIu64") at %"PRIu64
 			       " MHz Clock\n",
 			       (double) fwd_cycles / total_pkts,
@@ -2104,11 +2169,16 @@ fwd_stats_reset(void)
 {
 	streamid_t sm_id;
 	portid_t pt_id;
+	int ret;
 	int i;
 
 	for (i = 0; i < cur_fwd_config.nb_fwd_ports; i++) {
 		pt_id = fwd_ports_ids[i];
-		rte_eth_stats_get(pt_id, &ports[pt_id].stats);
+		ret = rte_eth_stats_get(pt_id, &ports[pt_id].stats);
+		if (ret != 0)
+			fprintf(stderr,
+				"%s: Error: failed to clear stats (port %u):%d",
+				__func__, pt_id, ret);
 	}
 	for (sm_id = 0; sm_id < cur_fwd_config.nb_fwd_streams; sm_id++) {
 		struct fwd_stream *fs = fwd_streams[sm_id];
@@ -2123,7 +2193,7 @@ fwd_stats_reset(void)
 
 		memset(&fs->rx_burst_stats, 0, sizeof(fs->rx_burst_stats));
 		memset(&fs->tx_burst_stats, 0, sizeof(fs->tx_burst_stats));
-		fs->core_cycles = 0;
+		fs->busy_cycles = 0;
 	}
 }
 
@@ -2135,7 +2205,6 @@ flush_fwd_rx_queues(void)
 	portid_t port_id;
 	queueid_t rxq;
 	uint16_t  nb_rx;
-	uint16_t  i;
 	uint8_t   j;
 	uint64_t prev_tsc = 0, diff_tsc, cur_tsc, timer_tsc = 0;
 	uint64_t timer_period;
@@ -2152,6 +2221,12 @@ flush_fwd_rx_queues(void)
 		for (rxp = 0; rxp < cur_fwd_config.nb_fwd_ports; rxp++) {
 			for (rxq = 0; rxq < nb_rxq; rxq++) {
 				port_id = fwd_ports_ids[rxp];
+
+				/* Polling stopped queues is prohibited. */
+				if (ports[port_id].rxq[rxq].state ==
+				    RTE_ETH_QUEUE_STATE_STOPPED)
+					continue;
+
 				/**
 				* testpmd can stuck in the below do while loop
 				* if rte_eth_rx_burst() always returns nonzero
@@ -2162,8 +2237,7 @@ flush_fwd_rx_queues(void)
 				do {
 					nb_rx = rte_eth_rx_burst(port_id, rxq,
 						pkts_burst, MAX_PKT_BURST);
-					for (i = 0; i < nb_rx; i++)
-						rte_pktmbuf_free(pkts_burst[i]);
+					rte_pktmbuf_free_bulk(pkts_burst, nb_rx);
 
 					cur_tsc = rte_rdtsc();
 					diff_tsc = cur_tsc - prev_tsc;
@@ -2181,6 +2255,7 @@ static void
 run_pkt_fwd_on_lcore(struct fwd_lcore *fc, packet_fwd_t pkt_fwd)
 {
 	struct fwd_stream **fsm;
+	uint64_t prev_tsc;
 	streamid_t nb_fs;
 	streamid_t sm_id;
 #ifdef RTE_LIB_BITRATESTATS
@@ -2195,10 +2270,21 @@ run_pkt_fwd_on_lcore(struct fwd_lcore *fc, packet_fwd_t pkt_fwd)
 #endif
 	fsm = &fwd_streams[fc->stream_idx];
 	nb_fs = fc->stream_nb;
-	// printf("Muthu: No.of FwdStream: %d\n", nb_fs); ONE in my case
+	prev_tsc = rte_rdtsc();
 	do {
-		for (sm_id = 0; sm_id < nb_fs; sm_id++)
-			(*pkt_fwd)(fsm[sm_id]);
+		for (sm_id = 0; sm_id < nb_fs; sm_id++) {
+			struct fwd_stream *fs = fsm[sm_id];
+			uint64_t start_fs_tsc = 0;
+			bool busy;
+
+			if (fs->disabled)
+				continue;
+			if (record_core_cycles)
+				start_fs_tsc = rte_rdtsc();
+			busy = (*pkt_fwd)(fs);
+			if (record_core_cycles && busy)
+				fs->busy_cycles += rte_rdtsc() - start_fs_tsc;
+		}
 #ifdef RTE_LIB_BITRATESTATS
 		if (bitrate_enabled != 0 &&
 				bitrate_lcore_id == rte_lcore_id()) {
@@ -2217,8 +2303,38 @@ run_pkt_fwd_on_lcore(struct fwd_lcore *fc, packet_fwd_t pkt_fwd)
 				latencystats_lcore_id == rte_lcore_id())
 			rte_latencystats_update();
 #endif
+		if (record_core_cycles) {
+			uint64_t tsc = rte_rdtsc();
 
+			fc->total_cycles += tsc - prev_tsc;
+			prev_tsc = tsc;
+		}
 	} while (! fc->stopped);
+}
+
+static int
+lcore_usage_callback(unsigned int lcore_id, struct rte_lcore_usage *usage)
+{
+	struct fwd_stream **fsm;
+	struct fwd_lcore *fc;
+	streamid_t nb_fs;
+	streamid_t sm_id;
+
+	fc = lcore_to_fwd_lcore(lcore_id);
+	if (fc == NULL)
+		return -1;
+
+	fsm = &fwd_streams[fc->stream_idx];
+	nb_fs = fc->stream_nb;
+	usage->busy_cycles = 0;
+	usage->total_cycles = fc->total_cycles;
+
+	for (sm_id = 0; sm_id < nb_fs; sm_id++) {
+		if (!fsm[sm_id]->disabled)
+			usage->busy_cycles += fsm[sm_id]->busy_cycles;
+	}
+
+	return 0;
 }
 
 static int
@@ -2272,6 +2388,80 @@ launch_packet_forwarding(lcore_function_t *pkt_fwd_on_lcore)
 	}
 }
 
+void
+common_fwd_stream_init(struct fwd_stream *fs)
+{
+	bool rx_stopped, tx_stopped;
+
+	rx_stopped = (ports[fs->rx_port].rxq[fs->rx_queue].state == RTE_ETH_QUEUE_STATE_STOPPED);
+	tx_stopped = (ports[fs->tx_port].txq[fs->tx_queue].state == RTE_ETH_QUEUE_STATE_STOPPED);
+	fs->disabled = rx_stopped || tx_stopped;
+}
+
+static void
+update_rx_queue_state(uint16_t port_id, uint16_t queue_id)
+{
+	struct rte_eth_rxq_info rx_qinfo;
+	int32_t rc;
+
+	rc = rte_eth_rx_queue_info_get(port_id,
+			queue_id, &rx_qinfo);
+	if (rc == 0) {
+		ports[port_id].rxq[queue_id].state =
+			rx_qinfo.queue_state;
+	} else if (rc == -ENOTSUP) {
+		/*
+		 * Set the rxq state to RTE_ETH_QUEUE_STATE_STARTED
+		 * to ensure that the PMDs do not implement
+		 * rte_eth_rx_queue_info_get can forward.
+		 */
+		ports[port_id].rxq[queue_id].state =
+			RTE_ETH_QUEUE_STATE_STARTED;
+	} else {
+		TESTPMD_LOG(WARNING,
+			"Failed to get rx queue info\n");
+	}
+}
+
+static void
+update_tx_queue_state(uint16_t port_id, uint16_t queue_id)
+{
+	struct rte_eth_txq_info tx_qinfo;
+	int32_t rc;
+
+	rc = rte_eth_tx_queue_info_get(port_id,
+			queue_id, &tx_qinfo);
+	if (rc == 0) {
+		ports[port_id].txq[queue_id].state =
+			tx_qinfo.queue_state;
+	} else if (rc == -ENOTSUP) {
+		/*
+		 * Set the txq state to RTE_ETH_QUEUE_STATE_STARTED
+		 * to ensure that the PMDs do not implement
+		 * rte_eth_tx_queue_info_get can forward.
+		 */
+		ports[port_id].txq[queue_id].state =
+			RTE_ETH_QUEUE_STATE_STARTED;
+	} else {
+		TESTPMD_LOG(WARNING,
+			"Failed to get tx queue info\n");
+	}
+}
+
+static void
+update_queue_state(void)
+{
+	portid_t pi;
+	queueid_t qi;
+
+	RTE_ETH_FOREACH_DEV(pi) {
+		for (qi = 0; qi < nb_rxq; qi++)
+			update_rx_queue_state(pi, qi);
+		for (qi = 0; qi < nb_txq; qi++)
+			update_tx_queue_state(pi, qi);
+	}
+}
+
 /*
  * Launch packet forwarding configuration.
  */
@@ -2280,6 +2470,7 @@ start_packet_forwarding(int with_tx_first)
 {
 	port_fwd_begin_t port_fwd_begin;
 	port_fwd_end_t  port_fwd_end;
+	stream_init_t stream_init = cur_fwd_eng->stream_init;
 	unsigned int i;
 
 	if (strcmp(cur_fwd_eng->fwd_mode_name, "rxonly") == 0 && !nb_rxq)
@@ -2309,6 +2500,13 @@ start_packet_forwarding(int with_tx_first)
 	pkt_fwd_config_display(&cur_fwd_config);
 	if (!pkt_fwd_shared_rxq_check())
 		return;
+
+	if (stream_init != NULL) {
+		if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+			update_queue_state();
+		for (i = 0; i < cur_fwd_config.nb_fwd_streams; i++)
+			stream_init(fwd_streams[i]);
+	}
 
 	port_fwd_begin = cur_fwd_config.fwd_eng->port_fwd_begin;
 	if (port_fwd_begin != NULL) {
@@ -2456,6 +2654,16 @@ port_is_started(portid_t port_id)
 	return 1;
 }
 
+#define HAIRPIN_MODE_RX_FORCE_MEMORY RTE_BIT32(8)
+#define HAIRPIN_MODE_TX_FORCE_MEMORY RTE_BIT32(9)
+
+#define HAIRPIN_MODE_RX_LOCKED_MEMORY RTE_BIT32(12)
+#define HAIRPIN_MODE_RX_RTE_MEMORY RTE_BIT32(13)
+
+#define HAIRPIN_MODE_TX_LOCKED_MEMORY RTE_BIT32(16)
+#define HAIRPIN_MODE_TX_RTE_MEMORY RTE_BIT32(17)
+
+
 /* Configure the Rx and Tx hairpin queues for the selected port. */
 static int
 setup_hairpin_queues(portid_t pi, portid_t p_pi, uint16_t cnt_pi)
@@ -2471,6 +2679,12 @@ setup_hairpin_queues(portid_t pi, portid_t p_pi, uint16_t cnt_pi)
 	uint16_t peer_tx_port = pi;
 	uint32_t manual = 1;
 	uint32_t tx_exp = hairpin_mode & 0x10;
+	uint32_t rx_force_memory = hairpin_mode & HAIRPIN_MODE_RX_FORCE_MEMORY;
+	uint32_t rx_locked_memory = hairpin_mode & HAIRPIN_MODE_RX_LOCKED_MEMORY;
+	uint32_t rx_rte_memory = hairpin_mode & HAIRPIN_MODE_RX_RTE_MEMORY;
+	uint32_t tx_force_memory = hairpin_mode & HAIRPIN_MODE_TX_FORCE_MEMORY;
+	uint32_t tx_locked_memory = hairpin_mode & HAIRPIN_MODE_TX_LOCKED_MEMORY;
+	uint32_t tx_rte_memory = hairpin_mode & HAIRPIN_MODE_TX_RTE_MEMORY;
 
 	if (!(hairpin_mode & 0xf)) {
 		peer_rx_port = pi;
@@ -2510,6 +2724,9 @@ setup_hairpin_queues(portid_t pi, portid_t p_pi, uint16_t cnt_pi)
 		hairpin_conf.peers[0].queue = i + nb_rxq;
 		hairpin_conf.manual_bind = !!manual;
 		hairpin_conf.tx_explicit = !!tx_exp;
+		hairpin_conf.force_memory = !!tx_force_memory;
+		hairpin_conf.use_locked_device_memory = !!tx_locked_memory;
+		hairpin_conf.use_rte_memory = !!tx_rte_memory;
 		diag = rte_eth_tx_hairpin_queue_setup
 			(pi, qi, nb_txd, &hairpin_conf);
 		i++;
@@ -2533,6 +2750,9 @@ setup_hairpin_queues(portid_t pi, portid_t p_pi, uint16_t cnt_pi)
 		hairpin_conf.peers[0].queue = i + nb_txq;
 		hairpin_conf.manual_bind = !!manual;
 		hairpin_conf.tx_explicit = !!tx_exp;
+		hairpin_conf.force_memory = !!rx_force_memory;
+		hairpin_conf.use_locked_device_memory = !!rx_locked_memory;
+		hairpin_conf.use_rte_memory = !!rx_rte_memory;
 		diag = rte_eth_rx_hairpin_queue_setup
 			(pi, qi, nb_rxd, &hairpin_conf);
 		i++;
@@ -2561,41 +2781,88 @@ rx_queue_setup(uint16_t port_id, uint16_t rx_queue_id,
 	       struct rte_eth_rxconf *rx_conf, struct rte_mempool *mp)
 {
 	union rte_eth_rxseg rx_useg[MAX_SEGS_BUFFER_SPLIT] = {};
+	struct rte_mempool *rx_mempool[MAX_MEMPOOL] = {};
+	struct rte_mempool *mpx;
 	unsigned int i, mp_n;
+	uint32_t prev_hdrs = 0;
 	int ret;
 
-	if (rx_pkt_nb_segs <= 1 ||
-	    (rx_conf->offloads & RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT) == 0) {
+
+	if ((rx_pkt_nb_segs > 1) &&
+	    (rx_conf->offloads & RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT)) {
+		/* multi-segment configuration */
+		for (i = 0; i < rx_pkt_nb_segs; i++) {
+			struct rte_eth_rxseg_split *rx_seg = &rx_useg[i].split;
+			/*
+			 * Use last valid pool for the segments with number
+			 * exceeding the pool index.
+			 */
+			mp_n = (i >= mbuf_data_size_n) ? mbuf_data_size_n - 1 : i;
+			mpx = mbuf_pool_find(socket_id, mp_n);
+			/* Handle zero as mbuf data buffer size. */
+			rx_seg->offset = i < rx_pkt_nb_offs ?
+					   rx_pkt_seg_offsets[i] : 0;
+			rx_seg->mp = mpx ? mpx : mp;
+			if (rx_pkt_hdr_protos[i] != 0 && rx_pkt_seg_lengths[i] == 0) {
+				rx_seg->proto_hdr = rx_pkt_hdr_protos[i] & ~prev_hdrs;
+				prev_hdrs |= rx_seg->proto_hdr;
+			} else {
+				rx_seg->length = rx_pkt_seg_lengths[i] ?
+						rx_pkt_seg_lengths[i] :
+						mbuf_data_size[mp_n];
+			}
+		}
+		rx_conf->rx_nseg = rx_pkt_nb_segs;
+		rx_conf->rx_seg = rx_useg;
+		rx_conf->rx_mempools = NULL;
+		rx_conf->rx_nmempool = 0;
+		ret = rte_eth_rx_queue_setup(port_id, rx_queue_id, nb_rx_desc,
+				    socket_id, rx_conf, NULL);
 		rx_conf->rx_seg = NULL;
 		rx_conf->rx_nseg = 0;
-		ret = rte_eth_rx_queue_setup(port_id, rx_queue_id,
-					     nb_rx_desc, socket_id,
-					     rx_conf, mp);
-		return ret;
-	}
-	for (i = 0; i < rx_pkt_nb_segs; i++) {
-		struct rte_eth_rxseg_split *rx_seg = &rx_useg[i].split;
-		struct rte_mempool *mpx;
-		/*
-		 * Use last valid pool for the segments with number
-		 * exceeding the pool index.
-		 */
-		mp_n = (i > mbuf_data_size_n) ? mbuf_data_size_n - 1 : i;
-		mpx = mbuf_pool_find(socket_id, mp_n);
-		/* Handle zero as mbuf data buffer size. */
-		rx_seg->length = rx_pkt_seg_lengths[i] ?
-				   rx_pkt_seg_lengths[i] :
-				   mbuf_data_size[mp_n];
-		rx_seg->offset = i < rx_pkt_nb_offs ?
-				   rx_pkt_seg_offsets[i] : 0;
-		rx_seg->mp = mpx ? mpx : mp;
-	}
-	rx_conf->rx_nseg = rx_pkt_nb_segs;
-	rx_conf->rx_seg = rx_useg;
-	ret = rte_eth_rx_queue_setup(port_id, rx_queue_id, nb_rx_desc,
+	} else if (multi_rx_mempool == 1) {
+		/* multi-pool configuration */
+		struct rte_eth_dev_info dev_info;
+
+		if (mbuf_data_size_n <= 1) {
+			fprintf(stderr, "Invalid number of mempools %u\n",
+				mbuf_data_size_n);
+			return -EINVAL;
+		}
+		ret = rte_eth_dev_info_get(port_id, &dev_info);
+		if (ret != 0)
+			return ret;
+		if (dev_info.max_rx_mempools == 0) {
+			fprintf(stderr,
+				"Port %u doesn't support requested multi-rx-mempool configuration.\n",
+				port_id);
+			return -ENOTSUP;
+		}
+		for (i = 0; i < mbuf_data_size_n; i++) {
+			mpx = mbuf_pool_find(socket_id, i);
+			rx_mempool[i] = mpx ? mpx : mp;
+		}
+		rx_conf->rx_mempools = rx_mempool;
+		rx_conf->rx_nmempool = mbuf_data_size_n;
+		rx_conf->rx_seg = NULL;
+		rx_conf->rx_nseg = 0;
+		ret = rte_eth_rx_queue_setup(port_id, rx_queue_id, nb_rx_desc,
 				    socket_id, rx_conf, NULL);
-	rx_conf->rx_seg = NULL;
-	rx_conf->rx_nseg = 0;
+		rx_conf->rx_mempools = NULL;
+		rx_conf->rx_nmempool = 0;
+	} else {
+		/* Single pool/segment configuration */
+		rx_conf->rx_seg = NULL;
+		rx_conf->rx_nseg = 0;
+		rx_conf->rx_mempools = NULL;
+		rx_conf->rx_nmempool = 0;
+		ret = rte_eth_rx_queue_setup(port_id, rx_queue_id, nb_rx_desc,
+				    socket_id, rx_conf, mp);
+	}
+
+	ports[port_id].rxq[rx_queue_id].state = rx_conf->rx_deferred_start ?
+						RTE_ETH_QUEUE_STATE_STOPPED :
+						RTE_ETH_QUEUE_STATE_STARTED;
 	return ret;
 }
 
@@ -2701,10 +2968,45 @@ fill_xstats_display_info(void)
 		fill_xstats_display_info_for_port(pi);
 }
 
+/*
+ * Some capabilities (like, rx_offload_capa and tx_offload_capa) of bonding
+ * device in dev_info is zero when no slave is added. And its capability
+ * will be updated when add a new slave device. So adding a slave device need
+ * to update the port configurations of bonding device.
+ */
+static void
+update_bonding_port_dev_conf(portid_t bond_pid)
+{
+#ifdef RTE_NET_BOND
+	struct rte_port *port = &ports[bond_pid];
+	uint16_t i;
+	int ret;
+
+	ret = eth_dev_info_get_print_err(bond_pid, &port->dev_info);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to get dev info for port = %u\n",
+			bond_pid);
+		return;
+	}
+
+	if (port->dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
+		port->dev_conf.txmode.offloads |=
+				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+	/* Apply Tx offloads configuration */
+	for (i = 0; i < port->dev_info.max_tx_queues; i++)
+		port->txq[i].conf.offloads = port->dev_conf.txmode.offloads;
+
+	port->dev_conf.rx_adv_conf.rss_conf.rss_hf &=
+				port->dev_info.flow_type_rss_offloads;
+#else
+	RTE_SET_USED(bond_pid);
+#endif
+}
+
 int
 start_port(portid_t pid)
 {
-	int diag, need_check_link_status = -1;
+	int diag;
 	portid_t pi;
 	portid_t p_pi = RTE_MAX_ETHPORTS;
 	portid_t pl[RTE_MAX_ETHPORTS];
@@ -2715,6 +3017,9 @@ start_port(portid_t pid)
 	queueid_t qi;
 	struct rte_port *port;
 	struct rte_eth_hairpin_cap cap;
+	bool at_least_one_port_exist = false;
+	bool all_ports_already_started = true;
+	bool at_least_one_port_successfully_started = false;
 
 	if (port_id_is_invalid(pid, ENABLED_WARN))
 		return 0;
@@ -2723,11 +3028,20 @@ start_port(portid_t pid)
 		if (pid != pi && pid != (portid_t)RTE_PORT_ALL)
 			continue;
 
-		need_check_link_status = 0;
+		if (port_is_bonding_slave(pi)) {
+			fprintf(stderr,
+				"Please remove port %d from bonded device.\n",
+				pi);
+			continue;
+		}
+
+		at_least_one_port_exist = true;
+
 		port = &ports[pi];
-		if (port->port_status == RTE_PORT_STOPPED)
+		if (port->port_status == RTE_PORT_STOPPED) {
 			port->port_status = RTE_PORT_HANDLING;
-		else {
+			all_ports_already_started = false;
+		} else {
 			fprintf(stderr, "Port %d is now not stopped\n", pi);
 			continue;
 		}
@@ -2756,6 +3070,11 @@ start_port(portid_t pid)
 					"Port %d doesn't support hairpin queues\n",
 					pi);
 				return -1;
+			}
+
+			if (port->bond_flag == 1 && port->update_conf == 1) {
+				update_bonding_port_dev_conf(pi);
+				port->update_conf = 0;
 			}
 
 			/* configure port */
@@ -2791,7 +3110,7 @@ start_port(portid_t pid)
 				for (k = 0;
 				     k < port->dev_info.max_rx_queues;
 				     k++)
-					port->rx_conf[k].offloads |=
+					port->rxq[k].conf.offloads |=
 						dev_conf.rxmode.offloads;
 			}
 			/* Apply Tx offloads configuration */
@@ -2802,7 +3121,7 @@ start_port(portid_t pid)
 				for (k = 0;
 				     k < port->dev_info.max_tx_queues;
 				     k++)
-					port->tx_conf[k].offloads |=
+					port->txq[k].conf.offloads |=
 						dev_conf.txmode.offloads;
 			}
 		}
@@ -2810,20 +3129,28 @@ start_port(portid_t pid)
 			port->need_reconfig_queues = 0;
 			/* setup tx queues */
 			for (qi = 0; qi < nb_txq; qi++) {
+				struct rte_eth_txconf *conf =
+							&port->txq[qi].conf;
+
 				if ((numa_support) &&
 					(txring_numa[pi] != NUMA_NO_CONFIG))
 					diag = rte_eth_tx_queue_setup(pi, qi,
 						port->nb_tx_desc[qi],
 						txring_numa[pi],
-						&(port->tx_conf[qi]));
+						&(port->txq[qi].conf));
 				else
 					diag = rte_eth_tx_queue_setup(pi, qi,
 						port->nb_tx_desc[qi],
 						port->socket_id,
-						&(port->tx_conf[qi]));
+						&(port->txq[qi].conf));
 
-				if (diag == 0)
+				if (diag == 0) {
+					port->txq[qi].state =
+						conf->tx_deferred_start ?
+						RTE_ETH_QUEUE_STATE_STOPPED :
+						RTE_ETH_QUEUE_STATE_STARTED;
 					continue;
+				}
 
 				/* Fail to setup tx queue, return */
 				if (port->port_status == RTE_PORT_HANDLING)
@@ -2856,7 +3183,7 @@ start_port(portid_t pid)
 					diag = rx_queue_setup(pi, qi,
 					     port->nb_rx_desc[qi],
 					     rxring_numa[pi],
-					     &(port->rx_conf[qi]),
+					     &(port->rxq[qi].conf),
 					     mp);
 				} else {
 					struct rte_mempool *mp =
@@ -2871,7 +3198,7 @@ start_port(portid_t pid)
 					diag = rx_queue_setup(pi, qi,
 					     port->nb_rx_desc[qi],
 					     port->socket_id,
-					     &(port->rx_conf[qi]),
+					     &(port->rxq[qi].conf),
 					     mp);
 				}
 				if (diag == 0)
@@ -2934,15 +3261,17 @@ start_port(portid_t pid)
 			printf("Port %d: " RTE_ETHER_ADDR_PRT_FMT "\n", pi,
 					RTE_ETHER_ADDR_BYTES(&port->eth_addr));
 
-		/* at least one port started, need checking link status */
-		need_check_link_status = 1;
+		at_least_one_port_successfully_started = true;
 
 		pl[cfg_pi++] = pi;
 	}
 
-	if (need_check_link_status == 1 && !no_link_check)
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+		update_queue_state();
+
+	if (at_least_one_port_successfully_started && !no_link_check)
 		check_all_ports_link_status(RTE_PORT_ALL);
-	else if (need_check_link_status == 0)
+	else if (at_least_one_port_exist & all_ports_already_started)
 		fprintf(stderr, "Please stop the ports first\n");
 
 	if (hairpin_mode & 0xf) {
@@ -3003,6 +3332,7 @@ stop_port(portid_t pid)
 	int need_check_link_status = 0;
 	portid_t peer_pl[RTE_MAX_ETHPORTS];
 	int peer_pi;
+	int ret;
 
 	if (port_id_is_invalid(pid, ENABLED_WARN))
 		return;
@@ -3049,12 +3379,17 @@ stop_port(portid_t pid)
 			}
 		}
 
-		if (port->flow_list)
+		if (port->flow_list && !no_flow_flush)
 			port_flow_flush(pi);
 
-		if (eth_dev_stop_mp(pi) != 0)
+		ret = eth_dev_stop_mp(pi);
+		if (ret != 0) {
 			RTE_LOG(ERR, EAL, "rte_eth_dev_stop failed for port %u\n",
 				pi);
+			/* Allow to retry stopping the port. */
+			port->port_status = RTE_PORT_STARTED;
+			continue;
+		}
 
 		if (port->port_status == RTE_PORT_HANDLING)
 			port->port_status = RTE_PORT_STOPPED;
@@ -3091,11 +3426,51 @@ remove_invalid_ports(void)
 	nb_cfg_ports = nb_fwd_ports;
 }
 
+static void
+flush_port_owned_resources(portid_t pi)
+{
+	mcast_addr_pool_destroy(pi);
+	port_flow_flush(pi);
+	port_flow_template_table_flush(pi);
+	port_flow_pattern_template_flush(pi);
+	port_flow_actions_template_flush(pi);
+	port_flex_item_flush(pi);
+	port_action_handle_flush(pi);
+}
+
+static void
+clear_bonding_slave_device(portid_t *slave_pids, uint16_t num_slaves)
+{
+	struct rte_port *port;
+	portid_t slave_pid;
+	uint16_t i;
+
+	for (i = 0; i < num_slaves; i++) {
+		slave_pid = slave_pids[i];
+		if (port_is_started(slave_pid) == 1) {
+			if (rte_eth_dev_stop(slave_pid) != 0)
+				fprintf(stderr, "rte_eth_dev_stop failed for port %u\n",
+					slave_pid);
+
+			port = &ports[slave_pid];
+			port->port_status = RTE_PORT_STOPPED;
+		}
+
+		clear_port_slave_flag(slave_pid);
+
+		/* Close slave device when testpmd quit or is killed. */
+		if (cl_quit == 1 || f_quit == 1)
+			rte_eth_dev_close(slave_pid);
+	}
+}
+
 void
 close_port(portid_t pid)
 {
 	portid_t pi;
 	struct rte_port *port;
+	portid_t slave_pids[RTE_MAX_ETHPORTS];
+	int num_slaves = 0;
 
 	if (port_id_is_invalid(pid, ENABLED_WARN))
 		return;
@@ -3127,9 +3502,20 @@ close_port(portid_t pid)
 		}
 
 		if (is_proc_primary()) {
-			port_flow_flush(pi);
-			port_flex_item_flush(pi);
+			flush_port_owned_resources(pi);
+#ifdef RTE_NET_BOND
+			if (port->bond_flag == 1)
+				num_slaves = rte_eth_bond_slaves_get(pi,
+						slave_pids, RTE_MAX_ETHPORTS);
+#endif
 			rte_eth_dev_close(pi);
+			/*
+			 * If this port is bonded device, all slaves under the
+			 * device need to be removed or closed.
+			 */
+			if (port->bond_flag == 1 && num_slaves > 0)
+				clear_bonding_slave_device(slave_pids,
+							num_slaves);
 		}
 
 		free_xstats_display_info(pi);
@@ -3176,14 +3562,16 @@ reset_port(portid_t pid)
 			continue;
 		}
 
-		diag = rte_eth_dev_reset(pi);
-		if (diag == 0) {
-			port = &ports[pi];
-			port->need_reconfig = 1;
-			port->need_reconfig_queues = 1;
-		} else {
-			fprintf(stderr, "Failed to reset port %d. diag=%d\n",
-				pi, diag);
+		if (is_proc_primary()) {
+			diag = rte_eth_dev_reset(pi);
+			if (diag == 0) {
+				port = &ports[pi];
+				port->need_reconfig = 1;
+				port->need_reconfig_queues = 1;
+			} else {
+				fprintf(stderr, "Failed to reset port %d. diag=%d\n",
+					pi, diag);
+			}
 		}
 	}
 
@@ -3273,12 +3661,12 @@ detach_device(struct rte_device *dev)
 					sibling);
 				return;
 			}
-			port_flow_flush(sibling);
+			flush_port_owned_resources(sibling);
 		}
 	}
 
 	if (rte_dev_remove(dev) < 0) {
-		TESTPMD_LOG(ERR, "Failed to detach device %s\n", dev->name);
+		TESTPMD_LOG(ERR, "Failed to detach device %s\n", rte_dev_name(dev));
 		return;
 	}
 	remove_invalid_ports();
@@ -3340,13 +3728,13 @@ detach_devargs(char *identifier)
 				rte_devargs_reset(&da);
 				return;
 			}
-			port_flow_flush(port_id);
+			flush_port_owned_resources(port_id);
 		}
 	}
 
-	if (rte_eal_hotplug_remove(da.bus->name, da.name) != 0) {
+	if (rte_eal_hotplug_remove(rte_bus_name(da.bus), da.name) != 0) {
 		TESTPMD_LOG(ERR, "Failed to detach device %s(%s)\n",
-			    da.name, da.bus->name);
+			    da.name, rte_bus_name(da.bus));
 		rte_devargs_reset(&da);
 		return;
 	}
@@ -3560,6 +3948,25 @@ eth_event_callback(portid_t port_id, enum rte_eth_event_type type, void *param,
 		ports[port_id].port_status = RTE_PORT_CLOSED;
 		printf("Port %u is closed\n", port_id);
 		break;
+	case RTE_ETH_EVENT_RX_AVAIL_THRESH: {
+		uint16_t rxq_id;
+		int ret;
+
+		/* avail_thresh query API rewinds rxq_id, no need to check max RxQ num */
+		for (rxq_id = 0; ; rxq_id++) {
+			ret = rte_eth_rx_avail_thresh_query(port_id, &rxq_id,
+							    NULL);
+			if (ret <= 0)
+				break;
+			printf("Received avail_thresh event, port: %u, rxq_id: %u\n",
+			       port_id, rxq_id);
+
+#ifdef RTE_NET_MLX5
+			//mlx5_test_avail_thresh_event_handler(port_id, rxq_id);
+#endif
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -3646,59 +4053,59 @@ rxtx_port_config(portid_t pid)
 	struct rte_port *port = &ports[pid];
 
 	for (qid = 0; qid < nb_rxq; qid++) {
-		offloads = port->rx_conf[qid].offloads;
-		port->rx_conf[qid] = port->dev_info.default_rxconf;
+		offloads = port->rxq[qid].conf.offloads;
+		port->rxq[qid].conf = port->dev_info.default_rxconf;
 
 		if (rxq_share > 0 &&
 		    (port->dev_info.dev_capa & RTE_ETH_DEV_CAPA_RXQ_SHARE)) {
 			/* Non-zero share group to enable RxQ share. */
-			port->rx_conf[qid].share_group = pid / rxq_share + 1;
-			port->rx_conf[qid].share_qid = qid; /* Equal mapping. */
+			port->rxq[qid].conf.share_group = pid / rxq_share + 1;
+			port->rxq[qid].conf.share_qid = qid; /* Equal mapping. */
 		}
 
 		if (offloads != 0)
-			port->rx_conf[qid].offloads = offloads;
+			port->rxq[qid].conf.offloads = offloads;
 
 		/* Check if any Rx parameters have been passed */
 		if (rx_pthresh != RTE_PMD_PARAM_UNSET)
-			port->rx_conf[qid].rx_thresh.pthresh = rx_pthresh;
+			port->rxq[qid].conf.rx_thresh.pthresh = rx_pthresh;
 
 		if (rx_hthresh != RTE_PMD_PARAM_UNSET)
-			port->rx_conf[qid].rx_thresh.hthresh = rx_hthresh;
+			port->rxq[qid].conf.rx_thresh.hthresh = rx_hthresh;
 
 		if (rx_wthresh != RTE_PMD_PARAM_UNSET)
-			port->rx_conf[qid].rx_thresh.wthresh = rx_wthresh;
+			port->rxq[qid].conf.rx_thresh.wthresh = rx_wthresh;
 
 		if (rx_free_thresh != RTE_PMD_PARAM_UNSET)
-			port->rx_conf[qid].rx_free_thresh = rx_free_thresh;
+			port->rxq[qid].conf.rx_free_thresh = rx_free_thresh;
 
 		if (rx_drop_en != RTE_PMD_PARAM_UNSET)
-			port->rx_conf[qid].rx_drop_en = rx_drop_en;
+			port->rxq[qid].conf.rx_drop_en = rx_drop_en;
 
 		port->nb_rx_desc[qid] = nb_rxd;
 	}
 
 	for (qid = 0; qid < nb_txq; qid++) {
-		offloads = port->tx_conf[qid].offloads;
-		port->tx_conf[qid] = port->dev_info.default_txconf;
+		offloads = port->txq[qid].conf.offloads;
+		port->txq[qid].conf = port->dev_info.default_txconf;
 		if (offloads != 0)
-			port->tx_conf[qid].offloads = offloads;
+			port->txq[qid].conf.offloads = offloads;
 
 		/* Check if any Tx parameters have been passed */
 		if (tx_pthresh != RTE_PMD_PARAM_UNSET)
-			port->tx_conf[qid].tx_thresh.pthresh = tx_pthresh;
+			port->txq[qid].conf.tx_thresh.pthresh = tx_pthresh;
 
 		if (tx_hthresh != RTE_PMD_PARAM_UNSET)
-			port->tx_conf[qid].tx_thresh.hthresh = tx_hthresh;
+			port->txq[qid].conf.tx_thresh.hthresh = tx_hthresh;
 
 		if (tx_wthresh != RTE_PMD_PARAM_UNSET)
-			port->tx_conf[qid].tx_thresh.wthresh = tx_wthresh;
+			port->txq[qid].conf.tx_thresh.wthresh = tx_wthresh;
 
 		if (tx_rs_thresh != RTE_PMD_PARAM_UNSET)
-			port->tx_conf[qid].tx_rs_thresh = tx_rs_thresh;
+			port->txq[qid].conf.tx_rs_thresh = tx_rs_thresh;
 
 		if (tx_free_thresh != RTE_PMD_PARAM_UNSET)
-			port->tx_conf[qid].tx_free_thresh = tx_free_thresh;
+			port->txq[qid].conf.tx_free_thresh = tx_free_thresh;
 
 		port->nb_tx_desc[qid] = nb_txd;
 	}
@@ -3751,7 +4158,6 @@ init_port_config(void)
 
 	RTE_ETH_FOREACH_DEV(pid) {
 		port = &ports[pid];
-		port->dev_conf.fdir_conf = fdir_conf;
 
 		ret = eth_dev_info_get_print_err(pid, &port->dev_info);
 		if (ret != 0)
@@ -3779,7 +4185,7 @@ init_port_config(void)
 				for (i = 0;
 				     i < port->dev_info.nb_rx_queues;
 				     i++)
-					port->rx_conf[i].offloads &=
+					port->rxq[i].conf.offloads &=
 						~RTE_ETH_RX_OFFLOAD_RSS_HASH;
 			}
 		}
@@ -3789,10 +4195,6 @@ init_port_config(void)
 		ret = eth_macaddr_get_print_err(pid, &port->eth_addr);
 		if (ret != 0)
 			return;
-
-#if defined RTE_NET_IXGBE && defined RTE_LIBRTE_IXGBE_BYPASS
-		rte_pmd_ixgbe_bypass_init(pid);
-#endif
 
 		if (lsc_interrupt && (*port->dev_info.dev_flags & RTE_ETH_DEV_INTR_LSC))
 			port->dev_conf.intr_conf.lsc = 1;
@@ -3953,7 +4355,7 @@ init_port_dcb_config(portid_t pid,
 	if (port_conf.rxmode.mq_mode == RTE_ETH_MQ_RX_VMDQ_DCB) {
 		port_conf.rxmode.offloads &= ~RTE_ETH_RX_OFFLOAD_RSS_HASH;
 		for (i = 0; i < nb_rxq; i++)
-			rte_port->rx_conf[i].offloads &=
+			rte_port->rxq[i].conf.offloads &=
 				~RTE_ETH_RX_OFFLOAD_RSS_HASH;
 	}
 
@@ -4035,21 +4437,15 @@ init_port(void)
 				"rte_zmalloc(%d struct rte_port) failed\n",
 				RTE_MAX_ETHPORTS);
 	}
-	for (i = 0; i < RTE_MAX_ETHPORTS; i++)
+	for (i = 0; i < RTE_MAX_ETHPORTS; i++) {
+		ports[i].fwd_mac_swap = 1;
 		ports[i].xstats_info.allocated = false;
-	for (i = 0; i < RTE_MAX_ETHPORTS; i++)
 		LIST_INIT(&ports[i].flow_tunnel_list);
+	}
 	/* Initialize ports NUMA structures */
 	memset(port_numa, NUMA_NO_CONFIG, RTE_MAX_ETHPORTS);
 	memset(rxring_numa, NUMA_NO_CONFIG, RTE_MAX_ETHPORTS);
 	memset(txring_numa, NUMA_NO_CONFIG, RTE_MAX_ETHPORTS);
-}
-
-static void
-force_quit(void)
-{
-	pmd_test_exit();
-	prompt_exit();
 }
 
 static void
@@ -4070,28 +4466,10 @@ print_stats(void)
 }
 
 static void
-signal_handler(int signum)
+signal_handler(int signum __rte_unused)
 {
-	if (signum == SIGINT || signum == SIGTERM) {
-		fprintf(stderr, "\nSignal %d received, preparing to exit...\n",
-			signum);
-#ifdef RTE_LIB_PDUMP
-		/* uninitialize packet capture framework */
-		rte_pdump_uninit();
-#endif
-#ifdef RTE_LIB_LATENCYSTATS
-		if (latencystats_enabled != 0)
-			rte_latencystats_uninit();
-#endif
-		force_quit();
-		/* Set flag to indicate the force termination. */
-		f_quit = 1;
-		/* exit with the expected status */
-#ifndef RTE_EXEC_ENV_WINDOWS
-		signal(signum, SIG_DFL);
-		kill(getpid(), signum);
-#endif
-	}
+	f_quit = 1;
+	prompt_exit();
 }
 
 int
@@ -4102,8 +4480,18 @@ main(int argc, char** argv)
 	uint16_t count;
 	int ret;
 
+#ifdef RTE_EXEC_ENV_WINDOWS
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
+#else
+	/* Want read() not to be restarted on signal */
+	struct sigaction action = {
+		.sa_handler = signal_handler,
+	};
+
+	sigaction(SIGINT, &action, NULL);
+	sigaction(SIGTERM, &action, NULL);
+#endif
 
 	testpmd_logtype = rte_log_register("testpmd");
 	if (testpmd_logtype < 0)
@@ -4114,6 +4502,9 @@ main(int argc, char** argv)
 	if (diag < 0)
 		rte_exit(EXIT_FAILURE, "Cannot init EAL: %s\n",
 			 rte_strerror(rte_errno));
+
+	/* allocate port structures, and init them */
+	init_port();
 
 	ret = register_eth_event_callback();
 	if (ret != 0)
@@ -4132,9 +4523,6 @@ main(int argc, char** argv)
 	nb_ports = (portid_t) count;
 	if (nb_ports == 0)
 		TESTPMD_LOG(WARNING, "No probed ethernet devices\n");
-
-	/* allocate port structures, and init them */
-	init_port();
 
 	set_def_fwd_config();
 	if (nb_lcores == 0)
@@ -4213,8 +4601,13 @@ main(int argc, char** argv)
 		}
 	}
 
-	if (!no_device_start && start_port(RTE_PORT_ALL) != 0)
-		rte_exit(EXIT_FAILURE, "Start ports failed\n");
+	if (!no_device_start && start_port(RTE_PORT_ALL) != 0) {
+		if (!interactive) {
+			rte_eal_cleanup();
+			rte_exit(EXIT_FAILURE, "Start ports failed\n");
+		}
+		fprintf(stderr, "Start ports failed\n");
+	}
 
 	/* set all ports to promiscuous mode by default */
 	RTE_ETH_FOREACH_DEV(port_id) {
@@ -4252,26 +4645,27 @@ main(int argc, char** argv)
 		rte_stats_bitrate_reg(bitrate_data);
 	}
 #endif
+
+	if (record_core_cycles)
+		rte_lcore_register_usage_cb(lcore_usage_callback);
+
 #ifdef RTE_LIB_CMDLINE
+	if (init_cmdline() != 0)
+		rte_exit(EXIT_FAILURE,
+			"Could not initialise cmdline context.\n");
+
 	if (strlen(cmdline_filename) != 0)
 		cmdline_read_from_file(cmdline_filename);
 
 	if (interactive == 1) {
-		printf("Muthu-Interactive\n");
 		if (auto_start) {
 			printf("Start automatic packet forwarding\n");
 			start_packet_forwarding(0);
 		}
 		prompt();
-		pmd_test_exit();
 	} else
 #endif
 	{
-		char c;
-		int rc;
-
-		f_quit = 0;
-
 		printf("No commandline core given, start packet forwarding\n");
 		start_packet_forwarding(tx_first);
 		if (stats_period != 0) {
@@ -4294,14 +4688,40 @@ main(int argc, char** argv)
 				prev_time = cur_time;
 				rte_delay_us_sleep(US_PER_S);
 			}
-		}
+		} else {
+			char c;
+			fd_set fds;
 
-		printf("Press enter to exit\n");
-		rc = read(0, &c, 1);
-		pmd_test_exit();
-		if (rc < 0)
-			return 1;
+			printf("Press enter to exit\n");
+
+			FD_ZERO(&fds);
+			FD_SET(0, &fds);
+
+			/* wait for signal or enter */
+			ret = select(1, &fds, NULL, NULL, NULL);
+			if (ret < 0 && errno != EINTR)
+				rte_exit(EXIT_FAILURE,
+					 "Select failed: %s\n",
+					 strerror(errno));
+
+			/* if got enter then consume it */
+			if (ret == 1 && read(0, &c, 1) < 0)
+				rte_exit(EXIT_FAILURE,
+					 "Read failed: %s\n",
+					 strerror(errno));
+		}
 	}
+
+	pmd_test_exit();
+
+#ifdef RTE_LIB_PDUMP
+	/* uninitialize packet capture framework */
+	rte_pdump_uninit();
+#endif
+#ifdef RTE_LIB_LATENCYSTATS
+	if (latencystats_enabled != 0)
+		rte_latencystats_uninit();
+#endif
 
 	ret = rte_eal_cleanup();
 	if (ret != 0)
