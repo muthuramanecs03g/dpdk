@@ -245,7 +245,7 @@ qid_init(struct sw_evdev *sw, unsigned int idx, int type,
 	if (qid->type == RTE_SCHED_TYPE_ORDERED) {
 		uint32_t window_size;
 
-		/* rte_ring and window_size_mask require require window_size to
+		/* rte_ring and window_size_mask require window_size to
 		 * be a power-of-2.
 		 */
 		window_size = rte_align32pow2(
@@ -934,8 +934,7 @@ set_refill_once(const char *key __rte_unused, const char *value, void *opaque)
 static int32_t sw_sched_service_func(void *args)
 {
 	struct rte_eventdev *dev = args;
-	sw_event_schedule(dev);
-	return 0;
+	return sw_event_schedule(dev);
 }
 
 static int

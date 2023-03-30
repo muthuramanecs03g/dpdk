@@ -673,29 +673,20 @@ struct rte_security_session_conf {
 	/**< Application specific userdata to be saved with session */
 };
 
-struct rte_security_session {
-	void *sess_private_data;
-	/**< Private session material */
-	uint64_t opaque_data;
-	/**< Opaque user defined data */
-};
-
 /**
  * Create security session as specified by the session configuration
  *
  * @param   instance	security instance
  * @param   conf	session configuration parameters
  * @param   mp		mempool to allocate session objects from
- * @param   priv_mp	mempool to allocate session private data objects from
  * @return
  *  - On success, pointer to session
  *  - On failure, NULL
  */
-struct rte_security_session *
+void *
 rte_security_session_create(struct rte_security_ctx *instance,
 			    struct rte_security_session_conf *conf,
-			    struct rte_mempool *mp,
-			    struct rte_mempool *priv_mp);
+			    struct rte_mempool *mp);
 
 /**
  * Update security session as specified by the session configuration
@@ -710,7 +701,7 @@ rte_security_session_create(struct rte_security_ctx *instance,
 __rte_experimental
 int
 rte_security_session_update(struct rte_security_ctx *instance,
-			    struct rte_security_session *sess,
+			    void *sess,
 			    struct rte_security_session_conf *conf);
 
 /**
@@ -740,8 +731,7 @@ rte_security_session_get_size(struct rte_security_ctx *instance);
  *  - other negative values in case of freeing private data errors.
  */
 int
-rte_security_session_destroy(struct rte_security_ctx *instance,
-			     struct rte_security_session *sess);
+rte_security_session_destroy(struct rte_security_ctx *instance, void *sess);
 
 /**
  * @warning
@@ -858,10 +848,52 @@ static inline bool rte_security_dynfield_is_registered(void)
 	return rte_security_dynfield_offset >= 0;
 }
 
+#define RTE_SECURITY_SESS_OPAQUE_DATA_OFF	0
+#define RTE_SECURITY_SESS_FAST_MDATA_OFF	1
+/**
+ * Get opaque data from session handle
+ */
+static inline uint64_t
+rte_security_session_opaque_data_get(void *sess)
+{
+	return *((uint64_t *)sess + RTE_SECURITY_SESS_OPAQUE_DATA_OFF);
+}
+
+/**
+ * Set opaque data in session handle
+ */
+static inline void
+rte_security_session_opaque_data_set(void *sess, uint64_t opaque)
+{
+	uint64_t *data;
+	data = (((uint64_t *)sess) + RTE_SECURITY_SESS_OPAQUE_DATA_OFF);
+	*data = opaque;
+}
+
+/**
+ * Get fast mdata from session handle
+ */
+static inline uint64_t
+rte_security_session_fast_mdata_get(void *sess)
+{
+	return *((uint64_t *)sess + RTE_SECURITY_SESS_FAST_MDATA_OFF);
+}
+
+/**
+ * Set fast mdata in session handle
+ */
+static inline void
+rte_security_session_fast_mdata_set(void *sess, uint64_t fdata)
+{
+	uint64_t *data;
+	data = (((uint64_t *)sess) + RTE_SECURITY_SESS_FAST_MDATA_OFF);
+	*data = fdata;
+}
+
 /** Function to call PMD specific function pointer set_pkt_metadata() */
 __rte_experimental
 extern int __rte_security_set_pkt_metadata(struct rte_security_ctx *instance,
-					   struct rte_security_session *sess,
+					   void *sess,
 					   struct rte_mbuf *m, void *params);
 
 /**
@@ -879,13 +911,13 @@ extern int __rte_security_set_pkt_metadata(struct rte_security_ctx *instance,
  */
 static inline int
 rte_security_set_pkt_metadata(struct rte_security_ctx *instance,
-			      struct rte_security_session *sess,
+			      void *sess,
 			      struct rte_mbuf *mb, void *params)
 {
 	/* Fast Path */
 	if (instance->flags & RTE_SEC_CTX_F_FAST_SET_MDATA) {
-		*rte_security_dynfield(mb) =
-			(rte_security_dynfield_t)(sess->sess_private_data);
+		*rte_security_dynfield(mb) = (rte_security_dynfield_t)
+			rte_security_session_fast_mdata_get(sess);
 		return 0;
 	}
 
@@ -900,25 +932,11 @@ rte_security_set_pkt_metadata(struct rte_security_ctx *instance,
  * @param	sess	security session
  */
 static inline int
-__rte_security_attach_session(struct rte_crypto_sym_op *sym_op,
-			      struct rte_security_session *sess)
+__rte_security_attach_session(struct rte_crypto_sym_op *sym_op, void *sess)
 {
-	sym_op->sec_session = sess;
+	sym_op->session = sess;
 
 	return 0;
-}
-
-static inline void *
-get_sec_session_private_data(const struct rte_security_session *sess)
-{
-	return sess->sess_private_data;
-}
-
-static inline void
-set_sec_session_private_data(struct rte_security_session *sess,
-			     void *private_data)
-{
-	sess->sess_private_data = private_data;
 }
 
 /**
@@ -932,7 +950,7 @@ set_sec_session_private_data(struct rte_security_session *sess,
  */
 static inline int
 rte_security_attach_session(struct rte_crypto_op *op,
-			    struct rte_security_session *sess)
+			    void *sess)
 {
 	if (unlikely(op->type != RTE_CRYPTO_OP_TYPE_SYMMETRIC))
 		return -EINVAL;
@@ -1048,7 +1066,7 @@ struct rte_security_stats {
 __rte_experimental
 int
 rte_security_session_stats_get(struct rte_security_ctx *instance,
-			       struct rte_security_session *sess,
+			       void *sess,
 			       struct rte_security_stats *stats);
 
 /**

@@ -257,12 +257,15 @@ cn9k_sso_set_rsrc(void *arg)
 static int
 cn9k_sso_rsrc_init(void *arg, uint8_t hws, uint8_t hwgrp)
 {
+	struct cnxk_tim_evdev *tim_dev = cnxk_tim_priv_get();
 	struct cnxk_sso_evdev *dev = arg;
+	uint16_t nb_tim_lfs;
 
 	if (dev->dual_ws)
 		hws = hws * CN9K_DUAL_WS_NB_WS;
 
-	return roc_sso_rsrc_init(&dev->sso, hws, hwgrp);
+	nb_tim_lfs = tim_dev ? tim_dev->nb_rings : 0;
+	return roc_sso_rsrc_init(&dev->sso, hws, hwgrp, nb_tim_lfs);
 }
 
 static int
@@ -942,8 +945,7 @@ cn9k_sso_rx_adapter_caps_get(const struct rte_eventdev *event_dev,
 }
 
 static void
-cn9k_sso_set_priv_mem(const struct rte_eventdev *event_dev, void *lookup_mem,
-		      uint64_t aura __rte_unused)
+cn9k_sso_set_priv_mem(const struct rte_eventdev *event_dev, void *lookup_mem)
 {
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
 	int i;
@@ -989,7 +991,7 @@ cn9k_sso_rx_adapter_queue_add(
 
 	rxq = eth_dev->data->rx_queues[0];
 	lookup_mem = rxq->lookup_mem;
-	cn9k_sso_set_priv_mem(event_dev, lookup_mem, 0);
+	cn9k_sso_set_priv_mem(event_dev, lookup_mem);
 	cn9k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
 
 	return 0;
@@ -1138,7 +1140,7 @@ cn9k_crypto_adapter_qp_add(const struct rte_eventdev *event_dev,
 	cn9k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
 
 	ret = cnxk_crypto_adapter_qp_add(event_dev, cdev, queue_pair_id, conf);
-	cn9k_sso_set_priv_mem(event_dev, NULL, 0);
+	cn9k_sso_set_priv_mem(event_dev, NULL);
 
 	return ret;
 }

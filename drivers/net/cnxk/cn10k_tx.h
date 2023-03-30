@@ -5,8 +5,8 @@
 #define __CN10K_TX_H__
 
 #include <rte_vect.h>
-
 #include <rte_eventdev.h>
+#include "cn10k_rxtx.h"
 
 #define NIX_TX_OFFLOAD_NONE	      (0)
 #define NIX_TX_OFFLOAD_L3_L4_CSUM_F   BIT(0)
@@ -53,6 +53,52 @@
 #define NIX_SEGDW_MAGIC 0x76654432210ULL
 
 #define NIX_NB_SEGS_TO_SEGDW(x) ((NIX_SEGDW_MAGIC >> ((x) << 2)) & 0xF)
+
+static __plt_always_inline uint8_t
+cn10k_nix_mbuf_sg_dwords(struct rte_mbuf *m)
+{
+	uint32_t nb_segs = m->nb_segs;
+	uint16_t aura0, aura;
+	int segw, sg_segs;
+
+	aura0 = roc_npa_aura_handle_to_aura(m->pool->pool_id);
+
+	nb_segs--;
+	segw = 2;
+	sg_segs = 1;
+	while (nb_segs) {
+		m = m->next;
+		aura = roc_npa_aura_handle_to_aura(m->pool->pool_id);
+		if (aura != aura0) {
+			segw += 2 + (sg_segs == 2);
+			sg_segs = 0;
+		} else {
+			segw += (sg_segs == 0); /* SUBDC */
+			segw += 1;		/* IOVA */
+			sg_segs += 1;
+			sg_segs %= 3;
+		}
+		nb_segs--;
+	}
+
+	return (segw + 1) / 2;
+}
+
+static __plt_always_inline void
+cn10k_nix_tx_mbuf_validate(struct rte_mbuf *m, const uint32_t flags)
+{
+#ifdef RTE_LIBRTE_MBUF_DEBUG
+	uint16_t segdw;
+
+	segdw = cn10k_nix_mbuf_sg_dwords(m);
+	segdw += 1 + !!(flags & NIX_TX_NEED_EXT_HDR) + !!(flags & NIX_TX_OFFLOAD_TSTAMP_F);
+
+	PLT_ASSERT(segdw <= 8);
+#else
+	RTE_SET_USED(m);
+	RTE_SET_USED(flags);
+#endif
+}
 
 static __plt_always_inline void
 cn10k_nix_vwqe_wait_fc(struct cn10k_eth_txq *txq, int64_t req)
@@ -397,7 +443,7 @@ cn10k_nix_prep_sec_vec(struct rte_mbuf *m, uint64x2_t *cmd0, uint64x2_t *cmd1,
 		/* DLEN passed is excluding L2 HDR */
 		pkt_len -= l2_len;
 	}
-	w0 |= nixtx;
+	w0 |= sess_priv.nixtx_off ? ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32) : nixtx;
 	/* CPT word 0 and 1 */
 	cmd01 = vdupq_n_u64(0);
 	cmd01 = vsetq_lane_u64(w0, cmd01, 0);
@@ -421,8 +467,6 @@ cn10k_nix_prep_sec_vec(struct rte_mbuf *m, uint64x2_t *cmd0, uint64x2_t *cmd1,
 	cmd23 = vsetq_lane_u64((((uint64_t)RTE_EVENT_TYPE_CPU << 28) | tag |
 				CNXK_ETHDEV_SEC_OUTB_EV_SUB << 20), cmd23, 0);
 	cmd23 = vsetq_lane_u64((uintptr_t)m | 1, cmd23, 1);
-
-	dptr += l2_len;
 
 	/* Move to our line */
 	laddr = LMT_OFF(lbase, *lnum, *loff ? 64 : 0);
@@ -539,7 +583,7 @@ cn10k_nix_prep_sec(struct rte_mbuf *m, uint64_t *cmd, uintptr_t *nixtx_addr,
 		sg->seg1_size = pkt_len + dlen_adj;
 		pkt_len -= l2_len;
 	}
-	w0 |= nixtx;
+	w0 |= sess_priv.nixtx_off ? ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32) : nixtx;
 	/* CPT word 0 and 1 */
 	cmd01 = vdupq_n_u64(0);
 	cmd01 = vsetq_lane_u64(w0, cmd01, 0);
@@ -563,8 +607,6 @@ cn10k_nix_prep_sec(struct rte_mbuf *m, uint64_t *cmd, uintptr_t *nixtx_addr,
 	cmd23 = vsetq_lane_u64((((uint64_t)RTE_EVENT_TYPE_CPU << 28) | tag |
 				CNXK_ETHDEV_SEC_OUTB_EV_SUB << 20), cmd23, 0);
 	cmd23 = vsetq_lane_u64((uintptr_t)m | 1, cmd23, 1);
-
-	dptr += l2_len;
 
 	/* Move to our line */
 	laddr = LMT_OFF(lbase, *lnum, *loff ? 64 : 0);
@@ -600,6 +642,32 @@ cn10k_nix_prep_sec(struct rte_mbuf *m, uint64_t *cmd, uintptr_t *nixtx_addr,
 	RTE_SET_USED(flags);
 }
 #endif
+
+static __rte_always_inline uint64_t
+cn10k_nix_prefree_seg(struct rte_mbuf *m, struct cn10k_eth_txq *txq,
+		struct nix_send_hdr_s *send_hdr)
+{
+	uint32_t sqe_id;
+
+	if (RTE_MBUF_HAS_EXTBUF(m)) {
+		if (unlikely(txq->tx_compl.ena == 0)) {
+			rte_pktmbuf_free_seg(m);
+			return 1;
+		}
+		if (send_hdr->w0.pnc) {
+			txq->tx_compl.ptr[send_hdr->w1.sqe_id]->next = m;
+		} else {
+			sqe_id = __atomic_fetch_add(&txq->tx_compl.sqe_id, 1, __ATOMIC_RELAXED);
+			send_hdr->w0.pnc = 1;
+			send_hdr->w1.sqe_id = sqe_id &
+				txq->tx_compl.nb_desc_mask;
+			txq->tx_compl.ptr[send_hdr->w1.sqe_id] = m;
+		}
+		return 1;
+	} else {
+		return cnxk_nix_prefree_seg(m);
+	}
+}
 
 static __rte_always_inline void
 cn10k_nix_xmit_prepare_tso(struct rte_mbuf *m, const uint64_t flags)
@@ -654,7 +722,8 @@ cn10k_nix_xmit_prepare_tso(struct rte_mbuf *m, const uint64_t flags)
 }
 
 static __rte_always_inline void
-cn10k_nix_xmit_prepare(struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags,
+cn10k_nix_xmit_prepare(struct cn10k_eth_txq *txq,
+		       struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags,
 		       const uint64_t lso_tun_fmt, bool *sec, uint8_t mark_flag,
 		       uint64_t mark_fmt)
 {
@@ -846,7 +915,7 @@ cn10k_nix_xmit_prepare(struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags,
 			 *		is greater than 1
 			 * DF bit = 0 otherwise
 			 */
-			send_hdr->w0.df = cnxk_nix_prefree_seg(m);
+			send_hdr->w0.df = cn10k_nix_prefree_seg(m, txq, send_hdr);
 		}
 		/* Mark mempool object as "put" since it is freed by NIX */
 		if (!send_hdr->w0.df)
@@ -917,17 +986,18 @@ cn10k_nix_xmit_prepare_tstamp(struct cn10k_eth_txq *txq, uintptr_t lmt_addr,
 }
 
 static __rte_always_inline uint16_t
-cn10k_nix_prepare_mseg(struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags)
+cn10k_nix_prepare_mseg(struct cn10k_eth_txq *txq,
+		       struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags)
 {
+	uint64_t prefree = 0, aura0, aura, nb_segs, segdw;
 	struct nix_send_hdr_s *send_hdr;
-	union nix_send_sg_s *sg;
+	union nix_send_sg_s *sg, l_sg;
+	union nix_send_sg2_s l_sg2;
 	struct rte_mbuf *m_next;
-	uint64_t *slist, sg_u;
+	uint8_t off, is_sg2;
 	uint64_t len, dlen;
 	uint64_t ol_flags;
-	uint64_t nb_segs;
-	uint64_t segdw;
-	uint8_t off, i;
+	uint64_t *slist;
 
 	send_hdr = (struct nix_send_hdr_s *)cmd;
 
@@ -942,73 +1012,135 @@ cn10k_nix_prepare_mseg(struct rte_mbuf *m, uint64_t *cmd, const uint16_t flags)
 		ol_flags = m->ol_flags;
 
 	/* Start from second segment, first segment is already there */
-	i = 1;
-	sg_u = sg->u;
-	len -= sg_u & 0xFFFF;
+	dlen = m->data_len;
+	is_sg2 = 0;
+	l_sg.u = sg->u;
+	/* Clear l_sg.u first seg length that might be stale from vector path */
+	l_sg.u &= ~0xFFFFUL;
+	l_sg.u |= dlen;
+	len -= dlen;
 	nb_segs = m->nb_segs - 1;
 	m_next = m->next;
 	slist = &cmd[3 + off + 1];
 
 	/* Set invert df if buffer is not to be freed by H/W */
-	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F)
-		sg_u |= (cnxk_nix_prefree_seg(m) << 55);
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
+		prefree = cn10k_nix_prefree_seg(m, txq, send_hdr);
+		l_sg.i1 = prefree;
+	}
 
-		/* Mark mempool object as "put" since it is freed by NIX */
 #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-	if (!(sg_u & (1ULL << 55)))
+	/* Mark mempool object as "put" since it is freed by NIX */
+	if (!prefree)
 		RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
 	rte_io_wmb();
 #endif
 	m->next = NULL;
+
+	/* Quickly handle single segmented packets. With this if-condition
+	 * compiler will completely optimize out the below do-while loop
+	 * from the Tx handler when NIX_TX_MULTI_SEG_F offload is not set.
+	 */
+	if (!(flags & NIX_TX_MULTI_SEG_F))
+		goto done;
+
+	aura0 = send_hdr->w0.aura;
 	m = m_next;
 	if (!m)
 		goto done;
 
 	/* Fill mbuf segments */
 	do {
+		uint64_t iova;
+
+		/* Save the current mbuf properties. These can get cleared in
+		 * cnxk_nix_prefree_seg()
+		 */
 		m_next = m->next;
+		iova = rte_mbuf_data_iova(m);
 		dlen = m->data_len;
 		len -= dlen;
-		sg_u = sg_u | ((uint64_t)dlen << (i << 4));
-		*slist = rte_mbuf_data_iova(m);
-		/* Set invert df if buffer is not to be freed by H/W */
-		if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F)
-			sg_u |= (cnxk_nix_prefree_seg(m) << (i + 55));
-			/* Mark mempool object as "put" since it is freed by NIX
-			 */
-#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-		if (!(sg_u & (1ULL << (i + 55))))
-			RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
-#endif
-		slist++;
-		i++;
+
 		nb_segs--;
-		if (i > 2 && nb_segs) {
-			i = 0;
-			/* Next SG subdesc */
-			*(uint64_t *)slist = sg_u & 0xFC00000000000000;
-			sg->u = sg_u;
-			sg->segs = 3;
+		aura = aura0;
+		prefree = 0;
+
+		if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
+			aura = roc_npa_aura_handle_to_aura(m->pool->pool_id);
+			prefree = cn10k_nix_prefree_seg(m, txq, send_hdr);
+			is_sg2 = aura != aura0 && !prefree;
+		}
+
+		if (unlikely(is_sg2)) {
+			/* This mbuf belongs to a different pool and
+			 * DF bit is not to be set, so use SG2 subdesc
+			 * so that it is freed to the appropriate pool.
+			 */
+
+			/* Write the previous descriptor out */
+			sg->u = l_sg.u;
+
+			/* If the current SG subdc does not have any
+			 * iovas in it, then the SG2 subdc can overwrite
+			 * that SG subdc.
+			 *
+			 * If the current SG subdc has 2 iovas in it, then
+			 * the current iova word should be left empty.
+			 */
+			slist += (-1 + (int)l_sg.segs);
 			sg = (union nix_send_sg_s *)slist;
-			sg_u = sg->u;
+
+			l_sg2.u = l_sg.u & 0xC00000000000000; /* LD_TYPE */
+			l_sg2.subdc = NIX_SUBDC_SG2;
+			l_sg2.aura = aura;
+			l_sg2.seg1_size = dlen;
+			l_sg.u = l_sg2.u;
+
+			slist++;
+			*slist = iova;
+			slist++;
+		} else {
+			*slist = iova;
+			/* Set invert df if buffer is not to be freed by H/W */
+			l_sg.u |= (prefree << (l_sg.segs + 55));
+			/* Set the segment length */
+			l_sg.u |= ((uint64_t)dlen << (l_sg.segs << 4));
+			l_sg.segs += 1;
+			slist++;
+		}
+
+		if ((is_sg2 || l_sg.segs > 2) && nb_segs) {
+			sg->u = l_sg.u;
+			/* Next SG subdesc */
+			sg = (union nix_send_sg_s *)slist;
+			l_sg.u &= 0xC00000000000000; /* LD_TYPE */
+			l_sg.subdc = NIX_SUBDC_SG;
 			slist++;
 		}
 		m->next = NULL;
+
+#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
+		/* Mark mempool object as "put" since it is freed by NIX
+		 */
+		if (!prefree)
+			RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
+#endif
 		m = m_next;
 	} while (nb_segs);
 
 done:
 	/* Add remaining bytes of security data to last seg */
 	if (flags & NIX_TX_OFFLOAD_SECURITY_F && ol_flags & RTE_MBUF_F_TX_SEC_OFFLOAD && len) {
-		uint8_t shft = ((i - 1) << 4);
+		uint8_t shft = (l_sg.subdc == NIX_SUBDC_SG) ? ((l_sg.segs - 1) << 4) : 0;
 
-		dlen = ((sg_u >> shft) & 0xFFFFULL) + len;
-		sg_u = sg_u & ~(0xFFFFULL << shft);
-		sg_u |= dlen << shft;
+		dlen = ((l_sg.u >> shft) & 0xFFFFULL) + len;
+		l_sg.u = l_sg.u & ~(0xFFFFULL << shft);
+		l_sg.u |= dlen << shft;
 	}
 
-	sg->u = sg_u;
-	sg->segs = i;
+	/* Write the last subdc out */
+	sg->u = l_sg.u;
+
 	segdw = (uint64_t *)slist - (uint64_t *)&cmd[2 + off];
 	/* Roundup extra dwords to multiple of 2 */
 	segdw = (segdw >> 1) + (segdw & 0x1);
@@ -1017,6 +1149,83 @@ done:
 	send_hdr->w0.sizem1 = segdw - 1;
 
 	return segdw;
+}
+
+static inline uint16_t
+nix_tx_compl_nb_pkts(struct cn10k_eth_txq *txq, const uint64_t wdata,
+		const uint16_t pkts, const uint32_t qmask)
+{
+	uint32_t available = txq->tx_compl.available;
+
+	/* Update the available count if cached value is not enough */
+	if (unlikely(available < pkts)) {
+		uint64_t reg, head, tail;
+
+		/* Use LDADDA version to avoid reorder */
+		reg = roc_atomic64_add_sync(wdata, txq->tx_compl.cq_status);
+		/* CQ_OP_STATUS operation error */
+		if (reg & BIT_ULL(NIX_CQ_OP_STAT_OP_ERR) ||
+				reg & BIT_ULL(NIX_CQ_OP_STAT_CQ_ERR))
+			return 0;
+
+		tail = reg & 0xFFFFF;
+		head = (reg >> 20) & 0xFFFFF;
+		if (tail < head)
+			available = tail - head + qmask + 1;
+		else
+			available = tail - head;
+
+		txq->tx_compl.available = available;
+	}
+	return RTE_MIN(pkts, available);
+}
+
+static inline void
+handle_tx_completion_pkts(struct cn10k_eth_txq *txq, const uint16_t pkts,
+			  uint8_t mt_safe)
+{
+#define CNXK_NIX_CQ_ENTRY_SZ 128
+#define CQE_SZ(x)            ((x) * CNXK_NIX_CQ_ENTRY_SZ)
+
+	uint16_t tx_pkts = 0, nb_pkts;
+	const uintptr_t desc = txq->tx_compl.desc_base;
+	const uint64_t wdata = txq->tx_compl.wdata;
+	const uint32_t qmask = txq->tx_compl.qmask;
+	uint32_t head = txq->tx_compl.head;
+	struct nix_cqe_hdr_s *tx_compl_cq;
+	struct nix_send_comp_s *tx_compl_s0;
+	struct rte_mbuf *m_next, *m;
+
+	if (mt_safe)
+		rte_spinlock_lock(&txq->tx_compl.ext_buf_lock);
+
+	nb_pkts = nix_tx_compl_nb_pkts(txq, wdata, pkts, qmask);
+	while (tx_pkts < nb_pkts) {
+		rte_prefetch_non_temporal((void *)(desc +
+					(CQE_SZ((head + 2) & qmask))));
+		tx_compl_cq = (struct nix_cqe_hdr_s *)
+			(desc + CQE_SZ(head));
+		tx_compl_s0 = (struct nix_send_comp_s *)
+			((uint64_t *)tx_compl_cq + 1);
+		m = txq->tx_compl.ptr[tx_compl_s0->sqe_id];
+		while (m->next != NULL) {
+			m_next = m->next;
+			rte_pktmbuf_free_seg(m);
+			m = m_next;
+		}
+		rte_pktmbuf_free_seg(m);
+
+		head++;
+		head &= qmask;
+		tx_pkts++;
+	}
+	txq->tx_compl.head = head;
+	txq->tx_compl.available -= nb_pkts;
+
+	plt_write64((wdata | nb_pkts), txq->tx_compl.cq_door);
+
+	if (mt_safe)
+		rte_spinlock_unlock(&txq->tx_compl.ext_buf_lock);
 }
 
 static __rte_always_inline uint16_t
@@ -1038,6 +1247,9 @@ cn10k_nix_xmit_pkts(void *tx_queue, uint64_t *ws, struct rte_mbuf **tx_pkts,
 	uintptr_t laddr;
 	uint64_t data;
 	bool sec;
+
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F && txq->tx_compl.ena)
+		handle_tx_completion_pkts(txq, pkts, flags & NIX_TX_VWQE_F);
 
 	if (!(flags & NIX_TX_VWQE_F)) {
 		NIX_XMIT_FC_OR_RETURN(txq, pkts);
@@ -1081,7 +1293,7 @@ again:
 		if (flags & NIX_TX_OFFLOAD_TSO_F)
 			cn10k_nix_xmit_prepare_tso(tx_pkts[i], flags);
 
-		cn10k_nix_xmit_prepare(tx_pkts[i], cmd, flags, lso_tun_fmt,
+		cn10k_nix_xmit_prepare(txq, tx_pkts[i], cmd, flags, lso_tun_fmt,
 				       &sec, mark_flag, mark_fmt);
 
 		laddr = (uintptr_t)LMT_OFF(lbase, lnum, 0);
@@ -1185,6 +1397,9 @@ cn10k_nix_xmit_pkts_mseg(void *tx_queue, uint64_t *ws,
 	uintptr_t laddr;
 	bool sec;
 
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F && txq->tx_compl.ena)
+		handle_tx_completion_pkts(txq, pkts, flags & NIX_TX_VWQE_F);
+
 	if (!(flags & NIX_TX_VWQE_F)) {
 		NIX_XMIT_FC_OR_RETURN(txq, pkts);
 		/* Reduce the cached count */
@@ -1223,13 +1438,15 @@ again:
 	}
 
 	for (i = 0; i < burst; i++) {
+		cn10k_nix_tx_mbuf_validate(tx_pkts[i], flags);
+
 		/* Perform header writes for TSO, barrier at
 		 * lmt steorl will suffice.
 		 */
 		if (flags & NIX_TX_OFFLOAD_TSO_F)
 			cn10k_nix_xmit_prepare_tso(tx_pkts[i], flags);
 
-		cn10k_nix_xmit_prepare(tx_pkts[i], cmd, flags, lso_tun_fmt,
+		cn10k_nix_xmit_prepare(txq, tx_pkts[i], cmd, flags, lso_tun_fmt,
 				       &sec, mark_flag, mark_fmt);
 
 		laddr = (uintptr_t)LMT_OFF(lbase, lnum, 0);
@@ -1243,7 +1460,7 @@ again:
 		/* Move NIX desc to LMT/NIXTX area */
 		cn10k_nix_xmit_mv_lmt_base(laddr, cmd, flags);
 		/* Store sg list directly on lmt line */
-		segdw = cn10k_nix_prepare_mseg(tx_pkts[i], (uint64_t *)laddr,
+		segdw = cn10k_nix_prepare_mseg(txq, tx_pkts[i], (uint64_t *)laddr,
 					       flags);
 		cn10k_nix_xmit_prepare_tstamp(txq, laddr, tx_pkts[i]->ol_flags,
 					      segdw, flags);
@@ -1364,6 +1581,31 @@ cn10k_nix_prepare_tso(struct rte_mbuf *m, union nix_send_hdr_w1_u *w1,
 	}
 }
 
+static __rte_always_inline uint16_t
+cn10k_nix_prepare_mseg_vec_noff(struct cn10k_eth_txq *txq,
+				struct rte_mbuf *m, uint64_t *cmd,
+				uint64x2_t *cmd0, uint64x2_t *cmd1,
+				uint64x2_t *cmd2, uint64x2_t *cmd3,
+				const uint32_t flags)
+{
+	uint16_t segdw;
+
+	vst1q_u64(cmd, *cmd0); /* Send hdr */
+	if (flags & NIX_TX_NEED_EXT_HDR) {
+		vst1q_u64(cmd + 2, *cmd2); /* ext hdr */
+		vst1q_u64(cmd + 4, *cmd1); /* sg */
+	} else {
+		vst1q_u64(cmd + 2, *cmd1); /* sg */
+	}
+
+	segdw = cn10k_nix_prepare_mseg(txq, m, cmd, flags);
+
+	if (flags & NIX_TX_OFFLOAD_TSTAMP_F)
+		vst1q_u64(cmd + segdw * 2 - 2, *cmd3);
+
+	return segdw;
+}
+
 static __rte_always_inline void
 cn10k_nix_prepare_mseg_vec_list(struct rte_mbuf *m, uint64_t *cmd,
 				union nix_send_hdr_w0_u *sh,
@@ -1393,17 +1635,6 @@ cn10k_nix_prepare_mseg_vec_list(struct rte_mbuf *m, uint64_t *cmd,
 
 	nb_segs = m->nb_segs - 1;
 	m_next = m->next;
-
-	/* Set invert df if buffer is not to be freed by H/W */
-	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F)
-		sg_u |= (cnxk_nix_prefree_seg(m) << 55);
-		/* Mark mempool object as "put" since it is freed by NIX */
-#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-	if (!(sg_u & (1ULL << 55)))
-		RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
-	rte_io_wmb();
-#endif
-
 	m->next = NULL;
 	m = m_next;
 	/* Fill mbuf segments */
@@ -1413,16 +1644,6 @@ cn10k_nix_prepare_mseg_vec_list(struct rte_mbuf *m, uint64_t *cmd,
 		len -= dlen;
 		sg_u = sg_u | ((uint64_t)dlen << (i << 4));
 		*slist = rte_mbuf_data_iova(m);
-		/* Set invert df if buffer is not to be freed by H/W */
-		if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F)
-			sg_u |= (cnxk_nix_prefree_seg(m) << (i + 55));
-			/* Mark mempool object as "put" since it is freed by NIX
-			 */
-#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-		if (!(sg_u & (1ULL << (i + 55))))
-			RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
-		rte_io_wmb();
-#endif
 		slist++;
 		i++;
 		nb_segs--;
@@ -1460,21 +1681,8 @@ cn10k_nix_prepare_mseg_vec(struct rte_mbuf *m, uint64_t *cmd, uint64x2_t *cmd0,
 	union nix_send_hdr_w0_u sh;
 	union nix_send_sg_s sg;
 
-	if (m->nb_segs == 1) {
-		if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
-			sg.u = vgetq_lane_u64(cmd1[0], 0);
-			sg.u |= (cnxk_nix_prefree_seg(m) << 55);
-			cmd1[0] = vsetq_lane_u64(sg.u, cmd1[0], 0);
-		}
-
-#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-		sg.u = vgetq_lane_u64(cmd1[0], 0);
-		if (!(sg.u & (1ULL << 55)))
-			RTE_MEMPOOL_CHECK_COOKIES(m->pool, (void **)&m, 1, 0);
-		rte_io_wmb();
-#endif
+	if (m->nb_segs == 1)
 		return;
-	}
 
 	sh.u = vgetq_lane_u64(cmd0[0], 0);
 	sg.u = vgetq_lane_u64(cmd1[0], 0);
@@ -1489,22 +1697,39 @@ cn10k_nix_prepare_mseg_vec(struct rte_mbuf *m, uint64_t *cmd, uint64x2_t *cmd0,
 #define NIX_DESCS_PER_LOOP 4
 
 static __rte_always_inline uint8_t
-cn10k_nix_prep_lmt_mseg_vector(struct rte_mbuf **mbufs, uint64x2_t *cmd0,
+cn10k_nix_prep_lmt_mseg_vector(struct cn10k_eth_txq *txq,
+			       struct rte_mbuf **mbufs, uint64x2_t *cmd0,
 			       uint64x2_t *cmd1, uint64x2_t *cmd2,
 			       uint64x2_t *cmd3, uint8_t *segdw,
 			       uint64_t *lmt_addr, __uint128_t *data128,
 			       uint8_t *shift, const uint16_t flags)
 {
-	uint8_t j, off, lmt_used;
+	uint8_t j, off, lmt_used = 0;
+
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
+		off = 0;
+		for (j = 0; j < NIX_DESCS_PER_LOOP; j++) {
+			if (off + segdw[j] > 8) {
+				*data128 |= ((__uint128_t)off - 1) << *shift;
+				*shift += 3;
+				lmt_used++;
+				lmt_addr += 16;
+				off = 0;
+			}
+			off += cn10k_nix_prepare_mseg_vec_noff(txq, mbufs[j],
+					lmt_addr + off * 2, &cmd0[j], &cmd1[j],
+					&cmd2[j], &cmd3[j], flags);
+		}
+		*data128 |= ((__uint128_t)off - 1) << *shift;
+		*shift += 3;
+		lmt_used++;
+		return lmt_used;
+	}
 
 	if (!(flags & NIX_TX_NEED_EXT_HDR) &&
 	    !(flags & NIX_TX_OFFLOAD_TSTAMP_F)) {
 		/* No segments in 4 consecutive packets. */
 		if ((segdw[0] + segdw[1] + segdw[2] + segdw[3]) <= 8) {
-			for (j = 0; j < NIX_DESCS_PER_LOOP; j++)
-				cn10k_nix_prepare_mseg_vec(mbufs[j], NULL,
-							   &cmd0[j], &cmd1[j],
-							   segdw[j], flags);
 			vst1q_u64(lmt_addr, cmd0[0]);
 			vst1q_u64(lmt_addr + 2, cmd1[0]);
 			vst1q_u64(lmt_addr + 4, cmd0[1]);
@@ -1521,18 +1746,10 @@ cn10k_nix_prep_lmt_mseg_vector(struct rte_mbuf **mbufs, uint64x2_t *cmd0,
 		}
 	}
 
-	lmt_used = 0;
 	for (j = 0; j < NIX_DESCS_PER_LOOP;) {
 		/* Fit consecutive packets in same LMTLINE. */
 		if ((segdw[j] + segdw[j + 1]) <= 8) {
 			if (flags & NIX_TX_OFFLOAD_TSTAMP_F) {
-				cn10k_nix_prepare_mseg_vec(mbufs[j], NULL,
-							   &cmd0[j], &cmd1[j],
-							   segdw[j], flags);
-				cn10k_nix_prepare_mseg_vec(mbufs[j + 1], NULL,
-							   &cmd0[j + 1],
-							   &cmd1[j + 1],
-							   segdw[j + 1], flags);
 				/* TSTAMP takes 4 each, no segs. */
 				vst1q_u64(lmt_addr, cmd0[j]);
 				vst1q_u64(lmt_addr + 2, cmd2[j]);
@@ -1641,29 +1858,18 @@ cn10k_nix_lmt_next(uint8_t dw, uintptr_t laddr, uint8_t *lnum, uint8_t *loff,
 }
 
 static __rte_always_inline void
-cn10k_nix_xmit_store(struct rte_mbuf *mbuf, uint8_t segdw, uintptr_t laddr,
+cn10k_nix_xmit_store(struct cn10k_eth_txq *txq,
+		     struct rte_mbuf *mbuf, uint8_t segdw, uintptr_t laddr,
 		     uint64x2_t cmd0, uint64x2_t cmd1, uint64x2_t cmd2,
 		     uint64x2_t cmd3, const uint16_t flags)
 {
 	uint8_t off;
 
-	/* Handle no fast free when security is enabled without mseg */
-	if ((flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) &&
-	    (flags & NIX_TX_OFFLOAD_SECURITY_F) &&
-	    !(flags & NIX_TX_MULTI_SEG_F)) {
-		union nix_send_sg_s sg;
-
-		sg.u = vgetq_lane_u64(cmd1, 0);
-		sg.u |= (cnxk_nix_prefree_seg(mbuf) << 55);
-		cmd1 = vsetq_lane_u64(sg.u, cmd1, 0);
-
-#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
-		sg.u = vgetq_lane_u64(cmd1, 0);
-		if (!(sg.u & (1ULL << 55)))
-			RTE_MEMPOOL_CHECK_COOKIES(mbuf->pool, (void **)&mbuf, 1,
-						0);
-		rte_io_wmb();
-#endif
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
+		cn10k_nix_prepare_mseg_vec_noff(txq, mbuf, LMT_OFF(laddr, 0, 0),
+						&cmd0, &cmd1, &cmd2, &cmd3,
+						flags);
+		return;
 	}
 	if (flags & NIX_TX_MULTI_SEG_F) {
 		if ((flags & NIX_TX_NEED_EXT_HDR) &&
@@ -1728,20 +1934,26 @@ cn10k_nix_xmit_pkts_vector(void *tx_queue, uint64_t *ws,
 	uint64x2_t sgdesc01_w0, sgdesc23_w0;
 	uint64x2_t sgdesc01_w1, sgdesc23_w1;
 	struct cn10k_eth_txq *txq = tx_queue;
+	uint64x2_t xmask01_w0, xmask23_w0;
+	uint64x2_t xmask01_w1, xmask23_w1;
 	rte_iova_t io_addr = txq->io_addr;
 	uintptr_t laddr = txq->lmt_base;
 	uint8_t c_lnum, c_shft, c_loff;
+	struct nix_send_hdr_s send_hdr;
 	uint64x2_t ltypes01, ltypes23;
 	uint64x2_t xtmp128, ytmp128;
 	uint64x2_t xmask01, xmask23;
 	uintptr_t c_laddr = laddr;
-	uint8_t lnum, shift, loff;
+	uint8_t lnum, shift, loff = 0;
 	rte_iova_t c_io_addr;
 	uint64_t sa_base;
 	union wdata {
 		__uint128_t data128;
 		uint64_t data[2];
 	} wd;
+
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F && txq->tx_compl.ena)
+		handle_tx_completion_pkts(txq, pkts, flags & NIX_TX_VWQE_F);
 
 	if (!(flags & NIX_TX_VWQE_F)) {
 		NIX_XMIT_FC_OR_RETURN(txq, pkts);
@@ -1836,18 +2048,35 @@ again:
 			for (j = 0; j < NIX_DESCS_PER_LOOP; j++) {
 				struct rte_mbuf *m = tx_pkts[j];
 
+				cn10k_nix_tx_mbuf_validate(m, flags);
+
 				/* Get dwords based on nb_segs. */
-				segdw[j] = NIX_NB_SEGS_TO_SEGDW(m->nb_segs);
+				if (!(flags & NIX_TX_OFFLOAD_MBUF_NOFF_F &&
+				      flags & NIX_TX_MULTI_SEG_F))
+					segdw[j] = NIX_NB_SEGS_TO_SEGDW(m->nb_segs);
+				else
+					segdw[j] = cn10k_nix_mbuf_sg_dwords(m);
+
 				/* Add dwords based on offloads. */
 				segdw[j] += 1 + /* SEND HDR */
 					    !!(flags & NIX_TX_NEED_EXT_HDR) +
 					    !!(flags & NIX_TX_OFFLOAD_TSTAMP_F);
 			}
 
-			/* Check if there are enough LMTLINES for this loop */
-			if (lnum + 4 > 32) {
+			/* Check if there are enough LMTLINES for this loop.
+			 * Consider previous line to be partial.
+			 */
+			if (lnum + 4 >= 32) {
 				uint8_t ldwords_con = 0, lneeded = 0;
-				for (j = 0; j < NIX_DESCS_PER_LOOP; j++) {
+
+				if ((loff >> 4) + segdw[0] > 8) {
+					lneeded += 1;
+					ldwords_con = segdw[0];
+				} else {
+					ldwords_con = (loff >> 4) + segdw[0];
+				}
+
+				for (j = 1; j < NIX_DESCS_PER_LOOP; j++) {
 					ldwords_con += segdw[j];
 					if (ldwords_con > 8) {
 						lneeded += 1;
@@ -1900,14 +2129,6 @@ again:
 		mbuf2 = (uint64_t *)tx_pkts[2];
 		mbuf3 = (uint64_t *)tx_pkts[3];
 
-		mbuf0 = (uint64_t *)((uintptr_t)mbuf0 +
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf1 = (uint64_t *)((uintptr_t)mbuf1 +
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf2 = (uint64_t *)((uintptr_t)mbuf2 +
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf3 = (uint64_t *)((uintptr_t)mbuf3 +
-				     offsetof(struct rte_mbuf, buf_iova));
 		/*
 		 * Get mbuf's, olflags, iova, pktlen, dataoff
 		 * dataoff_iovaX.D[0] = iova,
@@ -1915,28 +2136,24 @@ again:
 		 * len_olflagsX.D[0] = ol_flags,
 		 * len_olflagsX.D[1](63:32) = mbuf->pkt_len
 		 */
-		dataoff_iova0 = vld1q_u64(mbuf0);
-		len_olflags0 = vld1q_u64(mbuf0 + 2);
-		dataoff_iova1 = vld1q_u64(mbuf1);
-		len_olflags1 = vld1q_u64(mbuf1 + 2);
-		dataoff_iova2 = vld1q_u64(mbuf2);
-		len_olflags2 = vld1q_u64(mbuf2 + 2);
-		dataoff_iova3 = vld1q_u64(mbuf3);
-		len_olflags3 = vld1q_u64(mbuf3 + 2);
+		dataoff_iova0 =
+			vsetq_lane_u64(((struct rte_mbuf *)mbuf0)->data_off, vld1q_u64(mbuf0), 1);
+		len_olflags0 = vld1q_u64(mbuf0 + 3);
+		dataoff_iova1 =
+			vsetq_lane_u64(((struct rte_mbuf *)mbuf0)->data_off, vld1q_u64(mbuf1), 1);
+		len_olflags1 = vld1q_u64(mbuf1 + 3);
+		dataoff_iova2 =
+			vsetq_lane_u64(((struct rte_mbuf *)mbuf0)->data_off, vld1q_u64(mbuf2), 1);
+		len_olflags2 = vld1q_u64(mbuf2 + 3);
+		dataoff_iova3 =
+			vsetq_lane_u64(((struct rte_mbuf *)mbuf0)->data_off, vld1q_u64(mbuf3), 1);
+		len_olflags3 = vld1q_u64(mbuf3 + 3);
 
 		/* Move mbufs to point pool */
-		mbuf0 = (uint64_t *)((uintptr_t)mbuf0 +
-				     offsetof(struct rte_mbuf, pool) -
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf1 = (uint64_t *)((uintptr_t)mbuf1 +
-				     offsetof(struct rte_mbuf, pool) -
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf2 = (uint64_t *)((uintptr_t)mbuf2 +
-				     offsetof(struct rte_mbuf, pool) -
-				     offsetof(struct rte_mbuf, buf_iova));
-		mbuf3 = (uint64_t *)((uintptr_t)mbuf3 +
-				     offsetof(struct rte_mbuf, pool) -
-				     offsetof(struct rte_mbuf, buf_iova));
+		mbuf0 = (uint64_t *)((uintptr_t)mbuf0 + offsetof(struct rte_mbuf, pool));
+		mbuf1 = (uint64_t *)((uintptr_t)mbuf1 + offsetof(struct rte_mbuf, pool));
+		mbuf2 = (uint64_t *)((uintptr_t)mbuf2 + offsetof(struct rte_mbuf, pool));
+		mbuf3 = (uint64_t *)((uintptr_t)mbuf3 + offsetof(struct rte_mbuf, pool));
 
 		if (flags & (NIX_TX_OFFLOAD_OL3_OL4_CSUM_F |
 			     NIX_TX_OFFLOAD_L3_L4_CSUM_F)) {
@@ -1985,17 +2202,6 @@ again:
 		};
 		xtmp128 = vzip2q_u64(len_olflags0, len_olflags1);
 		ytmp128 = vzip2q_u64(len_olflags2, len_olflags3);
-
-		/* Clear dataoff_iovaX.D[1] bits other than dataoff(15:0) */
-		const uint64x2_t and_mask0 = {
-			0xFFFFFFFFFFFFFFFF,
-			0x000000000000FFFF,
-		};
-
-		dataoff_iova0 = vandq_u64(dataoff_iova0, and_mask0);
-		dataoff_iova1 = vandq_u64(dataoff_iova1, and_mask0);
-		dataoff_iova2 = vandq_u64(dataoff_iova2, and_mask0);
-		dataoff_iova3 = vandq_u64(dataoff_iova3, and_mask0);
 
 		/*
 		 * Pick only 16 bits of pktlen preset at bits 63:32
@@ -2592,8 +2798,10 @@ again:
 		    !(flags & NIX_TX_MULTI_SEG_F) &&
 		    !(flags & NIX_TX_OFFLOAD_SECURITY_F)) {
 			/* Set don't free bit if reference count > 1 */
-			xmask01 = vdupq_n_u64(0);
-			xmask23 = xmask01;
+			xmask01_w0 = vdupq_n_u64(0);
+			xmask01_w1 = vdupq_n_u64(0);
+			xmask23_w0 = xmask01_w0;
+			xmask23_w1 = xmask01_w1;
 
 			/* Move mbufs to iova */
 			mbuf0 = (uint64_t *)tx_pkts[0];
@@ -2601,35 +2809,62 @@ again:
 			mbuf2 = (uint64_t *)tx_pkts[2];
 			mbuf3 = (uint64_t *)tx_pkts[3];
 
-			if (cnxk_nix_prefree_seg((struct rte_mbuf *)mbuf0))
-				xmask01 = vsetq_lane_u64(0x80000, xmask01, 0);
-			else
+			send_hdr.w0.u = 0;
+			send_hdr.w1.u = 0;
+
+			if (cn10k_nix_prefree_seg((struct rte_mbuf *)mbuf0, txq, &send_hdr)) {
+				send_hdr.w0.df = 1;
+				xmask01_w0 = vsetq_lane_u64(send_hdr.w0.u, xmask01_w0, 0);
+				xmask01_w1 = vsetq_lane_u64(send_hdr.w1.u, xmask01_w1, 0);
+			} else {
 				RTE_MEMPOOL_CHECK_COOKIES(
 					((struct rte_mbuf *)mbuf0)->pool,
 					(void **)&mbuf0, 1, 0);
+			}
 
-			if (cnxk_nix_prefree_seg((struct rte_mbuf *)mbuf1))
-				xmask01 = vsetq_lane_u64(0x80000, xmask01, 1);
-			else
+			send_hdr.w0.u = 0;
+			send_hdr.w1.u = 0;
+
+			if (cn10k_nix_prefree_seg((struct rte_mbuf *)mbuf1, txq, &send_hdr)) {
+				send_hdr.w0.df = 1;
+				xmask01_w0 = vsetq_lane_u64(send_hdr.w0.u, xmask01_w0, 1);
+				xmask01_w1 = vsetq_lane_u64(send_hdr.w1.u, xmask01_w1, 1);
+			} else {
 				RTE_MEMPOOL_CHECK_COOKIES(
 					((struct rte_mbuf *)mbuf1)->pool,
 					(void **)&mbuf1, 1, 0);
+			}
 
-			if (cnxk_nix_prefree_seg((struct rte_mbuf *)mbuf2))
-				xmask23 = vsetq_lane_u64(0x80000, xmask23, 0);
-			else
+			send_hdr.w0.u = 0;
+			send_hdr.w1.u = 0;
+
+			if (cn10k_nix_prefree_seg((struct rte_mbuf *)mbuf2, txq, &send_hdr)) {
+				send_hdr.w0.df = 1;
+				xmask23_w0 = vsetq_lane_u64(send_hdr.w0.u, xmask23_w0, 0);
+				xmask23_w1 = vsetq_lane_u64(send_hdr.w1.u, xmask23_w1, 0);
+			} else {
 				RTE_MEMPOOL_CHECK_COOKIES(
 					((struct rte_mbuf *)mbuf2)->pool,
 					(void **)&mbuf2, 1, 0);
+			}
 
-			if (cnxk_nix_prefree_seg((struct rte_mbuf *)mbuf3))
-				xmask23 = vsetq_lane_u64(0x80000, xmask23, 1);
-			else
+			send_hdr.w0.u = 0;
+			send_hdr.w1.u = 0;
+
+			if (cn10k_nix_prefree_seg((struct rte_mbuf *)mbuf3, txq, &send_hdr)) {
+				send_hdr.w0.df = 1;
+				xmask23_w0 = vsetq_lane_u64(send_hdr.w0.u, xmask23_w0, 1);
+				xmask23_w1 = vsetq_lane_u64(send_hdr.w1.u, xmask23_w1, 1);
+			} else {
 				RTE_MEMPOOL_CHECK_COOKIES(
 					((struct rte_mbuf *)mbuf3)->pool,
 					(void **)&mbuf3, 1, 0);
-			senddesc01_w0 = vorrq_u64(senddesc01_w0, xmask01);
-			senddesc23_w0 = vorrq_u64(senddesc23_w0, xmask23);
+			}
+
+			senddesc01_w0 = vorrq_u64(senddesc01_w0, xmask01_w0);
+			senddesc23_w0 = vorrq_u64(senddesc23_w0, xmask23_w0);
+			senddesc01_w1 = vorrq_u64(senddesc01_w1, xmask01_w1);
+			senddesc23_w1 = vorrq_u64(senddesc23_w1, xmask23_w1);
 		} else if (!(flags & NIX_TX_MULTI_SEG_F) &&
 			   !(flags & NIX_TX_OFFLOAD_SECURITY_F)) {
 			/* Move mbufs to iova */
@@ -2701,7 +2936,7 @@ again:
 						   &shift, &wd.data128, &next);
 
 			/* Store mbuf0 to LMTLINE/CPT NIXTX area */
-			cn10k_nix_xmit_store(tx_pkts[0], segdw[0], next,
+			cn10k_nix_xmit_store(txq, tx_pkts[0], segdw[0], next,
 					     cmd0[0], cmd1[0], cmd2[0], cmd3[0],
 					     flags);
 
@@ -2717,7 +2952,7 @@ again:
 						   &shift, &wd.data128, &next);
 
 			/* Store mbuf1 to LMTLINE/CPT NIXTX area */
-			cn10k_nix_xmit_store(tx_pkts[1], segdw[1], next,
+			cn10k_nix_xmit_store(txq, tx_pkts[1], segdw[1], next,
 					     cmd0[1], cmd1[1], cmd2[1], cmd3[1],
 					     flags);
 
@@ -2733,7 +2968,7 @@ again:
 						   &shift, &wd.data128, &next);
 
 			/* Store mbuf2 to LMTLINE/CPT NIXTX area */
-			cn10k_nix_xmit_store(tx_pkts[2], segdw[2], next,
+			cn10k_nix_xmit_store(txq, tx_pkts[2], segdw[2], next,
 					     cmd0[2], cmd1[2], cmd2[2], cmd3[2],
 					     flags);
 
@@ -2749,7 +2984,7 @@ again:
 						   &shift, &wd.data128, &next);
 
 			/* Store mbuf3 to LMTLINE/CPT NIXTX area */
-			cn10k_nix_xmit_store(tx_pkts[3], segdw[3], next,
+			cn10k_nix_xmit_store(txq, tx_pkts[3], segdw[3], next,
 					     cmd0[3], cmd1[3], cmd2[3], cmd3[3],
 					     flags);
 
@@ -2757,7 +2992,7 @@ again:
 			uint8_t j;
 
 			segdw[4] = 8;
-			j = cn10k_nix_prep_lmt_mseg_vector(tx_pkts, cmd0, cmd1,
+			j = cn10k_nix_prep_lmt_mseg_vector(txq, tx_pkts, cmd0, cmd1,
 							  cmd2, cmd3, segdw,
 							  (uint64_t *)
 							  LMT_OFF(laddr, lnum,

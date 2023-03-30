@@ -174,16 +174,17 @@ Supports receiving segmented mbufs.
 
 .. _nic_features_buffer_split:
 
-Buffer Split on Rx
+Buffer split on Rx
 ------------------
 
 Scatters the packets being received on specified boundaries to segmented mbufs.
 
 * **[uses]       rte_eth_rxconf,rte_eth_rxmode**: ``offloads:RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT``.
 * **[uses]       rte_eth_rxconf**: ``rx_conf.rx_seg, rx_conf.rx_nseg``.
+* **[implements] eth_dev_ops**: ``buffer_split_supported_hdr_ptypes_get``,
 * **[implements] datapath**: ``Buffer Split functionality``.
 * **[provides]   rte_eth_dev_info**: ``rx_offload_capa:RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT``.
-* **[related] API**: ``rte_eth_rx_queue_setup()``.
+* **[related] API**: ``rte_eth_rx_queue_setup()``, ``rte_eth_buffer_split_get_supported_hdr_ptypes()``.
 
 
 .. _nic_features_lro:
@@ -727,6 +728,18 @@ Supports configuring per-queue stat counter mapping.
   ``rte_eth_dev_set_tx_queue_stats_mapping()``.
 
 
+.. _nic_features_congestion_management:
+
+Congestion management
+---------------------
+
+Supports congestion management.
+
+* **[implements] eth_dev_ops**: ``cman_info_get``, ``cman_config_set``, ``cman_config_get``.
+* **[related]    API**: ``rte_eth_cman_info_get()``, ``rte_eth_cman_config_init()``,
+  ``rte_eth_cman_config_set()``, ``rte_eth_cman_config_get()``.
+
+
 .. _nic_features_fw_version:
 
 FW version
@@ -830,6 +843,14 @@ ARMv8
 -----
 
 Support armv8a (64bit) architecture.
+
+
+.. _nic_features_loongarch64:
+
+LoongArch64
+-----------
+
+Support 64-bit LoongArch architecture.
 
 
 .. _nic_features_power8:

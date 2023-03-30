@@ -121,11 +121,6 @@ mvneta_dev_configure(struct rte_eth_dev *dev)
 			return -EINVAL;
 	}
 
-	if (dev->data->dev_conf.rxmode.split_hdr_size) {
-		MVNETA_LOG(INFO, "Split headers not supported");
-		return -EINVAL;
-	}
-
 	if (dev->data->dev_conf.txmode.offloads & RTE_ETH_TX_OFFLOAD_MULTI_SEGS)
 		priv->multiseg = 1;
 
@@ -350,7 +345,7 @@ mvneta_dev_start(struct rte_eth_dev *dev)
 	mvneta_stats_reset(dev);
 
 	/*
-	 * In case there are some some stale uc/mc mac addresses flush them
+	 * In case there are some stale uc/mc mac addresses flush them
 	 * here. It cannot be done during mvneta_dev_close() as port information
 	 * is already gone at that point (due to neta_ppio_deinit() in
 	 * mvneta_dev_stop()).

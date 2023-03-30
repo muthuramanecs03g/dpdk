@@ -123,6 +123,17 @@ struct roc_ipv6_hdr {
 	uint8_t dst_addr[16]; /**< IP address of destination host(s). */
 } __plt_packed;
 
+struct roc_ipv6_fragment_ext {
+	uint8_t next_header; /**< Next header type */
+	uint8_t reserved;    /**< Reserved */
+	uint16_t frag_data;  /**< All fragmentation data */
+	uint32_t id;	     /**< Packet ID */
+} __plt_packed;
+
+struct roc_flow_item_ipv6_ext {
+	uint8_t next_hdr; /**< Next header. */
+};
+
 struct roc_npc_flow_item_ipv6 {
 	struct roc_ipv6_hdr hdr; /**< IPv6 header definition. */
 	uint32_t has_hop_ext : 1;
@@ -191,6 +202,14 @@ struct roc_npc_action_port_id {
 	uint32_t id;		/**< port ID. */
 };
 
+/**
+ * ESP Header
+ */
+struct roc_npc_item_esp_hdr {
+	uint32_t spi; /**< Security Parameters Index */
+	uint32_t seq; /**< packet sequence number */
+};
+
 struct roc_npc_action_queue {
 	uint16_t index; /**< Queue index to use. */
 };
@@ -242,6 +261,14 @@ struct roc_npc_flow_dump_data {
 	uint16_t ltype;
 };
 
+struct roc_npc_spi_to_sa_action_info {
+	uint32_t spi;
+	uint32_t hash_index;
+	uint8_t way;
+	bool duplicate;
+	bool has_action;
+};
+
 struct roc_npc_flow {
 	uint8_t nix_intf;
 	uint8_t enable;
@@ -261,6 +288,11 @@ struct roc_npc_flow {
 #define ROC_NPC_MAX_FLOW_PATTERNS 32
 	struct roc_npc_flow_dump_data dump_data[ROC_NPC_MAX_FLOW_PATTERNS];
 	uint16_t num_patterns;
+	struct roc_npc_spi_to_sa_action_info spi_to_sa_info;
+	bool is_validate;
+	uint16_t match_id;
+	uint8_t is_inline_dev;
+	bool use_pre_alloc;
 
 	TAILQ_ENTRY(roc_npc_flow) next;
 };
@@ -316,7 +348,7 @@ struct roc_npc {
 	uint16_t sdp_channel;
 	uint16_t sdp_channel_mask;
 
-#define ROC_NPC_MEM_SZ (5 * 1024)
+#define ROC_NPC_MEM_SZ (6 * 1024)
 	uint8_t reserved[ROC_NPC_MEM_SZ];
 } __plt_cache_aligned;
 
@@ -359,10 +391,15 @@ int __roc_api roc_npc_mcam_read_counter(struct roc_npc *roc_npc,
 					uint32_t ctr_id, uint64_t *count);
 int __roc_api roc_npc_mcam_clear_counter(struct roc_npc *roc_npc,
 					 uint32_t ctr_id);
+int __roc_api roc_npc_inl_mcam_read_counter(uint32_t ctr_id, uint64_t *count);
+int __roc_api roc_npc_inl_mcam_clear_counter(uint32_t ctr_id);
 int __roc_api roc_npc_mcam_free_all_resources(struct roc_npc *roc_npc);
 void __roc_api roc_npc_flow_dump(FILE *file, struct roc_npc *roc_npc);
 void __roc_api roc_npc_flow_mcam_dump(FILE *file, struct roc_npc *roc_npc,
 				      struct roc_npc_flow *mcam);
+int __roc_api roc_npc_mark_actions_get(struct roc_npc *roc_npc);
+int __roc_api roc_npc_mark_actions_sub_return(struct roc_npc *roc_npc,
+					      uint32_t count);
 int __roc_api roc_npc_vtag_actions_get(struct roc_npc *roc_npc);
 int __roc_api roc_npc_vtag_actions_sub_return(struct roc_npc *roc_npc,
 					      uint32_t count);

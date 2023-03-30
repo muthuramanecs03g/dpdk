@@ -124,6 +124,8 @@ struct txa_service_data {
 	uint16_t dev_count;
 	/* Loop count to flush Tx buffers */
 	int loop_cnt;
+	/* Loop count threshold to flush Tx buffers */
+	uint16_t flush_threshold;
 	/* Per ethernet device structure */
 	struct txa_service_ethdev *txa_ethdev;
 	/* Statistics */
@@ -316,6 +318,8 @@ txa_service_conf_cb(uint8_t __rte_unused id, uint8_t dev_id,
 
 	port_id = dev_conf.nb_event_ports;
 	dev_conf.nb_event_ports += 1;
+	if (pc->event_port_cfg & RTE_EVENT_PORT_CFG_SINGLE_LINK)
+		dev_conf.nb_single_link_event_port_queues += 1;
 
 	ret = rte_event_dev_configure(dev_id, &dev_conf);
 	if (ret) {
@@ -639,6 +643,7 @@ txa_service_func(void *args)
 	struct txa_service_data *txa = args;
 	uint8_t dev_id;
 	uint8_t port;
+	int ret = -EAGAIN;
 	uint16_t n;
 	uint32_t nb_tx, max_nb_tx;
 	struct rte_event ev[TXA_BATCH_SIZE];
@@ -648,10 +653,10 @@ txa_service_func(void *args)
 	port = txa->port_id;
 
 	if (txa->nb_queues == 0)
-		return 0;
+		return ret;
 
 	if (!rte_spinlock_trylock(&txa->tx_lock))
-		return 0;
+		return ret;
 
 	for (nb_tx = 0; nb_tx < max_nb_tx; nb_tx += n) {
 
@@ -659,22 +664,24 @@ txa_service_func(void *args)
 		if (!n)
 			break;
 		txa_service_tx(txa, ev, n);
+		ret = 0;
 	}
 
-	if ((txa->loop_cnt++ & (TXA_FLUSH_THRESHOLD - 1)) == 0) {
+	if (txa->loop_cnt++ == txa->flush_threshold) {
 
 		struct txa_service_ethdev *tdi;
 		struct txa_service_queue_info *tqi;
 		struct rte_eth_dev *dev;
 		uint16_t i;
 
+		txa->loop_cnt = 0;
 		tdi = txa->txa_ethdev;
 		nb_tx = 0;
 
 		RTE_ETH_FOREACH_DEV(i) {
 			uint16_t q;
 
-			if (i == txa->dev_count)
+			if (i >= txa->dev_count)
 				break;
 
 			dev = tdi[i].dev;
@@ -692,10 +699,13 @@ txa_service_func(void *args)
 			}
 		}
 
-		txa->stats.tx_packets += nb_tx;
+		if (likely(nb_tx > 0)) {
+			txa->stats.tx_packets += nb_tx;
+			ret = 0;
+		}
 	}
 	rte_spinlock_unlock(&txa->tx_lock);
-	return 0;
+	return ret;
 }
 
 static int
@@ -762,6 +772,7 @@ txa_service_adapter_create_ext(uint8_t id, struct rte_eventdev *dev,
 	txa->service_id = TXA_INVALID_SERVICE_ID;
 	rte_spinlock_init(&txa->tx_lock);
 	txa_service_data_array[id] = txa;
+	txa->flush_threshold = TXA_FLUSH_THRESHOLD;
 
 	return 0;
 }
@@ -929,6 +940,8 @@ txa_service_queue_del(uint8_t id,
 		uint16_t i, q, nb_queues;
 		int ret = 0;
 
+		if (txa->txa_ethdev == NULL)
+			return 0;
 		nb_queues = txa->txa_ethdev[port_id].nb_queues;
 		if (nb_queues == 0)
 			return 0;
@@ -941,10 +954,10 @@ txa_service_queue_del(uint8_t id,
 
 			if (tqi[q].added) {
 				ret = txa_service_queue_del(id, dev, q);
+				i++;
 				if (ret != 0)
 					break;
 			}
-			i++;
 			q++;
 		}
 		return ret;
@@ -986,6 +999,8 @@ txa_service_id_get(uint8_t id, uint32_t *service_id)
 		return -EINVAL;
 
 	*service_id = txa->service_id;
+
+	rte_eventdev_trace_eth_tx_adapter_service_id_get(id, *service_id);
 	return 0;
 }
 
@@ -1114,6 +1129,8 @@ rte_event_eth_tx_adapter_create_ext(uint8_t id, uint8_t dev_id,
 int
 rte_event_eth_tx_adapter_event_port_get(uint8_t id, uint8_t *event_port_id)
 {
+	rte_eventdev_trace_eth_tx_adapter_event_port_get(id);
+
 	TXA_CHECK_OR_ERR_RET(id);
 
 	return txa_service_event_port_get(id, event_port_id);
@@ -1255,6 +1272,9 @@ rte_event_eth_tx_adapter_stats_get(uint8_t id,
 			ret = txa_service_stats_get(id, stats);
 	}
 
+	rte_eventdev_trace_eth_tx_adapter_stats_get(id, stats->tx_retry, stats->tx_packets,
+						    stats->tx_dropped, ret);
+
 	return ret;
 }
 
@@ -1269,7 +1289,119 @@ rte_event_eth_tx_adapter_stats_reset(uint8_t id)
 		txa_dev_stats_reset(id)(id, txa_evdev(id)) : 0;
 	if (ret == 0)
 		ret = txa_service_stats_reset(id);
+
+	rte_eventdev_trace_eth_tx_adapter_stats_reset(id, ret);
+
 	return ret;
+}
+
+int
+rte_event_eth_tx_adapter_runtime_params_init(
+		struct rte_event_eth_tx_adapter_runtime_params *txa_params)
+{
+	if (txa_params == NULL)
+		return -EINVAL;
+
+	memset(txa_params, 0, sizeof(*txa_params));
+	txa_params->max_nb_tx = TXA_MAX_NB_TX;
+	txa_params->flush_threshold = TXA_FLUSH_THRESHOLD;
+
+	return 0;
+}
+
+static int
+txa_caps_check(uint8_t id, struct txa_service_data *txa)
+{
+	uint32_t caps = 0;
+	struct rte_eth_dev *eth_dev = NULL;
+	struct txa_service_ethdev *tdi;
+	int i;
+
+	if (!txa->dev_count)
+		return -EINVAL;
+
+	/* The eth_dev used is always the same type.
+	 * Hence first valid eth_dev is taken.
+	 */
+	for (i = 0; i < txa->dev_count; i++) {
+		tdi = &txa->txa_ethdev[i];
+		if (tdi->nb_queues) {
+			eth_dev = tdi->dev;
+			break;
+		}
+	}
+	if (eth_dev == NULL)
+		return -EINVAL;
+
+	if (txa_dev_caps_get(id))
+		txa_dev_caps_get(id)(txa_evdev(id), eth_dev, &caps);
+
+	if (caps & RTE_EVENT_ETH_TX_ADAPTER_CAP_INTERNAL_PORT)
+		return -ENOTSUP;
+
+	return 0;
+}
+
+int
+rte_event_eth_tx_adapter_runtime_params_set(uint8_t id,
+		struct rte_event_eth_tx_adapter_runtime_params *txa_params)
+{
+	struct txa_service_data *txa;
+	int ret;
+
+	if (txa_lookup())
+		return -ENOMEM;
+
+	TXA_CHECK_OR_ERR_RET(id);
+
+	if (txa_params == NULL)
+		return -EINVAL;
+
+	txa = txa_service_id_to_data(id);
+	if (txa == NULL)
+		return -EINVAL;
+
+	ret = txa_caps_check(id, txa);
+	if (ret)
+		return ret;
+
+	rte_spinlock_lock(&txa->tx_lock);
+	txa->flush_threshold = txa_params->flush_threshold;
+	txa->max_nb_tx = txa_params->max_nb_tx;
+	rte_spinlock_unlock(&txa->tx_lock);
+
+	return 0;
+}
+
+int
+rte_event_eth_tx_adapter_runtime_params_get(uint8_t id,
+		struct rte_event_eth_tx_adapter_runtime_params *txa_params)
+{
+	struct txa_service_data *txa;
+	int ret;
+
+	if (txa_lookup())
+		return -ENOMEM;
+
+	TXA_CHECK_OR_ERR_RET(id);
+
+	if (txa_params == NULL)
+		return -EINVAL;
+
+	txa = txa_service_id_to_data(id);
+	if (txa == NULL)
+		return -EINVAL;
+
+	ret = txa_caps_check(id, txa);
+	if (ret)
+		return ret;
+
+	rte_spinlock_lock(&txa->tx_lock);
+	txa_params->flush_threshold = txa->flush_threshold;
+	txa_params->max_nb_tx = txa->max_nb_tx;
+	rte_spinlock_unlock(&txa->tx_lock);
+
+	return 0;
 }
 
 int
@@ -1332,8 +1464,11 @@ rte_event_eth_tx_adapter_instance_get(uint16_t eth_dev_id,
 								 tx_queue_id,
 								 txa_inst_id)
 							: -EINVAL;
-			if (ret == 0)
+			if (ret == 0) {
+				rte_eventdev_trace_eth_tx_adapter_instance_get(eth_dev_id,
+								tx_queue_id, *txa_inst_id);
 				return ret;
+			}
 		} else {
 			struct rte_eth_dev *eth_dev;
 
@@ -1342,6 +1477,8 @@ rte_event_eth_tx_adapter_instance_get(uint16_t eth_dev_id,
 			if (txa_service_is_queue_added(txa, eth_dev,
 						       tx_queue_id)) {
 				*txa_inst_id = txa->id;
+				rte_eventdev_trace_eth_tx_adapter_instance_get(eth_dev_id,
+								tx_queue_id, *txa_inst_id);
 				return 0;
 			}
 		}
@@ -1417,11 +1554,15 @@ txa_queue_start_state_set(uint16_t eth_dev_id, uint16_t tx_queue_id,
 int
 rte_event_eth_tx_adapter_queue_start(uint16_t eth_dev_id, uint16_t tx_queue_id)
 {
+	rte_eventdev_trace_eth_tx_adapter_queue_start(eth_dev_id, tx_queue_id);
+
 	return txa_queue_start_state_set(eth_dev_id, tx_queue_id, true);
 }
 
 int
 rte_event_eth_tx_adapter_queue_stop(uint16_t eth_dev_id, uint16_t tx_queue_id)
 {
+	rte_eventdev_trace_eth_tx_adapter_queue_stop(eth_dev_id, tx_queue_id);
+
 	return txa_queue_start_state_set(eth_dev_id, tx_queue_id, false);
 }

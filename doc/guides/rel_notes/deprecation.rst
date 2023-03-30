@@ -14,9 +14,19 @@ Deprecation Notices
 * kvargs: The function ``rte_kvargs_process`` will get a new parameter
   for returning key match count. It will ease handling of no-match case.
 
+* telemetry: The functions ``rte_tel_data_add_array_u64`` and ``rte_tel_data_add_dict_u64``,
+  used by telemetry callbacks for adding unsigned integer values to be returned to the user,
+  are renamed to ``rte_tel_data_add_array_uint`` and ``rte_tel_data_add_dict_uint`` respectively.
+  As such, the old function names are deprecated and will be removed in a future release.
+
 * eal: RTE_FUNC_PTR_OR_* macros have been marked deprecated and will be removed
   in the future. Applications can use ``devtools/cocci/func_or_ret.cocci``
   to update their code.
+
+* eal: The functions ``rte_thread_setname`` and ``rte_ctrl_thread_create``
+  are planned to be deprecated starting with the 23.07 release, subject to
+  the replacement API rte_thread_set_name and rte_thread_create_control being
+  marked as stable, and planned to be removed by the 23.11 release.
 
 * rte_atomicNN_xxx: These APIs do not take memory order parameter. This does
   not allow for writing optimized code for all the CPU architectures supported
@@ -33,21 +43,12 @@ Deprecation Notices
   ``__atomic_thread_fence`` must be used for patches that need to be merged in
   20.08 onwards. This change will not introduce any performance degradation.
 
-* bus: The ``dev->device.numa_node`` field is set by each bus driver for
-  every device it manages to indicate on which NUMA node this device lies.
-  When this information is unknown, the assigned value is not consistent
-  across the bus drivers.
-  In DPDK 22.11, the default value will be set to -1 by all bus drivers
-  when the NUMA information is unavailable.
-
 * kni: The KNI kernel module and library are not recommended for use by new
   applications - other technologies such as virtio-user are recommended instead.
   Following the DPDK technical board
   `decision <https://mails.dpdk.org/archives/dev/2021-January/197077.html>`_
-  and `refinement <http://mails.dpdk.org/archives/dev/2022-June/243596.html>`_:
-
-  * Some deprecation warnings will be added in DPDK 22.11.
-  * The KNI kernel module, library and PMD will be removed from the DPDK 23.11.
+  and `refinement <https://mails.dpdk.org/archives/dev/2022-June/243596.html>`_,
+  the KNI kernel module, library and PMD will be removed from the DPDK 23.11 release.
 
 * lib: will fix extending some enum/define breaking the ABI. There are multiple
   samples in DPDK that enum/define terminated with a ``.*MAX.*`` value which is
@@ -63,29 +64,35 @@ Deprecation Notices
   us extending existing enum/define.
   One solution can be using a fixed size array instead of ``.*MAX.*`` value.
 
-* ethdev: The function ``rte_eth_set_queue_rate_limit`` takes ``rate`` in Mbps.
-  The queue rate is limited to 64 Gbps because declared as ``uint16_t``.
-  The ``rate`` parameter will be modified to ``uint32_t`` in DPDK 22.11
-  so that it can work for more than 64 Gbps.
-
-* ethdev: Since no single PMD supports ``RTE_ETH_RX_OFFLOAD_HEADER_SPLIT``
-  offload and the ``split_hdr_size`` field in structure ``rte_eth_rxmode``
-  to enable per-port header split, they will be removed in DPDK 22.11.
-  The per-queue Rx packet split offload ``RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT``
-  can still be used, and it is configured by ``rte_eth_rxseg_split``.
-
-* ethdev: Announce moving from dedicated modify function for each field,
-  to using the general ``rte_flow_modify_field`` action.
-
 * ethdev: The flow API matching pattern structures, ``struct rte_flow_item_*``,
-  should start with relevant protocol header.
-  Some matching pattern structures implements this by duplicating protocol header
-  fields in the struct. To clarify the intention and to be sure protocol header
-  is intact, will replace those fields with relevant protocol header struct.
-  In v21.02 both individual protocol header fields and the protocol header struct
-  will be added as union, target is switch usage to the protocol header by time.
-  In v21.11 LTS, protocol header fields will be cleaned and only protocol header
-  struct will remain.
+  should start with relevant protocol header structure from lib/net/.
+  The individual protocol header fields and the protocol header struct
+  may be kept together in a union as a first migration step.
+  In future (target is DPDK 23.11), the protocol header fields will be cleaned
+  and only protocol header struct will remain.
+
+  These items are not compliant (not including struct from lib/net/):
+
+  - ``rte_flow_item_ah``
+  - ``rte_flow_item_e_tag``
+  - ``rte_flow_item_geneve``
+  - ``rte_flow_item_geneve_opt``
+  - ``rte_flow_item_gre``
+  - ``rte_flow_item_icmp6``
+  - ``rte_flow_item_icmp6_nd_na``
+  - ``rte_flow_item_icmp6_nd_ns``
+  - ``rte_flow_item_icmp6_nd_opt``
+  - ``rte_flow_item_icmp6_nd_opt_sla_eth``
+  - ``rte_flow_item_icmp6_nd_opt_tla_eth``
+  - ``rte_flow_item_igmp``
+  - ``rte_flow_item_ipv6_ext``
+  - ``rte_flow_item_l2tpv3oip``
+  - ``rte_flow_item_mpls``
+  - ``rte_flow_item_nsh``
+  - ``rte_flow_item_nvgre``
+  - ``rte_flow_item_pfcp``
+  - ``rte_flow_item_pppoe``
+  - ``rte_flow_item_pppoe_proto_id``
 
 * ethdev: Queue specific stats fields will be removed from ``struct rte_eth_stats``.
   Mentioned fields are: ``q_ipackets``, ``q_opackets``, ``q_ibytes``, ``q_obytes``,
@@ -94,58 +101,37 @@ Deprecation Notices
   will be limited to maximum 256 queues.
   Also compile time flag ``RTE_ETHDEV_QUEUE_STAT_CNTRS`` will be removed.
 
-* ethdev: Items and actions ``PF``, ``VF``, ``PHY_PORT``, ``PORT_ID`` are
-  deprecated as hard-to-use / ambiguous and will be removed in DPDK 22.11.
-
-* ethdev: The use of attributes ``ingress`` / ``egress`` in "transfer" flows
-  is deprecated as ambiguous with respect to the embedded switch. The use of
-  these attributes will become invalid starting from DPDK 22.11.
-
-* ethdev: Actions ``OF_SET_MPLS_TTL``, ``OF_DEC_MPLS_TTL``, ``OF_SET_NW_TTL``,
-  ``OF_COPY_TTL_OUT``, ``OF_COPY_TTL_IN`` are deprecated as not supported by
-  any PMD, so they will be removed in DPDK 22.11.
+* ethdev: Flow actions ``PF`` and ``VF`` have been deprecated since DPDK 21.11
+  and are yet to be removed. That still has not happened because there are net
+  drivers which support combined use of either action ``PF`` or action ``VF``
+  with action ``QUEUE``, namely, i40e, ixgbe and txgbe (L2 tunnel rule).
+  It is unclear whether it is acceptable to just drop support for
+  such a complex use case, so maintainers of the said drivers
+  should take a closer look at this and provide assistance.
 
 * ethdev: Actions ``OF_DEC_NW_TTL``, ``SET_IPV4_SRC``, ``SET_IPV4_DST``,
   ``SET_IPV6_SRC``, ``SET_IPV6_DST``, ``SET_TP_SRC``, ``SET_TP_DST``,
   ``DEC_TTL``, ``SET_TTL``, ``SET_MAC_SRC``, ``SET_MAC_DST``, ``INC_TCP_SEQ``,
   ``DEC_TCP_SEQ``, ``INC_TCP_ACK``, ``DEC_TCP_ACK``, ``SET_IPV4_DSCP``,
   ``SET_IPV6_DSCP``, ``SET_TAG``, ``SET_META`` are marked as legacy and
-  superseded by the generic MODIFY_FIELD action.
-  The legacy actions should be deprecated in 22.07, once MODIFY_FIELD
-  alternative is implemented.
-  The legacy actions should be removed in DPDK 22.11.
-
-* ethdev: The enum ``rte_eth_event_ipsec_subtype`` will be extended to add
-  new subtype values ``RTE_ETH_EVENT_IPSEC_SA_PKT_EXPIRY``,
-  ``RTE_ETH_EVENT_IPSEC_SA_BYTE_HARD_EXPIRY`` and
-  ``RTE_ETH_EVENT_IPSEC_SA_PKT_HARD_EXPIRY`` in DPDK 22.11.
-
-* bbdev: ``RTE_BBDEV_OP_TYPE_COUNT`` terminating the ``rte_bbdev_op_type``
-  enum will be deprecated and instead use fixed array size when required
-  to allow for future enum extension.
-  Will extend API to support new operation type ``RTE_BBDEV_OP_FFT`` as per
-  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=22111>`__.
-  New members will be added in ``rte_bbdev_driver_info`` to expose
-  PMD queue topology inspired by
-  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=22076>`__.
-  New member will be added in ``rte_bbdev_driver_info`` to expose
-  the device status as per
-  this `RFC <https://patches.dpdk.org/project/dpdk/list/?series=23367>`__.
-  This should be updated in DPDK 22.11.
-
-* cryptodev: Hide structures ``rte_cryptodev_sym_session`` and
-  ``rte_cryptodev_asym_session`` to remove unnecessary indirection between
-  session and the private data of session. An opaque pointer can be exposed
-  directly to application which can be attached to the ``rte_crypto_op``.
+  superseded by the generic ``RTE_FLOW_ACTION_TYPE_MODIFY_FIELD``.
+  The legacy actions should be removed
+  once ``MODIFY_FIELD`` alternative is implemented in drivers.
 
 * cryptodev: The function ``rte_cryptodev_cb_fn`` will be updated
   to have another parameter ``qp_id`` to return the queue pair ID
   which got error interrupt to the application,
   so that application can reset that particular queue pair.
 
-* security: Hide structure ``rte_security_session`` and expose an opaque
-  pointer for the private data to the application which can be attached
-  to the packet while enqueuing.
+* cryptodev: The arrays of algorithm strings ``rte_crypto_cipher_algorithm_strings``,
+  ``rte_crypto_auth_algorithm_strings``, ``rte_crypto_aead_algorithm_strings`` and
+  ``rte_crypto_asym_xform_strings`` are deprecated and will be removed in DPDK 23.11.
+  Application can use the new APIs ``rte_cryptodev_get_cipher_algo_string``,
+  ``rte_cryptodev_get_auth_algo_string``, ``rte_cryptodev_get_aead_algo_string`` and
+  ``rte_cryptodev_asym_get_xform_string`` respectively.
 
-* raw/dpaa2_cmdif: The ``dpaa2_cmdif`` rawdev driver will be deprecated
-  in DPDK 22.11, as it is no longer in use, no active user known.
+* flow_classify: The flow_classify library and example have no maintainer.
+  The library is experimental and, as such, it could be removed from DPDK.
+  Its removal has been postponed to let potential users report interest
+  in maintaining it.
+  In the absence of such interest, this library will be removed in DPDK 23.11.

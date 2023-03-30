@@ -72,11 +72,11 @@ enum cdev_type {
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -188,7 +188,7 @@ struct l2fwd_crypto_params {
 	struct l2fwd_iv auth_iv;
 	struct l2fwd_iv aead_iv;
 	struct l2fwd_key aad;
-	struct rte_cryptodev_sym_session *session;
+	void *session;
 
 	uint8_t do_cipher;
 	uint8_t do_hash;
@@ -217,7 +217,6 @@ struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = RTE_ETH_MQ_RX_NONE,
-		.split_hdr_size = 0,
 	},
 	.txmode = {
 		.mq_mode = RTE_ETH_MQ_TX_NONE,
@@ -228,7 +227,6 @@ struct rte_mempool *l2fwd_pktmbuf_pool;
 struct rte_mempool *l2fwd_crypto_op_pool;
 static struct {
 	struct rte_mempool *sess_mp;
-	struct rte_mempool *priv_mp;
 } session_pool_socket[RTE_MAX_NUMA_NODES];
 
 /* Per-port statistics struct */
@@ -671,11 +669,10 @@ generate_random_key(uint8_t *key, unsigned length)
 }
 
 /* Session is created and is later attached to the crypto operation. 8< */
-static struct rte_cryptodev_sym_session *
+static void *
 initialize_crypto_session(struct l2fwd_crypto_options *options, uint8_t cdev_id)
 {
 	struct rte_crypto_sym_xform *first_xform;
-	struct rte_cryptodev_sym_session *session;
 	int retval = rte_cryptodev_socket_id(cdev_id);
 
 	if (retval < 0)
@@ -697,17 +694,8 @@ initialize_crypto_session(struct l2fwd_crypto_options *options, uint8_t cdev_id)
 		first_xform = &options->auth_xform;
 	}
 
-	session = rte_cryptodev_sym_session_create(
+	return rte_cryptodev_sym_session_create(cdev_id, first_xform,
 			session_pool_socket[socket_id].sess_mp);
-	if (session == NULL)
-		return NULL;
-
-	if (rte_cryptodev_sym_session_init(cdev_id, session,
-				first_xform,
-				session_pool_socket[socket_id].priv_mp) < 0)
-		return NULL;
-
-	return session;
 }
 /* >8 End of creation of session. */
 
@@ -730,7 +718,7 @@ l2fwd_main_loop(struct l2fwd_crypto_options *options)
 			US_PER_S * BURST_TX_DRAIN_US;
 	struct l2fwd_crypto_params *cparams;
 	struct l2fwd_crypto_params port_cparams[qconf->nb_crypto_devs];
-	struct rte_cryptodev_sym_session *session;
+	void *session;
 
 	if (qconf->nb_rx_ports == 0) {
 		RTE_LOG(INFO, L2FWD, "lcore %u has nothing to do\n", lcore_id);
@@ -1548,7 +1536,7 @@ display_cipher_info(struct l2fwd_crypto_options *options)
 {
 	printf("\n---- Cipher information ---\n");
 	printf("Algorithm: %s\n",
-		rte_crypto_cipher_algorithm_strings[options->cipher_xform.cipher.algo]);
+		rte_cryptodev_get_cipher_algo_string(options->cipher_xform.cipher.algo));
 	rte_hexdump(stdout, "Cipher key:",
 			options->cipher_xform.cipher.key.data,
 			options->cipher_xform.cipher.key.length);
@@ -1560,7 +1548,7 @@ display_auth_info(struct l2fwd_crypto_options *options)
 {
 	printf("\n---- Authentication information ---\n");
 	printf("Algorithm: %s\n",
-		rte_crypto_auth_algorithm_strings[options->auth_xform.auth.algo]);
+		rte_cryptodev_get_auth_algo_string(options->auth_xform.auth.algo));
 	rte_hexdump(stdout, "Auth key:",
 			options->auth_xform.auth.key.data,
 			options->auth_xform.auth.key.length);
@@ -1572,7 +1560,7 @@ display_aead_info(struct l2fwd_crypto_options *options)
 {
 	printf("\n---- AEAD information ---\n");
 	printf("Algorithm: %s\n",
-		rte_crypto_aead_algorithm_strings[options->aead_xform.aead.algo]);
+		rte_cryptodev_get_aead_algo_string(options->aead_xform.aead.algo));
 	rte_hexdump(stdout, "AEAD key:",
 			options->aead_xform.aead.key.data,
 			options->aead_xform.aead.key.length);
@@ -1876,7 +1864,7 @@ check_device_support_cipher_algo(const struct l2fwd_crypto_options *options,
 	if (cap->op == RTE_CRYPTO_OP_TYPE_UNDEFINED) {
 		printf("Algorithm %s not supported by cryptodev %u"
 			" or device not of preferred type (%s)\n",
-			rte_crypto_cipher_algorithm_strings[opt_cipher_algo],
+			rte_cryptodev_get_cipher_algo_string(opt_cipher_algo),
 			cdev_id,
 			options->string_type);
 		return NULL;
@@ -1910,7 +1898,7 @@ check_device_support_auth_algo(const struct l2fwd_crypto_options *options,
 	if (cap->op == RTE_CRYPTO_OP_TYPE_UNDEFINED) {
 		printf("Algorithm %s not supported by cryptodev %u"
 			" or device not of preferred type (%s)\n",
-			rte_crypto_auth_algorithm_strings[opt_auth_algo],
+			rte_cryptodev_get_auth_algo_string(opt_auth_algo),
 			cdev_id,
 			options->string_type);
 		return NULL;
@@ -1944,7 +1932,7 @@ check_device_support_aead_algo(const struct l2fwd_crypto_options *options,
 	if (cap->op == RTE_CRYPTO_OP_TYPE_UNDEFINED) {
 		printf("Algorithm %s not supported by cryptodev %u"
 			" or device not of preferred type (%s)\n",
-			rte_crypto_aead_algorithm_strings[opt_aead_algo],
+			rte_cryptodev_get_aead_algo_string(opt_aead_algo),
 			cdev_id,
 			options->string_type);
 		return NULL;
@@ -2380,13 +2368,10 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 
 		rte_cryptodev_info_get(cdev_id, &dev_info);
 
-		/*
-		 * Two sessions objects are required for each session
-		 * (one for the header, one for the private data)
-		 */
 		if (!strcmp(dev_info.driver_name, "crypto_scheduler")) {
 #ifdef RTE_CRYPTO_SCHEDULER
-			uint32_t nb_workers =
+			/* scheduler session header + 1 session per worker */
+			uint32_t nb_workers = 1 +
 				rte_cryptodev_scheduler_workers_get(cdev_id,
 								NULL);
 
@@ -2395,41 +2380,15 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 		} else
 			sessions_needed = enabled_cdev_count;
 
-		if (session_pool_socket[socket_id].priv_mp == NULL) {
-			char mp_name[RTE_MEMPOOL_NAMESIZE];
-
-			snprintf(mp_name, RTE_MEMPOOL_NAMESIZE,
-				"priv_sess_mp_%u", socket_id);
-
-			session_pool_socket[socket_id].priv_mp =
-					rte_mempool_create(mp_name,
-						sessions_needed,
-						max_sess_sz,
-						0, 0, NULL, NULL, NULL,
-						NULL, socket_id,
-						0);
-
-			if (session_pool_socket[socket_id].priv_mp == NULL) {
-				printf("Cannot create pool on socket %d\n",
-					socket_id);
-				return -ENOMEM;
-			}
-
-			printf("Allocated pool \"%s\" on socket %d\n",
-				mp_name, socket_id);
-		}
-
 		if (session_pool_socket[socket_id].sess_mp == NULL) {
 			char mp_name[RTE_MEMPOOL_NAMESIZE];
 			snprintf(mp_name, RTE_MEMPOOL_NAMESIZE,
 				"sess_mp_%u", socket_id);
 
 			session_pool_socket[socket_id].sess_mp =
-					rte_cryptodev_sym_session_pool_create(
-							mp_name,
-							sessions_needed,
-							0, 0, 0, socket_id);
-
+				rte_cryptodev_sym_session_pool_create(
+					mp_name, sessions_needed, max_sess_sz,
+					0, 0, socket_id);
 			if (session_pool_socket[socket_id].sess_mp == NULL) {
 				printf("Cannot create pool on socket %d\n",
 					socket_id);
@@ -2580,8 +2539,6 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 
 		qp_conf.nb_descriptors = 2048;
 		qp_conf.mp_session = session_pool_socket[socket_id].sess_mp;
-		qp_conf.mp_session_private =
-				session_pool_socket[socket_id].priv_mp;
 
 		retval = rte_cryptodev_queue_pair_setup(cdev_id, 0, &qp_conf,
 				socket_id);
@@ -2824,7 +2781,7 @@ main(int argc, char **argv)
 	/* Enable Ethernet ports */
 	enabled_portcount = initialize_ports(&options);
 	if (enabled_portcount < 1)
-		rte_exit(EXIT_FAILURE, "Failed to initial Ethernet ports\n");
+		rte_exit(EXIT_FAILURE, "Failed to initialize Ethernet ports\n");
 
 	/* Initialize the port/queue configuration of each logical core */
 	RTE_ETH_FOREACH_DEV(portid) {

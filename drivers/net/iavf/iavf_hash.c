@@ -1285,7 +1285,7 @@ iavf_refine_proto_hdrs_l2tpv2(struct virtchnl_proto_hdrs *proto_hdrs,
 
 	if (proto_hdrs->tunnel_level == TUNNEL_LEVEL_INNER) {
 		/* shift headers layer */
-		for (i = proto_hdrs->count - 1 + 1; i > 0; i--)
+		for (i = proto_hdrs->count; i > 0; i--)
 			proto_hdrs->proto_hdr[i] = proto_hdrs->proto_hdr[i - 1];
 
 		/* adding outer ip header at layer 0 */
@@ -1309,7 +1309,6 @@ iavf_refine_proto_hdrs_l2tpv2(struct virtchnl_proto_hdrs *proto_hdrs,
 			}
 		}
 	}
-
 }
 
 static void iavf_refine_proto_hdrs(struct virtchnl_proto_hdrs *proto_hdrs,
@@ -1423,7 +1422,6 @@ iavf_hash_parse_action(struct iavf_pattern_match_item *match_item,
 		       uint64_t pattern_hint, struct iavf_rss_meta *rss_meta,
 		       struct rte_flow_error *error)
 {
-	struct virtchnl_proto_hdrs *proto_hdrs;
 	enum rte_flow_action_type action_type;
 	const struct rte_flow_action_rss *rss;
 	const struct rte_flow_action *action;
@@ -1484,8 +1482,10 @@ iavf_hash_parse_action(struct iavf_pattern_match_item *match_item,
 				return rte_flow_error_set(error, ENOTSUP,
 						RTE_FLOW_ERROR_TYPE_ACTION,
 						action, "RSS type not supported");
-			proto_hdrs = match_item->meta;
-			rss_meta->proto_hdrs = *proto_hdrs;
+
+			memcpy(&rss_meta->proto_hdrs, match_item->meta,
+			       sizeof(struct virtchnl_proto_hdrs));
+
 			iavf_refine_proto_hdrs(&rss_meta->proto_hdrs,
 					       rss_type, pattern_hint);
 			break;

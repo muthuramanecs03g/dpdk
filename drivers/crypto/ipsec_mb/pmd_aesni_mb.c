@@ -192,20 +192,28 @@ aesni_mb_set_session_auth_parameters(const IMB_MGR *mb_mgr,
 	if (xform->auth.algo == RTE_CRYPTO_AUTH_ZUC_EIA3) {
 		if (xform->auth.key.length == 16) {
 			sess->auth.algo = IMB_AUTH_ZUC_EIA3_BITLEN;
+
+			if (sess->auth.req_digest_len != 4) {
+				IPSEC_MB_LOG(ERR, "Invalid digest size\n");
+				return -EINVAL;
+			}
 		} else if (xform->auth.key.length == 32) {
 			sess->auth.algo = IMB_AUTH_ZUC256_EIA3_BITLEN;
+#if IMB_VERSION(1, 2, 0) < IMB_VERSION_NUM
+			if (sess->auth.req_digest_len != 4 &&
+					sess->auth.req_digest_len != 8 &&
+					sess->auth.req_digest_len != 16) {
+#else
+			if (sess->auth.req_digest_len != 4) {
+#endif
+				IPSEC_MB_LOG(ERR, "Invalid digest size\n");
+				return -EINVAL;
+			}
 		} else {
 			IPSEC_MB_LOG(ERR, "Invalid authentication key length\n");
 			return -EINVAL;
 		}
 
-		uint16_t zuc_eia3_digest_len =
-			get_truncated_digest_byte_length(
-						IMB_AUTH_ZUC_EIA3_BITLEN);
-		if (sess->auth.req_digest_len != zuc_eia3_digest_len) {
-			IPSEC_MB_LOG(ERR, "Invalid digest size\n");
-			return -EINVAL;
-		}
 		sess->auth.gen_digest_len = sess->auth.req_digest_len;
 
 		memcpy(sess->auth.zuc_auth_key, xform->auth.key.data,
@@ -937,7 +945,7 @@ static inline uint64_t
 auth_start_offset(struct rte_crypto_op *op, struct aesni_mb_session *session,
 		uint32_t oop, const uint32_t auth_offset,
 		const uint32_t cipher_offset, const uint32_t auth_length,
-		const uint32_t cipher_length)
+		const uint32_t cipher_length, uint8_t lb_sgl)
 {
 	struct rte_mbuf *m_src, *m_dst;
 	uint8_t *p_src, *p_dst;
@@ -945,7 +953,7 @@ auth_start_offset(struct rte_crypto_op *op, struct aesni_mb_session *session,
 	uint32_t cipher_end, auth_end;
 
 	/* Only cipher then hash needs special calculation. */
-	if (!oop || session->chain_order != IMB_ORDER_CIPHER_HASH)
+	if (!oop || session->chain_order != IMB_ORDER_CIPHER_HASH || lb_sgl)
 		return auth_offset;
 
 	m_src = op->sym->m_src;
@@ -1159,6 +1167,81 @@ handle_aead_sgl_job(IMB_JOB *job, IMB_MGR *mb_mgr,
 	return 0;
 }
 
+static uint64_t
+sgl_linear_cipher_auth_len(IMB_JOB *job, uint64_t *auth_len)
+{
+	uint64_t cipher_len;
+
+	if (job->cipher_mode == IMB_CIPHER_SNOW3G_UEA2_BITLEN ||
+			job->cipher_mode == IMB_CIPHER_KASUMI_UEA1_BITLEN)
+		cipher_len = (job->msg_len_to_cipher_in_bits >> 3) +
+				(job->cipher_start_src_offset_in_bits >> 3);
+	else
+		cipher_len = job->msg_len_to_cipher_in_bytes +
+				job->cipher_start_src_offset_in_bytes;
+
+	if (job->hash_alg == IMB_AUTH_SNOW3G_UIA2_BITLEN ||
+			job->hash_alg == IMB_AUTH_ZUC_EIA3_BITLEN)
+		*auth_len = (job->msg_len_to_hash_in_bits >> 3) +
+				job->hash_start_src_offset_in_bytes;
+	else if (job->hash_alg == IMB_AUTH_AES_GMAC)
+		*auth_len = job->u.GCM.aad_len_in_bytes;
+	else
+		*auth_len = job->msg_len_to_hash_in_bytes +
+				job->hash_start_src_offset_in_bytes;
+
+	return RTE_MAX(*auth_len, cipher_len);
+}
+
+static int
+handle_sgl_linear(IMB_JOB *job, struct rte_crypto_op *op, uint32_t dst_offset,
+		struct aesni_mb_session *session)
+{
+	uint64_t auth_len, total_len;
+	uint8_t *src, *linear_buf = NULL;
+	int lb_offset = 0;
+	struct rte_mbuf *src_seg;
+	uint16_t src_len;
+
+	total_len = sgl_linear_cipher_auth_len(job, &auth_len);
+	linear_buf = rte_zmalloc(NULL, total_len + job->auth_tag_output_len_in_bytes, 0);
+	if (linear_buf == NULL) {
+		IPSEC_MB_LOG(ERR, "Error allocating memory for SGL Linear Buffer\n");
+		return -1;
+	}
+
+	for (src_seg = op->sym->m_src; (src_seg != NULL) &&
+			(total_len - lb_offset > 0);
+			src_seg = src_seg->next) {
+		src = rte_pktmbuf_mtod(src_seg, uint8_t *);
+		src_len =  RTE_MIN(src_seg->data_len, total_len - lb_offset);
+		rte_memcpy(linear_buf + lb_offset, src, src_len);
+		lb_offset += src_len;
+	}
+
+	job->src = linear_buf;
+	job->dst = linear_buf + dst_offset;
+	job->user_data2 = linear_buf;
+
+	if (job->hash_alg == IMB_AUTH_AES_GMAC)
+		job->u.GCM.aad = linear_buf;
+
+	if (session->auth.operation == RTE_CRYPTO_AUTH_OP_VERIFY)
+		job->auth_tag_output = linear_buf + lb_offset;
+	else
+		job->auth_tag_output = linear_buf + auth_len;
+
+	return 0;
+}
+
+static inline int
+imb_lib_support_sgl_algo(IMB_CIPHER_MODE alg)
+{
+	if (alg == IMB_CIPHER_CHACHA20_POLY1305
+			|| alg == IMB_CIPHER_GCM)
+		return 1;
+	return 0;
+}
 
 /**
  * Process a crypto operation and complete a IMB_JOB job structure for
@@ -1171,7 +1254,8 @@ handle_aead_sgl_job(IMB_JOB *job, IMB_MGR *mb_mgr,
  *
  * @return
  * - 0 on success, the IMB_JOB will be filled
- * - -1 if invalid session, IMB_JOB will not be filled
+ * - -1 if invalid session or errors allocationg SGL linear buffer,
+ *   IMB_JOB will not be filled
  */
 static inline int
 set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
@@ -1191,24 +1275,13 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 	uint32_t total_len;
 	IMB_JOB base_job;
 	uint8_t sgl = 0;
+	uint8_t lb_sgl = 0;
 	int ret;
 
 	session = ipsec_mb_get_session_private(qp, op);
 	if (session == NULL) {
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_SESSION;
 		return -1;
-	}
-
-	if (op->sym->m_src->nb_segs > 1) {
-		if (session->cipher.mode != IMB_CIPHER_GCM
-				&& session->cipher.mode !=
-				IMB_CIPHER_CHACHA20_POLY1305) {
-			op->status = RTE_CRYPTO_OP_STATUS_INVALID_ARGS;
-			IPSEC_MB_LOG(ERR, "Device only supports SGL for AES-GCM"
-					" or CHACHA20_POLY1305 algorithms.");
-			return -1;
-		}
-		sgl = 1;
 	}
 
 	/* Set crypto operation */
@@ -1231,6 +1304,26 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 	} else {
 		job->enc_keys = session->cipher.expanded_aes_keys.encode;
 		job->dec_keys = session->cipher.expanded_aes_keys.decode;
+	}
+
+	if (!op->sym->m_dst) {
+		/* in-place operation */
+		m_dst = m_src;
+		oop = 0;
+	} else if (op->sym->m_dst == op->sym->m_src) {
+		/* in-place operation */
+		m_dst = m_src;
+		oop = 0;
+	} else {
+		/* out-of-place operation */
+		m_dst = op->sym->m_dst;
+		oop = 1;
+	}
+
+	if (m_src->nb_segs > 1 || m_dst->nb_segs > 1) {
+		sgl = 1;
+		if (!imb_lib_support_sgl_algo(session->cipher.mode))
+			lb_sgl = 1;
 	}
 
 	switch (job->hash_alg) {
@@ -1331,20 +1424,6 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		m_offset = 0;
 	}
 
-	if (!op->sym->m_dst) {
-		/* in-place operation */
-		m_dst = m_src;
-		oop = 0;
-	} else if (op->sym->m_dst == op->sym->m_src) {
-		/* in-place operation */
-		m_dst = m_src;
-		oop = 0;
-	} else {
-		/* out-of-place operation */
-		m_dst = op->sym->m_dst;
-		oop = 1;
-	}
-
 	/* Set digest output location */
 	if (job->hash_alg != IMB_AUTH_NULL &&
 			session->auth.operation == RTE_CRYPTO_AUTH_OP_VERIFY) {
@@ -1435,7 +1514,7 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		job->hash_start_src_offset_in_bytes = auth_start_offset(op,
 				session, oop, auth_off_in_bytes,
 				ciph_off_in_bytes, auth_len_in_bytes,
-				ciph_len_in_bytes);
+				ciph_len_in_bytes, lb_sgl);
 		job->msg_len_to_hash_in_bits = op->sym->auth.data.length;
 
 		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
@@ -1452,7 +1531,7 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		job->hash_start_src_offset_in_bytes = auth_start_offset(op,
 				session, oop, auth_off_in_bytes,
 				ciph_off_in_bytes, auth_len_in_bytes,
-				ciph_len_in_bytes);
+				ciph_len_in_bytes, lb_sgl);
 		job->msg_len_to_hash_in_bytes = auth_len_in_bytes;
 
 		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
@@ -1464,7 +1543,7 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 				session, oop, op->sym->auth.data.offset,
 				op->sym->cipher.data.offset,
 				op->sym->auth.data.length,
-				op->sym->cipher.data.length);
+				op->sym->cipher.data.length, lb_sgl);
 		job->msg_len_to_hash_in_bytes = op->sym->auth.data.length;
 
 		job->iv = rte_crypto_op_ctod_offset(op, uint8_t *,
@@ -1525,6 +1604,10 @@ set_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 	job->user_data = op;
 
 	if (sgl) {
+
+		if (lb_sgl)
+			return handle_sgl_linear(job, op, m_offset, session);
+
 		base_job = *job;
 		job->sgl_state = IMB_SGL_INIT;
 		job = IMB_SUBMIT_JOB(mb_mgr);
@@ -1584,8 +1667,7 @@ set_sec_mb_job_params(IMB_JOB *job, struct ipsec_mb_qp *qp,
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_SESSION;
 		return -1;
 	}
-	session = (struct aesni_mb_session *)
-		get_sec_session_private_data(op->sym->sec_session);
+	session = SECURITY_GET_SESS_PRIV(op->sym->session);
 
 	if (unlikely(session == NULL)) {
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_SESSION;
@@ -1695,6 +1777,31 @@ generate_digest(IMB_JOB *job, struct rte_crypto_op *op,
 			sess->auth.req_digest_len);
 }
 
+static void
+post_process_sgl_linear(struct rte_crypto_op *op, IMB_JOB *job,
+		struct aesni_mb_session *sess, uint8_t *linear_buf)
+{
+
+	int lb_offset = 0;
+	struct rte_mbuf *m_dst = op->sym->m_dst == NULL ?
+			op->sym->m_src : op->sym->m_dst;
+	uint16_t total_len, dst_len;
+	uint64_t auth_len;
+	uint8_t *dst;
+
+	total_len = sgl_linear_cipher_auth_len(job, &auth_len);
+
+	if (sess->auth.operation != RTE_CRYPTO_AUTH_OP_VERIFY)
+		total_len += job->auth_tag_output_len_in_bytes;
+
+	for (; (m_dst != NULL) && (total_len - lb_offset > 0); m_dst = m_dst->next) {
+		dst = rte_pktmbuf_mtod(m_dst, uint8_t *);
+		dst_len = RTE_MIN(m_dst->data_len, total_len - lb_offset);
+		rte_memcpy(dst, linear_buf + lb_offset, dst_len);
+		lb_offset += dst_len;
+	}
+}
+
 /**
  * Process a completed job and return rte_mbuf which job processed
  *
@@ -1710,8 +1817,7 @@ post_process_mb_job(struct ipsec_mb_qp *qp, IMB_JOB *job)
 {
 	struct rte_crypto_op *op = (struct rte_crypto_op *)job->user_data;
 	struct aesni_mb_session *sess = NULL;
-	uint32_t driver_id = ipsec_mb_get_driver_id(
-						IPSEC_MB_PMD_TYPE_AESNI_MB);
+	uint8_t *linear_buf = NULL;
 
 #ifdef AESNI_MB_DOCSIS_SEC_ENABLED
 	uint8_t is_docsis_sec = 0;
@@ -1722,23 +1828,23 @@ post_process_mb_job(struct ipsec_mb_qp *qp, IMB_JOB *job)
 		 * this is for DOCSIS
 		 */
 		is_docsis_sec = 1;
-		sess = get_sec_session_private_data(op->sym->sec_session);
+		sess = SECURITY_GET_SESS_PRIV(op->sym->session);
 	} else
 #endif
-	{
-		sess = get_sym_session_private_data(op->sym->session,
-						driver_id);
-	}
-
-	if (unlikely(sess == NULL)) {
-		op->status = RTE_CRYPTO_OP_STATUS_INVALID_SESSION;
-		return op;
-	}
+		sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 
 	if (likely(op->status == RTE_CRYPTO_OP_STATUS_NOT_PROCESSED)) {
 		switch (job->status) {
 		case IMB_STATUS_COMPLETED:
 			op->status = RTE_CRYPTO_OP_STATUS_SUCCESS;
+
+			if ((op->sym->m_src->nb_segs > 1 ||
+					(op->sym->m_dst != NULL &&
+					op->sym->m_dst->nb_segs > 1)) &&
+					!imb_lib_support_sgl_algo(sess->cipher.mode)) {
+				linear_buf = (uint8_t *) job->user_data2;
+				post_process_sgl_linear(op, job, sess, linear_buf);
+			}
 
 			if (job->hash_alg == IMB_AUTH_NULL)
 				break;
@@ -1766,15 +1872,12 @@ post_process_mb_job(struct ipsec_mb_qp *qp, IMB_JOB *job)
 		default:
 			op->status = RTE_CRYPTO_OP_STATUS_ERROR;
 		}
+		rte_free(linear_buf);
 	}
 
 	/* Free session if a session-less crypto op */
 	if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS) {
 		memset(sess, 0, sizeof(struct aesni_mb_session));
-		memset(op->sym->session, 0,
-			rte_cryptodev_sym_get_existing_header_session_size(
-				op->sym->session));
-		rte_mempool_put(qp->sess_mp_priv, sess);
 		rte_mempool_put(qp->sess_mp, op->sym->session);
 		op->sym->session = NULL;
 	}
@@ -1962,16 +2065,6 @@ aesni_mb_dequeue_burst(void *queue_pair, struct rte_crypto_op **ops,
 	return processed_jobs;
 }
 
-
-static inline void
-ipsec_mb_fill_error_code(struct rte_crypto_sym_vec *vec, int32_t err)
-{
-	uint32_t i;
-
-	for (i = 0; i != vec->num; ++i)
-		vec->status[i] = err;
-}
-
 static inline int
 check_crypto_sgl(union rte_crypto_sym_ofs so, const struct rte_crypto_sgl *sgl)
 {
@@ -2028,7 +2121,7 @@ verify_sync_dgst(struct rte_crypto_sym_vec *vec,
 }
 
 static uint32_t
-aesni_mb_process_bulk(struct rte_cryptodev *dev,
+aesni_mb_process_bulk(struct rte_cryptodev *dev __rte_unused,
 	struct rte_cryptodev_sym_session *sess, union rte_crypto_sym_ofs sofs,
 	struct rte_crypto_sym_vec *vec)
 {
@@ -2037,14 +2130,8 @@ aesni_mb_process_bulk(struct rte_cryptodev *dev,
 	void *buf;
 	IMB_JOB *job;
 	IMB_MGR *mb_mgr;
-	struct aesni_mb_session *s;
+	struct aesni_mb_session *s = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 	uint8_t tmp_dgst[vec->num][DIGEST_LENGTH_MAX];
-
-	s = get_sym_session_private_data(sess, dev->driver_id);
-	if (s == NULL) {
-		ipsec_mb_fill_error_code(vec, EINVAL);
-		return 0;
-	}
 
 	/* get per-thread MB MGR, create one if needed */
 	mb_mgr = get_per_thread_mb_mgr();
@@ -2125,10 +2212,9 @@ struct rte_cryptodev_ops aesni_mb_pmd_ops = {
  */
 static int
 aesni_mb_pmd_sec_sess_create(void *dev, struct rte_security_session_conf *conf,
-		struct rte_security_session *sess,
-		struct rte_mempool *mempool)
+		struct rte_security_session *sess)
 {
-	void *sess_private_data;
+	void *sess_private_data = SECURITY_GET_SESS_PRIV(sess);
 	struct rte_cryptodev *cdev = (struct rte_cryptodev *)dev;
 	int ret;
 
@@ -2138,23 +2224,13 @@ aesni_mb_pmd_sec_sess_create(void *dev, struct rte_security_session_conf *conf,
 		return -EINVAL;
 	}
 
-	if (rte_mempool_get(mempool, &sess_private_data)) {
-		IPSEC_MB_LOG(ERR, "Couldn't get object from session mempool");
-		return -ENOMEM;
-	}
-
 	ret = aesni_mb_set_docsis_sec_session_parameters(cdev, conf,
 			sess_private_data);
 
 	if (ret != 0) {
 		IPSEC_MB_LOG(ERR, "Failed to configure session parameters");
-
-		/* Return session to mempool */
-		rte_mempool_put(mempool, sess_private_data);
 		return ret;
 	}
-
-	set_sec_session_private_data(sess, sess_private_data);
 
 	return ret;
 }
@@ -2164,16 +2240,18 @@ static int
 aesni_mb_pmd_sec_sess_destroy(void *dev __rte_unused,
 		struct rte_security_session *sess)
 {
-	void *sess_priv = get_sec_session_private_data(sess);
+	void *sess_priv = SECURITY_GET_SESS_PRIV(sess);
 
 	if (sess_priv) {
-		struct rte_mempool *sess_mp = rte_mempool_from_obj(sess_priv);
-
 		memset(sess_priv, 0, sizeof(struct aesni_mb_session));
-		set_sec_session_private_data(sess, NULL);
-		rte_mempool_put(sess_mp, sess_priv);
 	}
 	return 0;
+}
+
+static unsigned int
+aesni_mb_pmd_sec_sess_get_size(void *device __rte_unused)
+{
+	return sizeof(struct aesni_mb_session);
 }
 
 /** Get security capabilities for aesni multi-buffer */
@@ -2186,6 +2264,7 @@ aesni_mb_pmd_sec_capa_get(void *device __rte_unused)
 static struct rte_security_ops aesni_mb_pmd_sec_ops = {
 		.session_create = aesni_mb_pmd_sec_sess_create,
 		.session_update = NULL,
+		.session_get_size = aesni_mb_pmd_sec_sess_get_size,
 		.session_stats_get = NULL,
 		.session_destroy = aesni_mb_pmd_sec_sess_destroy,
 		.set_pkt_metadata = NULL,
@@ -2252,7 +2331,11 @@ RTE_INIT(ipsec_mb_register_aesni_mb)
 			RTE_CRYPTODEV_FF_OOP_LB_IN_LB_OUT |
 			RTE_CRYPTODEV_FF_SYM_CPU_CRYPTO |
 			RTE_CRYPTODEV_FF_NON_BYTE_ALIGNED_DATA |
-			RTE_CRYPTODEV_FF_SYM_SESSIONLESS;
+			RTE_CRYPTODEV_FF_SYM_SESSIONLESS |
+			RTE_CRYPTODEV_FF_IN_PLACE_SGL |
+			RTE_CRYPTODEV_FF_OOP_SGL_IN_SGL_OUT |
+			RTE_CRYPTODEV_FF_OOP_LB_IN_SGL_OUT |
+			RTE_CRYPTODEV_FF_OOP_SGL_IN_LB_OUT;
 
 	aesni_mb_data->internals_priv_size = 0;
 	aesni_mb_data->ops = &aesni_mb_pmd_ops;

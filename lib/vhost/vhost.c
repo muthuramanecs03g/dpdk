@@ -23,6 +23,7 @@
 
 struct virtio_net *vhost_devices[RTE_MAX_VHOST_DEVICE];
 pthread_mutex_t vhost_dev_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t vhost_dma_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct vhost_vq_stats_name_off {
 	char name[RTE_VHOST_STATS_NAME_SIZE];
@@ -51,7 +52,6 @@ static const struct vhost_vq_stats_name_off vhost_vq_stat_strings[] = {
 
 #define VHOST_NB_VQ_STATS RTE_DIM(vhost_vq_stat_strings)
 
-/* Called with iotlb_lock read-locked */
 uint64_t
 __vhost_iova_to_vva(struct virtio_net *dev, struct vhost_virtqueue *vq,
 		    uint64_t iova, uint64_t *size, uint8_t perm)
@@ -368,6 +368,7 @@ cleanup_device(struct virtio_net *dev, int destroy)
 
 static void
 vhost_free_async_mem(struct vhost_virtqueue *vq)
+	__rte_exclusive_locks_required(&vq->access_lock)
 {
 	if (!vq->async)
 		return;
@@ -392,7 +393,9 @@ free_vq(struct virtio_net *dev, struct vhost_virtqueue *vq)
 	else
 		rte_free(vq->shadow_used_split);
 
+	rte_spinlock_lock(&vq->access_lock);
 	vhost_free_async_mem(vq);
+	rte_spinlock_unlock(&vq->access_lock);
 	rte_free(vq->batch_copy_elems);
 	vhost_user_iotlb_destroy(vq);
 	rte_free(vq->log_cache);
@@ -415,6 +418,7 @@ free_device(struct virtio_net *dev)
 
 static __rte_always_inline int
 log_translate(struct virtio_net *dev, struct vhost_virtqueue *vq)
+	__rte_shared_locks_required(&vq->iotlb_lock)
 {
 	if (likely(!(vq->ring_addrs.flags & (1 << VHOST_VRING_F_LOG))))
 		return 0;
@@ -431,8 +435,6 @@ log_translate(struct virtio_net *dev, struct vhost_virtqueue *vq)
  * Converts vring log address to GPA
  * If IOMMU is enabled, the log address is IOVA
  * If IOMMU not enabled, the log address is already GPA
- *
- * Caller should have iotlb_lock read-locked
  */
 uint64_t
 translate_log_addr(struct virtio_net *dev, struct vhost_virtqueue *vq,
@@ -463,9 +465,9 @@ translate_log_addr(struct virtio_net *dev, struct vhost_virtqueue *vq,
 		return log_addr;
 }
 
-/* Caller should have iotlb_lock read-locked */
 static int
 vring_translate_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
+	__rte_shared_locks_required(&vq->iotlb_lock)
 {
 	uint64_t req_size, size;
 
@@ -502,9 +504,9 @@ vring_translate_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
 	return 0;
 }
 
-/* Caller should have iotlb_lock read-locked */
 static int
 vring_translate_packed(struct virtio_net *dev, struct vhost_virtqueue *vq)
+	__rte_shared_locks_required(&vq->iotlb_lock)
 {
 	uint64_t req_size, size;
 
@@ -559,10 +561,9 @@ vring_translate(struct virtio_net *dev, struct vhost_virtqueue *vq)
 }
 
 void
-vring_invalidate(struct virtio_net *dev, struct vhost_virtqueue *vq)
+vring_invalidate(struct virtio_net *dev __rte_unused, struct vhost_virtqueue *vq)
 {
-	if (dev->features & (1ULL << VIRTIO_F_IOMMU_PLATFORM))
-		vhost_user_iotlb_wr_lock(vq);
+	vhost_user_iotlb_wr_lock(vq);
 
 	vq->access_ok = false;
 	vq->desc = NULL;
@@ -570,8 +571,7 @@ vring_invalidate(struct virtio_net *dev, struct vhost_virtqueue *vq)
 	vq->used = NULL;
 	vq->log_guest_addr = 0;
 
-	if (dev->features & (1ULL << VIRTIO_F_IOMMU_PLATFORM))
-		vhost_user_iotlb_wr_unlock(vq);
+	vhost_user_iotlb_wr_unlock(vq);
 }
 
 static void
@@ -701,9 +701,9 @@ vhost_new_device(void)
 
 	dev->vid = i;
 	dev->flags = VIRTIO_DEV_BUILTIN_VIRTIO_NET;
-	dev->slave_req_fd = -1;
+	dev->backend_req_fd = -1;
 	dev->postcopy_ufd = -1;
-	rte_spinlock_init(&dev->slave_req_lock);
+	rte_spinlock_init(&dev->backend_req_lock);
 
 	return i;
 }
@@ -1317,6 +1317,36 @@ rte_vhost_vring_call(int vid, uint16_t vring_idx)
 	return 0;
 }
 
+int
+rte_vhost_vring_call_nonblock(int vid, uint16_t vring_idx)
+{
+	struct virtio_net *dev;
+	struct vhost_virtqueue *vq;
+
+	dev = get_device(vid);
+	if (!dev)
+		return -1;
+
+	if (vring_idx >= VHOST_MAX_VRING)
+		return -1;
+
+	vq = dev->virtqueue[vring_idx];
+	if (!vq)
+		return -1;
+
+	if (!rte_spinlock_trylock(&vq->access_lock))
+		return -EAGAIN;
+
+	if (vq_is_packed(dev))
+		vhost_vring_call_packed(dev, vq);
+	else
+		vhost_vring_call_split(dev, vq);
+
+	rte_spinlock_unlock(&vq->access_lock);
+
+	return 0;
+}
+
 uint16_t
 rte_vhost_avail_entries(int vid, uint16_t queue_id)
 {
@@ -1638,6 +1668,7 @@ rte_vhost_extern_callback_register(int vid,
 
 static __rte_always_inline int
 async_channel_register(struct virtio_net *dev, struct vhost_virtqueue *vq)
+	__rte_exclusive_locks_required(&vq->access_lock)
 {
 	struct vhost_async *async;
 	int node = vq->numa_node;
@@ -1723,7 +1754,7 @@ rte_vhost_async_channel_register(int vid, uint16_t queue_id)
 
 	vq = dev->virtqueue[queue_id];
 
-	if (unlikely(vq == NULL || !dev->async_copy))
+	if (unlikely(vq == NULL || !dev->async_copy || dev->vdpa_dev != NULL))
 		return -1;
 
 	rte_spinlock_lock(&vq->access_lock);
@@ -1747,14 +1778,10 @@ rte_vhost_async_channel_register_thread_unsafe(int vid, uint16_t queue_id)
 
 	vq = dev->virtqueue[queue_id];
 
-	if (unlikely(vq == NULL || !dev->async_copy))
+	if (unlikely(vq == NULL || !dev->async_copy || dev->vdpa_dev != NULL))
 		return -1;
 
-	if (unlikely(!rte_spinlock_is_locked(&vq->access_lock))) {
-		VHOST_LOG_CONFIG(dev->ifname, ERR, "%s() called without access lock taken.\n",
-			__func__);
-		return -1;
-	}
+	vq_assert_lock(dev, vq);
 
 	return async_channel_register(dev, vq);
 }
@@ -1816,11 +1843,7 @@ rte_vhost_async_channel_unregister_thread_unsafe(int vid, uint16_t queue_id)
 	if (vq == NULL)
 		return -1;
 
-	if (unlikely(!rte_spinlock_is_locked(&vq->access_lock))) {
-		VHOST_LOG_CONFIG(dev->ifname, ERR, "%s() called without access lock taken.\n",
-			__func__);
-		return -1;
-	}
+	vq_assert_lock(dev, vq);
 
 	if (!vq->async)
 		return 0;
@@ -1844,19 +1867,21 @@ rte_vhost_async_dma_configure(int16_t dma_id, uint16_t vchan_id)
 	void *pkts_cmpl_flag_addr;
 	uint16_t max_desc;
 
+	pthread_mutex_lock(&vhost_dma_lock);
+
 	if (!rte_dma_is_valid(dma_id)) {
 		VHOST_LOG_CONFIG("dma", ERR, "DMA %d is not found.\n", dma_id);
-		return -1;
+		goto error;
 	}
 
 	if (rte_dma_info_get(dma_id, &info) != 0) {
 		VHOST_LOG_CONFIG("dma", ERR, "Fail to get DMA %d information.\n", dma_id);
-		return -1;
+		goto error;
 	}
 
 	if (vchan_id >= info.max_vchans) {
 		VHOST_LOG_CONFIG("dma", ERR, "Invalid DMA %d vChannel %u.\n", dma_id, vchan_id);
-		return -1;
+		goto error;
 	}
 
 	if (!dma_copy_track[dma_id].vchans) {
@@ -1868,7 +1893,7 @@ rte_vhost_async_dma_configure(int16_t dma_id, uint16_t vchan_id)
 			VHOST_LOG_CONFIG("dma", ERR,
 				"Failed to allocate vchans for DMA %d vChannel %u.\n",
 				dma_id, vchan_id);
-			return -1;
+			goto error;
 		}
 
 		dma_copy_track[dma_id].vchans = vchans;
@@ -1877,6 +1902,7 @@ rte_vhost_async_dma_configure(int16_t dma_id, uint16_t vchan_id)
 	if (dma_copy_track[dma_id].vchans[vchan_id].pkts_cmpl_flag_addr) {
 		VHOST_LOG_CONFIG("dma", INFO, "DMA %d vChannel %u already registered.\n",
 			dma_id, vchan_id);
+		pthread_mutex_unlock(&vhost_dma_lock);
 		return 0;
 	}
 
@@ -1894,7 +1920,7 @@ rte_vhost_async_dma_configure(int16_t dma_id, uint16_t vchan_id)
 			rte_free(dma_copy_track[dma_id].vchans);
 			dma_copy_track[dma_id].vchans = NULL;
 		}
-		return -1;
+		goto error;
 	}
 
 	dma_copy_track[dma_id].vchans[vchan_id].pkts_cmpl_flag_addr = pkts_cmpl_flag_addr;
@@ -1902,7 +1928,12 @@ rte_vhost_async_dma_configure(int16_t dma_id, uint16_t vchan_id)
 	dma_copy_track[dma_id].vchans[vchan_id].ring_mask = max_desc - 1;
 	dma_copy_track[dma_id].nr_vchans++;
 
+	pthread_mutex_unlock(&vhost_dma_lock);
 	return 0;
+
+error:
+	pthread_mutex_unlock(&vhost_dma_lock);
+	return -1;
 }
 
 int
@@ -1955,11 +1986,7 @@ rte_vhost_async_get_inflight_thread_unsafe(int vid, uint16_t queue_id)
 	if (vq == NULL)
 		return ret;
 
-	if (unlikely(!rte_spinlock_is_locked(&vq->access_lock))) {
-		VHOST_LOG_CONFIG(dev->ifname, ERR, "%s() called without access lock taken.\n",
-			__func__);
-		return -1;
-	}
+	vq_assert_lock(dev, vq);
 
 	if (!vq->async)
 		return ret;
@@ -2089,6 +2116,59 @@ int rte_vhost_vring_stats_reset(int vid, uint16_t queue_id)
 	rte_spinlock_unlock(&vq->access_lock);
 
 	return 0;
+}
+
+int
+rte_vhost_async_dma_unconfigure(int16_t dma_id, uint16_t vchan_id)
+{
+	struct rte_dma_info info;
+	struct rte_dma_stats stats = { 0 };
+
+	pthread_mutex_lock(&vhost_dma_lock);
+
+	if (!rte_dma_is_valid(dma_id)) {
+		VHOST_LOG_CONFIG("dma", ERR, "DMA %d is not found.\n", dma_id);
+		goto error;
+	}
+
+	if (rte_dma_info_get(dma_id, &info) != 0) {
+		VHOST_LOG_CONFIG("dma", ERR, "Fail to get DMA %d information.\n", dma_id);
+		goto error;
+	}
+
+	if (vchan_id >= info.max_vchans || !dma_copy_track[dma_id].vchans ||
+		!dma_copy_track[dma_id].vchans[vchan_id].pkts_cmpl_flag_addr) {
+		VHOST_LOG_CONFIG("dma", ERR, "Invalid channel %d:%u.\n", dma_id, vchan_id);
+		goto error;
+	}
+
+	if (rte_dma_stats_get(dma_id, vchan_id, &stats) != 0) {
+		VHOST_LOG_CONFIG("dma", ERR,
+				 "Failed to get stats for DMA %d vChannel %u.\n", dma_id, vchan_id);
+		goto error;
+	}
+
+	if (stats.submitted - stats.completed != 0) {
+		VHOST_LOG_CONFIG("dma", ERR,
+				 "Do not unconfigure when there are inflight packets.\n");
+		goto error;
+	}
+
+	rte_free(dma_copy_track[dma_id].vchans[vchan_id].pkts_cmpl_flag_addr);
+	dma_copy_track[dma_id].vchans[vchan_id].pkts_cmpl_flag_addr = NULL;
+	dma_copy_track[dma_id].nr_vchans--;
+
+	if (dma_copy_track[dma_id].nr_vchans == 0) {
+		rte_free(dma_copy_track[dma_id].vchans);
+		dma_copy_track[dma_id].vchans = NULL;
+	}
+
+	pthread_mutex_unlock(&vhost_dma_lock);
+	return 0;
+
+error:
+	pthread_mutex_unlock(&vhost_dma_lock);
+	return -1;
 }
 
 RTE_LOG_REGISTER_SUFFIX(vhost_config_log_level, config, INFO);

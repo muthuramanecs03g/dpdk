@@ -315,6 +315,10 @@ struct roc_nix_rq {
 	/* Average SPB aura level drop threshold for RED */
 	uint8_t spb_red_drop;
 	/* Average SPB aura level pass threshold for RED */
+	uint8_t xqe_red_pass;
+	/* Average xqe level drop threshold for RED */
+	uint8_t xqe_red_drop;
+	/* Average xqe level pass threshold for RED */
 	uint8_t spb_red_pass;
 	/* LPB aura drop enable */
 	bool lpb_drop_ena;
@@ -324,6 +328,7 @@ struct roc_nix_rq {
 	struct roc_nix *roc_nix;
 	uint64_t meta_aura_handle;
 	uint16_t inl_dev_refs;
+	uint8_t tc;
 };
 
 struct roc_nix_cq {
@@ -350,6 +355,7 @@ struct roc_nix_sq {
 	uint16_t cq_drop_thresh;
 	bool sso_ena;
 	bool cq_ena;
+	uint8_t fc_hyst_bits;
 	/* End of Input parameters */
 	uint16_t sqes_per_sqb_log2;
 	struct roc_nix *roc_nix;
@@ -401,6 +407,9 @@ typedef void (*link_status_t)(struct roc_nix *roc_nix,
 /* PTP info update callback */
 typedef int (*ptp_info_update_t)(struct roc_nix *roc_nix, bool enable);
 
+/* Queue Error get callback */
+typedef void (*q_err_get_t)(struct roc_nix *roc_nix, void *data);
+
 /* Link status get callback */
 typedef void (*link_info_get_t)(struct roc_nix *roc_nix,
 				struct roc_nix_link_info *link);
@@ -422,16 +431,22 @@ struct roc_nix {
 	uint32_t ipsec_in_min_spi;
 	uint32_t ipsec_in_max_spi;
 	uint32_t ipsec_out_max_sa;
+	uint32_t dwrr_mtu;
 	bool ipsec_out_sso_pffunc;
 	bool custom_sa_action;
+	bool local_meta_aura_ena;
+	uint32_t meta_buf_sz;
 	/* End of input parameters */
 	/* LMT line base for "Per Core Tx LMT line" mode*/
 	uintptr_t lmt_base;
 	bool io_enabled;
 	bool rx_ptp_ena;
 	uint16_t cints;
+	uint32_t buf_sz;
+	uint64_t meta_aura_handle;
+	uintptr_t meta_mempool;
 
-#define ROC_NIX_MEM_SZ (6 * 1024)
+#define ROC_NIX_MEM_SZ (6 * 1056)
 	uint8_t reserved[ROC_NIX_MEM_SZ] __plt_cache_aligned;
 } __plt_cache_aligned;
 
@@ -664,6 +679,8 @@ int __roc_api roc_nix_tm_hierarchy_disable(struct roc_nix *roc_nix);
 int __roc_api roc_nix_tm_hierarchy_enable(struct roc_nix *roc_nix,
 					  enum roc_nix_tm_tree tree,
 					  bool xmit_enable);
+int __roc_api roc_nix_tm_hierarchy_xmit_enable(struct roc_nix *roc_nix, enum roc_nix_tm_tree tree);
+
 
 /*
  * TM utilities API.
@@ -778,6 +795,8 @@ void __roc_api roc_nix_mac_link_cb_unregister(struct roc_nix *roc_nix);
 int __roc_api roc_nix_mac_link_info_get_cb_register(
 	struct roc_nix *roc_nix, link_info_get_t link_info_get);
 void __roc_api roc_nix_mac_link_info_get_cb_unregister(struct roc_nix *roc_nix);
+int __roc_api roc_nix_q_err_cb_register(struct roc_nix *roc_nix, q_err_get_t sq_err_handle);
+void __roc_api roc_nix_q_err_cb_unregister(struct roc_nix *roc_nix);
 
 /* Ops */
 int __roc_api roc_nix_switch_hdr_set(struct roc_nix *roc_nix,
@@ -869,6 +888,7 @@ int __roc_api roc_nix_rq_init(struct roc_nix *roc_nix, struct roc_nix_rq *rq,
 			      bool ena);
 int __roc_api roc_nix_rq_modify(struct roc_nix *roc_nix, struct roc_nix_rq *rq,
 				bool ena);
+int __roc_api roc_nix_rq_cman_config(struct roc_nix *roc_nix, struct roc_nix_rq *rq);
 int __roc_api roc_nix_rq_ena_dis(struct roc_nix_rq *rq, bool enable);
 int __roc_api roc_nix_rq_is_sso_enable(struct roc_nix *roc_nix, uint32_t qid);
 int __roc_api roc_nix_rq_fini(struct roc_nix_rq *rq);

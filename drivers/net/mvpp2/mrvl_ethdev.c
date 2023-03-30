@@ -490,11 +490,6 @@ mrvl_dev_configure(struct rte_eth_dev *dev)
 		return -EINVAL;
 	}
 
-	if (dev->data->dev_conf.rxmode.split_hdr_size) {
-		MRVL_LOG(INFO, "Split headers not supported");
-		return -EINVAL;
-	}
-
 	if (dev->data->dev_conf.rxmode.mtu > priv->max_mtu) {
 		MRVL_LOG(ERR, "MTU %u is larger than max_mtu %u\n",
 			 dev->data->dev_conf.rxmode.mtu,
@@ -858,7 +853,7 @@ mrvl_dev_start(struct rte_eth_dev *dev)
 	}
 
 	/*
-	 * In case there are some some stale uc/mc mac addresses flush them
+	 * In case there are some stale uc/mc mac addresses flush them
 	 * here. It cannot be done during mrvl_dev_close() as port information
 	 * is already gone at that point (due to pp2_ppio_deinit() in
 	 * mrvl_dev_stop()).

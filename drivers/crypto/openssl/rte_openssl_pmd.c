@@ -696,7 +696,7 @@ openssl_set_session_auth_parameters(struct openssl_session *sess,
 		algo = digest_name_get(xform->auth.algo);
 		if (!algo)
 			return -EINVAL;
-		rte_memcpy(algo_name, algo, (sizeof(algo)+1));
+		strlcpy(algo_name, algo, sizeof(algo_name));
 
 		mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
 		sess->auth.hmac.ctx = EVP_MAC_CTX_new(mac);
@@ -887,10 +887,8 @@ get_session(struct openssl_qp *qp, struct rte_crypto_op *op)
 		if (op->type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
 			/* get existing session */
 			if (likely(op->sym->session != NULL))
-				sess = (struct openssl_session *)
-						get_sym_session_private_data(
-						op->sym->session,
-						cryptodev_driver_id);
+				sess = CRYPTODEV_GET_SYM_SESS_PRIV(
+					op->sym->session);
 		} else {
 			if (likely(op->asym->session != NULL))
 				asym_sess = (struct openssl_asym_session *)
@@ -901,32 +899,26 @@ get_session(struct openssl_qp *qp, struct rte_crypto_op *op)
 			return asym_sess;
 		}
 	} else {
+		struct rte_cryptodev_sym_session *_sess;
 		/* sessionless asymmetric not supported */
 		if (op->type == RTE_CRYPTO_OP_TYPE_ASYMMETRIC)
 			return NULL;
 
 		/* provide internal session */
-		void *_sess = rte_cryptodev_sym_session_create(qp->sess_mp);
-		void *_sess_private_data = NULL;
+		rte_mempool_get(qp->sess_mp, (void **)&_sess);
 
 		if (_sess == NULL)
 			return NULL;
 
-		if (rte_mempool_get(qp->sess_mp_priv,
-				(void **)&_sess_private_data))
-			return NULL;
-
-		sess = (struct openssl_session *)_sess_private_data;
+		sess = (struct openssl_session *)_sess->driver_priv_data;
 
 		if (unlikely(openssl_set_session_parameters(sess,
 				op->sym->xform) != 0)) {
 			rte_mempool_put(qp->sess_mp, _sess);
-			rte_mempool_put(qp->sess_mp_priv, _sess_private_data);
 			sess = NULL;
 		}
 		op->sym->session = (struct rte_cryptodev_sym_session *)_sess;
-		set_sym_session_private_data(op->sym->session,
-				cryptodev_driver_id, _sess_private_data);
+
 	}
 
 	if (sess == NULL)
@@ -2641,7 +2633,7 @@ process_openssl_rsa_op_evp(struct rte_crypto_op *cop,
 		if (EVP_PKEY_verify_recover(rsa_ctx, tmp, &outlen,
 				op->rsa.sign.data,
 				op->rsa.sign.length) <= 0) {
-			rte_free(tmp);
+			OPENSSL_free(tmp);
 			goto err_rsa;
 		}
 
@@ -2653,7 +2645,7 @@ process_openssl_rsa_op_evp(struct rte_crypto_op *cop,
 				op->rsa.message.length)) {
 			OPENSSL_LOG(ERR, "RSA sign Verification failed");
 		}
-		rte_free(tmp);
+		OPENSSL_free(tmp);
 		break;
 
 	default:
@@ -2900,10 +2892,6 @@ process_op(struct openssl_qp *qp, struct rte_crypto_op *op,
 	if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS) {
 		openssl_reset_session(sess);
 		memset(sess, 0, sizeof(struct openssl_session));
-		memset(op->sym->session, 0,
-			rte_cryptodev_sym_get_existing_header_session_size(
-				op->sym->session));
-		rte_mempool_put(qp->sess_mp_priv, sess);
 		rte_mempool_put(qp->sess_mp, op->sym->session);
 		op->sym->session = NULL;
 	}

@@ -1,26 +1,13 @@
 #!/bin/sh -xe
 
+if [ -z "${DEF_LIB:-}" ]; then
+    DEF_LIB=static ABI_CHECKS= BUILD_DOCS= RUN_TESTS= $0
+    DEF_LIB=shared $0
+    exit
+fi
+
 # Builds are run as root in containers, no need for sudo
 [ "$(id -u)" != '0' ] || alias sudo=
-
-on_error() {
-    if [ $? = 0 ]; then
-        exit
-    fi
-    FILES_TO_PRINT="build/meson-logs/testlog.txt"
-    FILES_TO_PRINT="$FILES_TO_PRINT build/.ninja_log"
-    FILES_TO_PRINT="$FILES_TO_PRINT build/meson-logs/meson-log.txt"
-    FILES_TO_PRINT="$FILES_TO_PRINT build/gdb.log"
-
-    for pr_file in $FILES_TO_PRINT; do
-        if [ -e "$pr_file" ]; then
-            cat "$pr_file"
-        fi
-    done
-}
-# We capture the error logs as artifacts in Github Actions, no need to dump
-# them via a EXIT handler.
-[ -n "$GITHUB_WORKFLOW" ] || trap on_error EXIT
 
 install_libabigail() {
     version=$1
@@ -78,8 +65,10 @@ if [ "$RISCV64" = "true" ]; then
     cross_file=config/riscv/riscv64_linux_gcc
 fi
 
-if [ -n "$cross_file" ]; then
-    OPTS="$OPTS --cross-file $cross_file"
+buildtype=debugoptimized
+
+if [ "$BUILD_DEBUG" = "true" ]; then
+    buildtype=debug
 fi
 
 if [ "$BUILD_DOCS" = "true" ]; then
@@ -101,12 +90,14 @@ else
 fi
 
 OPTS="$OPTS -Dplatform=generic"
-OPTS="$OPTS --default-library=$DEF_LIB"
-OPTS="$OPTS --buildtype=debugoptimized"
+OPTS="$OPTS -Ddefault_library=$DEF_LIB"
+OPTS="$OPTS -Dbuildtype=$buildtype"
 OPTS="$OPTS -Dcheck_includes=true"
 if [ "$MINI" = "true" ]; then
     OPTS="$OPTS -Denable_drivers=net/null"
     OPTS="$OPTS -Ddisable_libs=*"
+else
+    OPTS="$OPTS -Ddisable_libs="
 fi
 
 if [ "$ASAN" = "true" ]; then
@@ -116,7 +107,16 @@ if [ "$ASAN" = "true" ]; then
     fi
 fi
 
-meson build --werror $OPTS
+OPTS="$OPTS -Dwerror=true"
+
+if [ -d build ]; then
+    meson configure build $OPTS
+else
+    if [ -n "$cross_file" ]; then
+        OPTS="$OPTS --cross-file $cross_file"
+    fi
+    meson setup build $OPTS
+fi
 ninja -C build
 
 if [ -z "$cross_file" ]; then
@@ -130,8 +130,6 @@ fi
 if [ "$ABI_CHECKS" = "true" ]; then
     if [ "$(cat libabigail/VERSION 2>/dev/null)" != "$LIBABIGAIL_VERSION" ]; then
         rm -rf libabigail
-        # if we change libabigail, invalidate existing abi cache
-        rm -rf reference
     fi
 
     if [ ! -d libabigail ]; then
@@ -150,10 +148,9 @@ if [ "$ABI_CHECKS" = "true" ]; then
     if [ ! -d reference ]; then
         refsrcdir=$(readlink -f $(pwd)/../dpdk-$REF_GIT_TAG)
         git clone --single-branch -b "$REF_GIT_TAG" $REF_GIT_REPO $refsrcdir
-        meson $OPTS -Dexamples= $refsrcdir $refsrcdir/build
+        meson setup $OPTS -Dexamples= $refsrcdir $refsrcdir/build
         ninja -C $refsrcdir/build
         DESTDIR=$(pwd)/reference ninja -C $refsrcdir/build install
-        devtools/gen-abi.sh reference
         find reference/usr/local -name '*.a' -delete
         rm -rf reference/usr/local/bin
         rm -rf reference/usr/local/share
@@ -161,7 +158,6 @@ if [ "$ABI_CHECKS" = "true" ]; then
     fi
 
     DESTDIR=$(pwd)/install ninja -C build install
-    devtools/gen-abi.sh install
     devtools/check-abi.sh reference install ${ABI_CHECKS_WARN_ONLY:-}
 fi
 

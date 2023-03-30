@@ -97,13 +97,17 @@ where,
 *   -P: Sets all ports to promiscuous mode so that packets are accepted regardless of the packet's Ethernet MAC destination address.
     Without this option, only packets with the Ethernet MAC destination address set to the Ethernet address of the port are accepted.
 
+*   -u: optional, sets uncore min/max frequency to minimum value.
+
+*   -U: optional, sets uncore min/max frequency to maximum value.
+
+*   -i (frequency index): optional, sets uncore frequency to frequency index value, by setting min and max values to be the same.
+
 *   --config (port,queue,lcore)[,(port,queue,lcore)]: determines which queues from which ports are mapped to which cores.
 
 *   --max-pkt-len: optional, maximum packet length in decimal (64-9600)
 
 *   --no-numa: optional, disables numa awareness
-
-*   --empty-poll: Traffic Aware power management. See below for details
 
 *   --telemetry:  Telemetry mode.
 
@@ -232,74 +236,6 @@ If a thread polls multiple Rx queues and different queue returns different sleep
 the algorithm controls the sleep time in a conservative manner by sleeping for the least possible time
 in order to avoid a potential performance impact.
 
-Empty Poll Mode
--------------------------
-Additionally, there is a traffic aware mode of operation called "Empty
-Poll" where the number of empty polls can be monitored to keep track
-of how busy the application is. Empty poll mode can be enabled by the
-command line option --empty-poll.
-
-See :doc:`Power Management<../prog_guide/power_man>` chapter in the DPDK Programmer's Guide for empty poll mode details.
-
-.. code-block:: console
-
-    ./<build_dir>/examples/dpdk-l3fwd-power -l xxx -n 4 -a 0000:xx:00.0 -a 0000:xx:00.1 \
-    	-- -p 0x3 -P --config="(0,0,xx),(1,0,xx)" --empty-poll="0,0,0" -l 14 -m 9 -h 1
-
-Where,
-
---empty-poll: Enable the empty poll mode instead of original algorithm
-
---empty-poll="training_flag, med_threshold, high_threshold"
-
-* ``training_flag`` : optional, enable/disable training mode. Default value is 0. If the training_flag is set as 1(true), then the application will start in training mode and print out the trained threshold values. If the training_flag is set as 0(false), the application will start in normal mode, and will use either the default thresholds or those supplied on the command line. The trained threshold values are specific to the user’s system, may give a better power profile when compared to the default threshold values.
-
-* ``med_threshold`` : optional, sets the empty poll threshold of a modestly busy system state. If this is not supplied, the application will apply the default value of 350000.
-
-* ``high_threshold`` : optional, sets the empty poll threshold of a busy system state. If this is not supplied, the application will apply the default value of 580000.
-
-* -l : optional, set up the LOW power state frequency index
-
-* -m : optional, set up the MED power state frequency index
-
-* -h : optional, set up the HIGH power state frequency index
-
-Empty Poll Mode Example Usage
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To initially obtain the ideal thresholds for the system, the training
-mode should be run first. This is achieved by running the l3fwd-power
-app with the training flag set to “1”, and the other parameters set to
-0.
-
-.. code-block:: console
-
-        ./<build_dir>/examples/dpdk-l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --empty-poll "1,0,0" –P
-
-This will run the training algorithm for x seconds on each core (cores 2
-and 3), and then print out the recommended threshold values for those
-cores. The thresholds should be very similar for each core.
-
-.. code-block:: console
-
-        POWER: Bring up the Timer
-        POWER: set the power freq to MED
-        POWER: Low threshold is 230277
-        POWER: MED threshold is 335071
-        POWER: HIGH threshold is 523769
-        POWER: Training is Complete for 2
-        POWER: set the power freq to MED
-        POWER: Low threshold is 236814
-        POWER: MED threshold is 344567
-        POWER: HIGH threshold is 538580
-        POWER: Training is Complete for 3
-
-Once the values have been measured for a particular system, the app can
-then be started without the training mode so traffic can start immediately.
-
-.. code-block:: console
-
-        ./<build_dir>/examples/dpdk-l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --empty-poll "0,340000,540000" –P
-
 Telemetry Mode
 --------------
 
@@ -364,3 +300,29 @@ in the DPDK Programmer's Guide for more details on PMD power management.
 .. code-block:: console
 
         ./<build_dir>/examples/dpdk-l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --pmd-mgmt=scale
+
+Setting Uncore Values
+---------------------
+
+Uncore frequency can be adjusted through manipulating related sysfs entries
+to adjust the minimum and maximum uncore values.
+This will be set for each package and die on the SKU.
+The driver for enabling this is available from kernel version 5.6 and above.
+Three options are available for setting uncore frequency:
+
+``-u``
+  This will set uncore minimum and maximum frequencies to minimum possible value.
+
+``-U``
+  This will set uncore minimum and maximum frequencies to maximum possible value.
+
+``-i``
+  This will allow you to set the specific uncore frequency index that you want,
+  by setting the uncore frequency to a frequency pointed by index.
+  Frequency index's are set 100MHz apart from maximum to minimum.
+  Frequency index values are in descending order,
+  i.e., index 0 is maximum frequency index.
+
+.. code-block:: console
+
+   dpdk-l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" -i 1

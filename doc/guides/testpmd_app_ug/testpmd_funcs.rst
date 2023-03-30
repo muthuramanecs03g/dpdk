@@ -278,7 +278,7 @@ show config
 Displays the configuration of the application.
 The configuration comes from the command-line, the runtime or the application defaults::
 
-   testpmd> show config (rxtx|cores|fwd|rxoffs|rxpkts|txpkts|txtimes)
+   testpmd> show config (rxtx|cores|fwd|rxoffs|rxpkts|rxhdrs|txpkts|txtimes)
 
 The available information categories are:
 
@@ -290,7 +290,9 @@ The available information categories are:
 
 * ``rxoffs``: Packet offsets for RX split.
 
-* ``rxpkts``: Packets to RX split configuration.
+* ``rxpkts``: Packets to RX length-based split configuration.
+
+* ``rxhdrs``: Packets to RX proto-based split configuration.
 
 * ``txpkts``: Packets to TX configuration.
 
@@ -589,6 +591,13 @@ Dumps the user device list::
 
    testpmd> dump_devargs
 
+dump lcores
+~~~~~~~~~~~
+
+Dumps the logical cores list::
+
+   testpmd> dump_lcores
+
 dump log types
 ~~~~~~~~~~~~~~
 
@@ -798,6 +807,20 @@ mbuf for remaining segments will be allocated from the last valid pool).
 
 Where x[,y]* represents a CSV list of values, without white space. Zero value
 means to use the corresponding memory pool data buffer size.
+
+set rxhdrs
+~~~~~~~~~~
+
+Set the protocol headers of segments to scatter packets on receiving
+if split feature is engaged.
+Affects only the queues configured with split offloads
+(currently BUFFER_SPLIT is supported only).
+
+   testpmd> set rxhdrs (eth[,ipv4]*)
+
+Where eth[,ipv4]* represents a CSV list of values, without white space.
+If the list of offsets is shorter than the list of segments,
+zero offsets will be used for the remaining segments.
 
 set txpkts
 ~~~~~~~~~~
@@ -1537,8 +1560,8 @@ Enable or disable a per port Rx offloading on all Rx queues of a port::
 * ``offloading``: can be any of these offloading capability:
                   vlan_strip, ipv4_cksum, udp_cksum, tcp_cksum, tcp_lro,
                   qinq_strip, outer_ipv4_cksum, macsec_strip,
-                  header_split, vlan_filter, vlan_extend, jumbo_frame,
-                  scatter, timestamp, security, keep_crc, rss_hash
+                  vlan_filter, vlan_extend, scatter, timestamp, security,
+                  keep_crc, rss_hash
 
 This command should be run when the port is stopped, or else it will fail.
 
@@ -1552,8 +1575,8 @@ Enable or disable a per queue Rx offloading only on a specific Rx queue::
 * ``offloading``: can be any of these offloading capability:
                   vlan_strip, ipv4_cksum, udp_cksum, tcp_cksum, tcp_lro,
                   qinq_strip, outer_ipv4_cksum, macsec_strip,
-                  header_split, vlan_filter, vlan_extend, jumbo_frame,
-                  scatter, timestamp, security, keep_crc
+                  vlan_filter, vlan_extend, scatter, timestamp, security,
+                  keep_crc
 
 This command should be run when the port is stopped, or else it will fail.
 
@@ -1588,6 +1611,20 @@ Enable or disable a per queue Tx offloading only on a specific Tx queue::
                   mt_lockfree, multi_segs, mbuf_fast_free, security
 
 This command should be run when the port is stopped, or else it will fail.
+
+config per queue Tx affinity mapping
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Map a Tx queue with an aggregated port of the DPDK port (specified with port_id)::
+
+   testpmd> port (port_id) txq (queue_id) affinity (value)
+
+* ``affinity``: the number of the aggregated port.
+                When multiple ports are aggregated into a single one,
+                it allows to choose which port to use for Tx via a queue.
+
+This command should be run when the port is stopped, otherwise it fails.
+
 
 Config VXLAN Encap outer layers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2011,7 +2048,7 @@ port config - speed
 
 Set the speed and duplex mode for all ports or a specific port::
 
-   testpmd> port config (port_id|all) speed (10|100|1000|10000|25000|40000|50000|100000|200000|auto) \
+   testpmd> port config (port_id|all) speed (10|100|1000|10000|25000|40000|50000|100000|200000|400000|auto) \
             duplex (half|full|auto)
 
 port config - queues/descriptors
@@ -2428,15 +2465,15 @@ set port meter dscp table
 
 Set meter dscp table for the ethernet device::
 
-   testpmd> set port meter dscp table (port_id) (mtr_id) [(dscp_tbl_entry0) \
-   (dscp_tbl_entry1)...(dscp_tbl_entry63)]
+   testpmd> set port meter dscp table (port_id) (mtr_id) (proto) \
+   [(dscp_tbl_entry0) (dscp_tbl_entry1)...(dscp_tbl_entry63)]
 
 set port meter vlan table
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 Set meter VLAN table for the Ethernet device::
 
-   testpmd> set port meter vlan table (port_id) (mtr_id) [(vlan_tbl_entry0) \
-   (vlan_tbl_entry1)...(vlan_tbl_entry15)]
+   testpmd> set port meter vlan table (port_id) (mtr_id) (proto) \
+   [(vlan_tbl_entry0) (vlan_tbl_entry1)...(vlan_tbl_entry15)]
 
 set port meter protocol
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -2827,6 +2864,35 @@ where:
 * ``red`` enable 1, disable 0 marking IP ecn for yellow marked packets with ecn of 2'b01  or 2'b10
   to ecn of 2'b11 when IP is caring TCP or SCTP
 
+Congestion Management
+---------------------
+
+Get capabilities
+~~~~~~~~~~~~~~~~
+
+Retrieve congestion management capabilities supported by driver for given port.
+Below example command retrieves capabilities for port 0::
+
+   testpmd> show port cman capa 0
+
+Get configuration
+~~~~~~~~~~~~~~~~~
+
+Retrieve congestion management configuration for given port.
+Below example command retrieves configuration for port 0::
+
+   testpmd> show port cman config 0
+
+Set configuration
+~~~~~~~~~~~~~~~~~
+
+Configures congestion management settings on given queue
+or mempool associated with queue.
+Below example command configures RED as congestion management algorithm
+for port 0 and queue 0::
+
+   testpmd> set port cman config 0 0 obj queue mode red 10 100 1
+
 Filter Functions
 ----------------
 
@@ -2875,12 +2941,13 @@ following sections.
        [queues_number {number}] [queues_size {size}]
        [counters_number {number}]
        [aging_counters_number {number}]
-       [meters_number {number}]
+       [meters_number {number}] [flags {number}]
 
 - Create a pattern template::
+
    flow pattern_template {port_id} create [pattern_template_id {id}]
        [relaxed {boolean}] [ingress] [egress] [transfer]
-	   template {item} [/ {item} [...]] / end
+       template {item} [/ {item} [...]] / end
 
 - Destroy a pattern template::
 
@@ -2979,6 +3046,10 @@ following sections.
 
    flow aged {port_id} [destroy]
 
+- Enqueue list and destroy aged flow rules::
+
+   flow queue {port_id} aged {queue_id} [destroy]
+
 - Tunnel offload - create a tunnel stub::
 
    flow tunnel create {port_id} type {tunnel_type}
@@ -3026,7 +3097,9 @@ for asynchronous flow creation/destruction operations. It is bound to
        [queues_number {number}] [queues_size {size}]
        [counters_number {number}]
        [aging_counters_number {number}]
+       [host_port {number}]
        [meters_number {number}]
+       [flags {number}]
 
 If successful, it will show::
 
@@ -3125,7 +3198,8 @@ It is bound to ``rte_flow_template_table_create()``::
 
    flow template_table {port_id} create
        [table_id {id}] [group {group_id}]
-       [priority {level}] [ingress] [egress] [transfer]
+       [priority {level}] [ingress] [egress]
+       [transfer [vport_orig] [wire_orig]]
        rules_number {number}
        pattern_template {pattern_template_id}
        actions_template {actions_template_id}
@@ -3601,6 +3675,16 @@ This section lists supported pattern items and their attributes, if any.
   - ``type {unsigned}``: ICMPv6 type.
   - ``code {unsigned}``: ICMPv6 code.
 
+- ``icmp6_echo_request``: match ICMPv6 echo request.
+
+  - ``ident {unsigned}``: ICMPv6 echo request identifier.
+  - ``seq {unsigned}``: ICMPv6 echo request sequence number.
+
+- ``icmp6_echo_reply``: match ICMPv6 echo reply.
+
+  - ``ident {unsigned}``: ICMPv6 echo reply identifier.
+  - ``seq {unsigned}``: ICMPv6 echo reply sequence number.
+
 - ``icmp6_nd_ns``: match ICMPv6 neighbor discovery solicitation.
 
   - ``target_addr {ipv6 address}``: target address.
@@ -3686,6 +3770,17 @@ This section lists supported pattern items and their attributes, if any.
   - ``addr {unsigned}``: PPP address.
   - ``ctrl {unsigned}``: PPP control.
   - ``proto_id {unsigned}``: PPP protocol identifier.
+
+- ``meter``: match meter color.
+
+  - ``color {value}``: meter color value (green/yellow/red).
+
+- ``aggr_affinity``: match aggregated port.
+
+  - ``affinity {value}``: aggregated port (starts from 1).
+
+- ``send_to_kernel``: send packets to kernel.
+
 
 Actions list
 ^^^^^^^^^^^^
@@ -3967,6 +4062,14 @@ This section lists supported actions and their attributes, if any.
 
   - ``ethdev_port_id {unsigned}``: ethdev port ID
 
+- ``meter_mark``:  meter the directed packets using profile and policy
+
+  - ``mtr_profile {unsigned}``: meter profile ID to use
+  - ``mtr_policy {unsigned}``: meter policy ID to use
+  - ``mtr_color_mode {unsigned}``: meter color-awareness mode (blind/aware)
+  - ``mtr_init_color {value}``: initial color value (green/yellow/red)
+  - ``mtr_state {unsigned}``: meter state (disabled/enabled)
+
 Destroying flow rules
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -4205,7 +4308,7 @@ Disabling isolated mode::
  testpmd>
 
 Dumping HW internal information
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``flow dump`` dumps the hardware's internal representation information of
 all flows. It is bound to ``rte_flow_dev_dump()``::
@@ -4221,10 +4324,10 @@ Otherwise, it will complain error occurred::
    Caught error type [...] ([...]): [...]
 
 Listing and destroying aged flow rules
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``flow aged`` simply lists aged flow rules be get from api ``rte_flow_get_aged_flows``,
-and ``destroy`` parameter can be used to destroy those flow rules in PMD.
+and ``destroy`` parameter can be used to destroy those flow rules in PMD::
 
    flow aged {port_id} [destroy]
 
@@ -4259,7 +4362,7 @@ will be ID 3, ID 1, ID 0::
    1       0       0       i--
    0       0       0       i--
 
-If attach ``destroy`` parameter, the command will destroy all the list aged flow rules.
+If attach ``destroy`` parameter, the command will destroy all the list aged flow rules::
 
    testpmd> flow aged 0 destroy
    Port 0 total aged flows: 4
@@ -4276,6 +4379,77 @@ If attach ``destroy`` parameter, the command will destroy all the list aged flow
    4 flows be destroyed
    testpmd> flow aged 0
    Port 0 total aged flows: 0
+
+
+Enqueueing listing and destroying aged flow rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``flow queue aged`` simply lists aged flow rules be get from
+``rte_flow_get_q_aged_flows`` API, and ``destroy`` parameter can be used to
+destroy those flow rules in PMD::
+
+   flow queue {port_id} aged {queue_id} [destroy]
+
+Listing current aged flow rules::
+
+   testpmd> flow queue 0 aged 0
+   Port 0 queue 0 total aged flows: 0
+   testpmd> flow queue 0 create 0 ingress tanle 0 item_template 0 action_template 0
+      pattern eth / ipv4 src is 2.2.2.14 / end
+      actions age timeout 5 / queue index 0 /  end
+   Flow rule #0 creation enqueued
+   testpmd> flow queue 0 create 0 ingress tanle 0 item_template 0 action_template 0
+      pattern eth / ipv4 src is 2.2.2.15 / end
+      actions age timeout 4 / queue index 0 /  end
+   Flow rule #1 creation enqueued
+   testpmd> flow queue 0 create 0 ingress tanle 0 item_template 0 action_template 0
+      pattern eth / ipv4 src is 2.2.2.16 / end
+      actions age timeout 4 / queue index 0 /  end
+   Flow rule #2 creation enqueued
+   testpmd> flow queue 0 create 0 ingress tanle 0 item_template 0 action_template 0
+      pattern eth / ipv4 src is 2.2.2.17 / end
+      actions age timeout 4 / queue index 0 /  end
+   Flow rule #3 creation enqueued
+   testpmd> flow pull 0 queue 0
+   Queue #0 pulled 4 operations (0 failed, 4 succeeded)
+
+Aged Rules are simply list as command ``flow queue {port_id} list {queue_id}``,
+but strip the detail rule information, all the aged flows are sorted by the
+longest timeout time. For example, if those rules is configured in the same time,
+ID 2 will be the first aged out rule, the next will be ID 3, ID 1, ID 0::
+
+   testpmd> flow queue 0 aged 0
+   Port 0 queue 0 total aged flows: 4
+   ID      Group   Prio    Attr
+   2       0       0       ---
+   3       0       0       ---
+   1       0       0       ---
+   0       0       0       ---
+
+   0 flows destroyed
+
+If attach ``destroy`` parameter, the command will destroy all the list aged flow rules::
+
+   testpmd> flow queue 0 aged 0 destroy
+   Port 0 queue 0 total aged flows: 4
+   ID      Group   Prio    Attr
+   2       0       0       ---
+   3       0       0       ---
+   1       0       0       ---
+   0       0       0       ---
+   Flow rule #2 destruction enqueued
+   Flow rule #3 destruction enqueued
+   Flow rule #1 destruction enqueued
+   Flow rule #0 destruction enqueued
+
+   4 flows destroyed
+   testpmd> flow queue 0 aged 0
+   Port 0 total aged flows: 0
+
+.. note::
+
+   The queue must be empty before attaching ``destroy`` parameter.
+
 
 Creating indirect actions
 ~~~~~~~~~~~~~~~~~~~~~~~~~

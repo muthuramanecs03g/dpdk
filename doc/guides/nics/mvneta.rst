@@ -76,8 +76,8 @@ Prerequisites
   DPDK environment.
 
 
-Runtime options
----------------
+Runtime Configuration
+---------------------
 
 The following ``devargs`` options can be enabled at runtime. They must
 be passed as part of EAL arguments.
@@ -117,7 +117,7 @@ Add path to libmusdk.pc in PKG_CONFIG_PATH environment variable.
 .. code-block:: console
 
    export PKG_CONFIG_PATH=$<musdk_install_dir>/lib/pkgconfig/:$PKG_CONFIG_PATH
-   meson build --cross-file config/arm/arm64_armada_linux_gcc
+   meson setup build --cross-file config/arm/arm64_armada_linux_gcc
    ninja -C build
 
 

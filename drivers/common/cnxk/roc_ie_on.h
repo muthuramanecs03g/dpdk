@@ -8,8 +8,6 @@
 /* CN9K IPsec LA */
 
 /* CN9K IPsec LA opcodes */
-#define ROC_IE_ON_MAJOR_OP_WRITE_IPSEC_OUTBOUND	  0x20
-#define ROC_IE_ON_MAJOR_OP_WRITE_IPSEC_INBOUND	  0x21
 #define ROC_IE_ON_MAJOR_OP_PROCESS_OUTBOUND_IPSEC 0x23
 #define ROC_IE_ON_MAJOR_OP_PROCESS_INBOUND_IPSEC  0x24
 
@@ -27,9 +25,11 @@ enum roc_ie_on_ucc_ipsec {
 };
 
 /* Helper macros */
-#define ROC_IE_ON_INB_RPTR_HDR 16
-#define ROC_IE_ON_MAX_IV_LEN   16
-#define ROC_IE_ON_PER_PKT_IV   BIT(43)
+#define ROC_IE_ON_OUTB_DPTR_HDR 16
+#define ROC_IE_ON_INB_RPTR_HDR	16
+#define ROC_IE_ON_MAX_IV_LEN	16
+#define ROC_IE_ON_PER_PKT_IV	BIT(43)
+#define ROC_IE_ON_INPLACE_BIT	BIT(6)
 
 enum {
 	ROC_IE_ON_SA_ENC_NULL = 0,

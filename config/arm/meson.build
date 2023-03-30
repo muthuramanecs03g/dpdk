@@ -65,7 +65,7 @@ part_number_config_arm = {
     '0xd0b': {'compiler_options':  ['-mcpu=cortex-a76']},
     '0xd0c': {
         'march': 'armv8.2-a',
-        'march_features': ['crypto'],
+        'march_features': ['crypto', 'rcpc'],
         'compiler_options':  ['-mcpu=neoverse-n1'],
         'flags': [
             ['RTE_MACHINE', '"neoverse-n1"'],
@@ -74,6 +74,19 @@ part_number_config_arm = {
             ['RTE_MAX_LCORE', 160],
             ['RTE_MAX_NUMA_NODES', 2]
         ]
+    },
+    '0xd40': {
+        'march': 'armv8.4-a',
+        'march_features': ['sve'],
+        'compiler_options':  ['-mcpu=neoverse-v1'],
+        'flags': [
+            ['RTE_MACHINE', '"neoverse-v1"'],
+            ['RTE_ARM_FEATURE_ATOMICS', true],
+            ['RTE_MAX_NUMA_NODES', 1]
+        ]
+    },
+    '0xd42': {
+        'march': 'armv8.4-a',
     },
     '0xd49': {
         'march': 'armv8.5-a',
@@ -203,13 +216,24 @@ implementer_phytium = {
         ['RTE_MACHINE', '"armv8a"'],
         ['RTE_USE_C11_MEM_MODEL', true],
         ['RTE_CACHE_LINE_SIZE', 64],
-        ['RTE_MAX_LCORE', 64],
-        ['RTE_MAX_NUMA_NODES', 8]
     ],
     'part_number_config': {
         '0x662': {
-            'machine_args': ['-march=armv8-a+crc'],
+            'march': 'armv8-a',
+            'march_features': ['crc'],
+            'flags': [
+                ['RTE_MAX_LCORE', 64],
+                ['RTE_MAX_NUMA_NODES', 8]
+             ]
         },
+       '0x663': {
+            'march': 'armv8-a',
+            'march_features': ['crc'],
+            'flags': [
+                ['RTE_MAX_LCORE', 256],
+                ['RTE_MAX_NUMA_NODES', 32]
+            ]
+        }
     }
 }
 
@@ -294,7 +318,8 @@ soc_cn10k = {
     'flags': [
         ['RTE_MAX_LCORE', 24],
         ['RTE_MAX_NUMA_NODES', 1],
-        ['RTE_MEMPOOL_ALIGN', 128]
+        ['RTE_MEMPOOL_ALIGN', 128],
+        ['RTE_IOVA_IN_MBUF', 0]
     ],
     'part_number': '0xd49',
     'extra_march_features': ['crypto'],
@@ -328,10 +353,25 @@ soc_ft2000plus = {
     'numa': true
 }
 
+soc_tys2500 = {
+    'description': 'Phytium TengYun S2500',
+    'implementer': '0x70',
+    'part_number': '0x663',
+    'numa': true
+}
+
 soc_graviton2 = {
     'description': 'AWS Graviton2',
     'implementer': '0x41',
     'part_number': '0xd0c',
+    'numa': false
+}
+
+soc_graviton3 = {
+    'description': 'AWS Graviton3',
+    'implementer': '0x41',
+    'part_number': '0xd40',
+    'extra_march_features': ['crypto'],
     'numa': false
 }
 
@@ -370,7 +410,10 @@ soc_cn9k = {
     'description': 'Marvell OCTEON 9',
     'implementer': '0x43',
     'part_number': '0xb2',
-    'numa': false
+    'numa': false,
+    'flags': [
+        ['RTE_IOVA_IN_MBUF', 0]
+    ]
 }
 
 soc_stingray = {
@@ -402,19 +445,33 @@ soc_thunderxt83 = {
     'part_number': '0xa3'
 }
 
+soc_bluefield3 = {
+  'description': 'NVIDIA BlueField-3',
+  'implementer': '0x41',
+   'flags': [
+          ['RTE_MAX_LCORE', 32],
+          ['RTE_MAX_NUMA_NODES', 1]
+      ],
+   'part_number': '0xd42',
+   'numa': false
+}
+
 '''
 Start of SoCs list
 generic:         Generic un-optimized build for armv8 aarch64 execution mode.
 generic_aarch32: Generic un-optimized build for armv8 aarch32 execution mode.
 armada:          Marvell ARMADA
 bluefield:       NVIDIA BlueField
+bluefield3:      NVIDIA BlueField-3
 centriq2400:     Qualcomm Centriq 2400
 cn9k:            Marvell OCTEON 9
 cn10k:           Marvell OCTEON 10
 dpaa:            NXP DPAA
 emag:            Ampere eMAG
 ft2000plus:      Phytium FT-2000+
+tys2500:         Phytium TengYun S2500
 graviton2:       AWS Graviton2
+graviton3:       AWS Graviton3
 kunpeng920:      HiSilicon Kunpeng 920
 kunpeng930:      HiSilicon Kunpeng 930
 n1sdp:           Arm Neoverse N1SDP
@@ -432,13 +489,16 @@ socs = {
     'generic_aarch32': soc_generic_aarch32,
     'armada': soc_armada,
     'bluefield': soc_bluefield,
+    'bluefield3': soc_bluefield3,
     'centriq2400': soc_centriq2400,
     'cn9k': soc_cn9k,
     'cn10k' : soc_cn10k,
     'dpaa': soc_dpaa,
     'emag': soc_emag,
     'ft2000plus': soc_ft2000plus,
+    'tys2500': soc_tys2500,
     'graviton2': soc_graviton2,
+    'graviton3': soc_graviton3,
     'kunpeng920': soc_kunpeng920,
     'kunpeng930': soc_kunpeng930,
     'n1sdp': soc_n1sdp,

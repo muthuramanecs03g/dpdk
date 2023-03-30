@@ -76,6 +76,8 @@ DPDK subsystem.
    +---+-----+--------------------------------------------------------------+
    | 12| GPIO| rte_rawdev                                                   |
    +---+-----+--------------------------------------------------------------+
+   | 13| ML  | rte_mldev                                                    |
+   +---+-----+--------------------------------------------------------------+
 
 PF0 is called the administrative / admin function (AF) and has exclusive
 privileges to provision RVU functional block's LFs to each of the PF/VF.
@@ -164,6 +166,9 @@ This section lists dataplane H/W block(s) available in cnxk SoC.
 
 #. **Regex Device Driver**
    See :doc:`../regexdevs/cn9k` for REE Regex device driver information.
+
+#. **ML Device Driver**
+   See :doc:`../mldevs/cnxk` for Machine Learning device driver information.
 
 Procedure to Setup Platform
 ---------------------------
@@ -575,6 +580,8 @@ Compile DPDK
 
 DPDK may be compiled either natively on OCTEON CN9K/CN10K platform or cross-compiled on
 an x86 based platform.
+Meson build option ``enable_iova_as_pa`` is disabled on CNXK platforms.
+So only PMDs supporting this option are enabled on CNXK platform builds.
 
 Native Compilation
 ~~~~~~~~~~~~~~~~~~
@@ -585,14 +592,14 @@ CN9K:
 
 .. code-block:: console
 
-        meson -Dplatform=cn9k build
+        meson setup -Dplatform=cn9k build
         ninja -C build
 
 CN10K:
 
 .. code-block:: console
 
-        meson -Dplatform=cn10k build
+        meson setup -Dplatform=cn10k build
         ninja -C build
 
 Cross Compilation
@@ -604,14 +611,14 @@ CN9K:
 
 .. code-block:: console
 
-        meson build --cross-file config/arm/arm64_cn9k_linux_gcc
+        meson setup build --cross-file config/arm/arm64_cn9k_linux_gcc
         ninja -C build
 
 CN10K:
 
 .. code-block:: console
 
-        meson build --cross-file config/arm/arm64_cn10k_linux_gcc
+        meson setup build --cross-file config/arm/arm64_cn10k_linux_gcc
         ninja -C build
 
 .. note::

@@ -17,8 +17,8 @@ NVIDIA MLX5 Common Driver
 The mlx5 common driver library (**librte_common_mlx5**) provides support for
 **NVIDIA ConnectX-4**, **NVIDIA ConnectX-4 Lx**, **NVIDIA ConnectX-5**,
 **NVIDIA ConnectX-6**, **NVIDIA ConnectX-6 Dx**, **NVIDIA ConnectX-6 Lx**,
-**NVIDIA ConnectX-7**, **NVIDIA BlueField**, and **NVIDIA BlueField-2** families of
-10/25/40/50/100/200 Gb/s adapters.
+**NVIDIA ConnectX-7**, **NVIDIA BlueField**, **NVIDIA BlueField-2** and
+**NVIDIA BlueField-3** families of 10/25/40/50/100/200 Gb/s adapters.
 
 Information and documentation for these adapters can be found on the
 `NVIDIA website <https://www.nvidia.com/en-us/networking/>`_.
@@ -162,8 +162,9 @@ https://github.com/linux-rdma/rdma-core
 It is possible to build rdma-core as static libraries starting with version 21::
 
     cd build
-    CFLAGS=-fPIC cmake -DIN_PLACE=1 -DENABLE_STATIC=1 -GNinja ..
+    CFLAGS=-fPIC cmake -DENABLE_STATIC=1 -DNO_PYVERBS=1 -DNO_MAN_PAGES=1 -GNinja ..
     ninja
+    ninja install
 
 
 NVIDIA MLNX_OFED/EN
@@ -187,6 +188,7 @@ The minimal supported versions are:
   - ConnectX-7: **28.33.2028** and above.
   - BlueField: **18.25.1010** and above.
   - BlueField-2: **24.28.1002** and above.
+  - BlueField-3: **32.36.3126** and above.
 
 The firmware, the libraries libibverbs, libmlx5, and mlnx-ofed-kernel modules
 are packaged in `NVIDIA MLNX_OFED
@@ -258,13 +260,14 @@ configured by the ``ibverbs_link`` build option:
 Compilation on Windows
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The DevX SDK location must be set through two environment variables:
+The DevX SDK location must be set through CFLAGS/LDFLAGS,
+either::
 
-``DEVX_LIB_PATH``
-   path to the DevX lib file.
+   meson.exe setup "-Dc_args=-I\"%DEVX_INC_PATH%\"" "-Dc_link_args=-L\"%DEVX_LIB_PATH%\"" ...
 
-``DEVX_INC_PATH``
-   path to the DevX header files.
+or::
+
+   set CFLAGS=-I"%DEVX_INC_PATH%" && set LDFLAGS=-L"%DEVX_LIB_PATH%" && meson.exe setup ...
 
 
 .. _mlx5_common_env:
@@ -554,6 +557,11 @@ Below are some firmware configurations listed.
 - enable realtime timestamp format::
 
    REAL_TIME_CLOCK_ENABLE=1
+
+- allow locking hairpin RQ data buffer in device memory::
+
+   HAIRPIN_DATA_BUFFER_LOCK=1
+   MEMIC_SIZE_LIMIT=0
 
 
 .. _mlx5_common_driver_options:

@@ -96,7 +96,10 @@ const struct supported_cipher_algo cipher_algos[] = {
 	{
 		.keyword = "aes-128-ctr",
 		.algo = RTE_CRYPTO_CIPHER_AES_CTR,
-		.iv_len = 8,
+		/* iv_len includes 8B per packet IV, 4B nonce
+		 * and 4B counter
+		 */
+		.iv_len = 16,
 		.block_size = 4,
 		.key_len = 20
 	},
@@ -786,6 +789,11 @@ parse_sa_tokens(char **tokens, uint32_t n_tokens,
 			continue;
 		}
 
+		if (strcmp(tokens[ti], "reassembly_en") == 0) {
+			rule->flags |= SA_REASSEMBLY_ENABLE;
+			continue;
+		}
+
 		if (strcmp(tokens[ti], "esn") == 0) {
 			INCREMENT_TOKEN_INDEX(ti, n_tokens, status);
 			if (status->status < 0)
@@ -1236,11 +1244,13 @@ static int
 sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 		uint32_t nb_entries, uint32_t inbound,
 		struct socket_ctx *skt_ctx,
-		struct ipsec_ctx *ips_ctx[])
+		struct ipsec_ctx *ips_ctx[],
+		const struct eventmode_conf *em_conf)
 {
 	struct ipsec_sa *sa;
 	uint32_t i, idx;
 	uint16_t iv_length, aad_length;
+	uint16_t auth_iv_length = 0;
 	int inline_status;
 	int32_t rc;
 	struct rte_ipsec_session *ips;
@@ -1334,7 +1344,7 @@ sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 
 			/* AES_GMAC uses salt like AEAD algorithms */
 			if (sa->auth_algo == RTE_CRYPTO_AUTH_AES_GMAC)
-				iv_length = 12;
+				auth_iv_length = 12;
 
 			if (inbound) {
 				sa_ctx->xf[idx].b.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
@@ -1358,7 +1368,7 @@ sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 				sa_ctx->xf[idx].a.auth.op =
 					RTE_CRYPTO_AUTH_OP_VERIFY;
 				sa_ctx->xf[idx].a.auth.iv.offset = IV_OFFSET;
-				sa_ctx->xf[idx].a.auth.iv.length = iv_length;
+				sa_ctx->xf[idx].a.auth.iv.length = auth_iv_length;
 
 			} else { /* outbound */
 				sa_ctx->xf[idx].a.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
@@ -1382,7 +1392,7 @@ sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 				sa_ctx->xf[idx].b.auth.op =
 					RTE_CRYPTO_AUTH_OP_GENERATE;
 				sa_ctx->xf[idx].b.auth.iv.offset = IV_OFFSET;
-				sa_ctx->xf[idx].b.auth.iv.length = iv_length;
+				sa_ctx->xf[idx].b.auth.iv.length = auth_iv_length;
 
 			}
 
@@ -1409,7 +1419,8 @@ sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 				return -EINVAL;
 			}
 		} else {
-			rc = create_lookaside_session(ips_ctx, skt_ctx, sa, ips);
+			rc = create_lookaside_session(ips_ctx, skt_ctx,
+						      em_conf, sa, ips);
 			if (rc != 0) {
 				RTE_LOG(ERR, IPSEC_ESP,
 					"create_lookaside_session() failed\n");
@@ -1432,17 +1443,19 @@ sa_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 static inline int
 sa_out_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 		uint32_t nb_entries, struct socket_ctx *skt_ctx,
-		struct ipsec_ctx *ips_ctx[])
+		struct ipsec_ctx *ips_ctx[],
+		const struct eventmode_conf *em_conf)
 {
-	return sa_add_rules(sa_ctx, entries, nb_entries, 0, skt_ctx, ips_ctx);
+	return sa_add_rules(sa_ctx, entries, nb_entries, 0, skt_ctx, ips_ctx, em_conf);
 }
 
 static inline int
 sa_in_add_rules(struct sa_ctx *sa_ctx, const struct ipsec_sa entries[],
 		uint32_t nb_entries, struct socket_ctx *skt_ctx,
-		struct ipsec_ctx *ips_ctx[])
+		struct ipsec_ctx *ips_ctx[],
+		const struct eventmode_conf *em_conf)
 {
-	return sa_add_rules(sa_ctx, entries, nb_entries, 1, skt_ctx, ips_ctx);
+	return sa_add_rules(sa_ctx, entries, nb_entries, 1, skt_ctx, ips_ctx, em_conf);
 }
 
 /*
@@ -1535,7 +1548,8 @@ fill_ipsec_session(struct rte_ipsec_session *ss, struct rte_ipsec_sa *sa)
  */
 static int
 ipsec_sa_init(struct ipsec_sa *lsa, struct rte_ipsec_sa *sa, uint32_t sa_size,
-		struct socket_ctx *skt_ctx, struct ipsec_ctx *ips_ctx[])
+		struct socket_ctx *skt_ctx, struct ipsec_ctx *ips_ctx[],
+		const struct eventmode_conf *em_conf)
 {
 	int rc;
 	struct rte_ipsec_sa_prm prm;
@@ -1577,7 +1591,7 @@ ipsec_sa_init(struct ipsec_sa *lsa, struct rte_ipsec_sa *sa, uint32_t sa_size,
 	if (lsa->fallback_sessions == 1) {
 		struct rte_ipsec_session *ipfs = ipsec_get_fallback_session(lsa);
 		if (ipfs->security.ses == NULL) {
-			rc = create_lookaside_session(ips_ctx, skt_ctx, lsa, ipfs);
+			rc = create_lookaside_session(ips_ctx, skt_ctx, em_conf, lsa, ipfs);
 			if (rc != 0)
 				return rc;
 		}
@@ -1593,7 +1607,8 @@ ipsec_sa_init(struct ipsec_sa *lsa, struct rte_ipsec_sa *sa, uint32_t sa_size,
  */
 static int
 ipsec_satbl_init(struct sa_ctx *ctx, uint32_t nb_ent, int32_t socket,
-		struct socket_ctx *skt_ctx, struct ipsec_ctx *ips_ctx[])
+		struct socket_ctx *skt_ctx, struct ipsec_ctx *ips_ctx[],
+		const struct eventmode_conf *em_conf)
 {
 	int32_t rc, sz;
 	uint32_t i, idx;
@@ -1631,7 +1646,7 @@ ipsec_satbl_init(struct sa_ctx *ctx, uint32_t nb_ent, int32_t socket,
 		sa = (struct rte_ipsec_sa *)((uintptr_t)ctx->satbl + sz * i);
 		lsa = ctx->sa + idx;
 
-		rc = ipsec_sa_init(lsa, sa, sz, skt_ctx, ips_ctx);
+		rc = ipsec_sa_init(lsa, sa, sz, skt_ctx, ips_ctx, em_conf);
 	}
 
 	return rc;
@@ -1674,7 +1689,8 @@ sa_spi_present(struct sa_ctx *sa_ctx, uint32_t spi, int inbound)
 
 void
 sa_init(struct socket_ctx *ctx, int32_t socket_id,
-		struct lcore_conf *lcore_conf)
+	struct lcore_conf *lcore_conf,
+	const struct eventmode_conf *em_conf)
 {
 	int32_t rc;
 	const char *name;
@@ -1706,11 +1722,11 @@ sa_init(struct socket_ctx *ctx, int32_t socket_id,
 			rte_exit(EXIT_FAILURE, "failed to init SAD\n");
 		RTE_LCORE_FOREACH(lcore_id)
 			ipsec_ctx[lcore_id] = &lcore_conf[lcore_id].inbound;
-		sa_in_add_rules(ctx->sa_in, sa_in, nb_sa_in, ctx, ipsec_ctx);
+		sa_in_add_rules(ctx->sa_in, sa_in, nb_sa_in, ctx, ipsec_ctx, em_conf);
 
 		if (app_sa_prm.enable != 0) {
 			rc = ipsec_satbl_init(ctx->sa_in, nb_sa_in,
-				socket_id, ctx, ipsec_ctx);
+				socket_id, ctx, ipsec_ctx, em_conf);
 			if (rc != 0)
 				rte_exit(EXIT_FAILURE,
 					"failed to init inbound SAs\n");
@@ -1728,11 +1744,11 @@ sa_init(struct socket_ctx *ctx, int32_t socket_id,
 
 		RTE_LCORE_FOREACH(lcore_id)
 			ipsec_ctx[lcore_id] = &lcore_conf[lcore_id].outbound;
-		sa_out_add_rules(ctx->sa_out, sa_out, nb_sa_out, ctx, ipsec_ctx);
+		sa_out_add_rules(ctx->sa_out, sa_out, nb_sa_out, ctx, ipsec_ctx, em_conf);
 
 		if (app_sa_prm.enable != 0) {
 			rc = ipsec_satbl_init(ctx->sa_out, nb_sa_out,
-				socket_id, ctx, ipsec_ctx);
+				socket_id, ctx, ipsec_ctx, em_conf);
 			if (rc != 0)
 				rte_exit(EXIT_FAILURE,
 					"failed to init outbound SAs\n");
@@ -1806,7 +1822,7 @@ outbound_sa_lookup(struct sa_ctx *sa_ctx, uint32_t sa_idx[],
  */
 int
 sa_check_offloads(uint16_t port_id, uint64_t *rx_offloads,
-		uint64_t *tx_offloads)
+		uint64_t *tx_offloads, uint8_t *hw_reassembly)
 {
 	struct ipsec_sa *rule;
 	uint32_t idx_sa;
@@ -1816,6 +1832,7 @@ sa_check_offloads(uint16_t port_id, uint64_t *rx_offloads,
 
 	*rx_offloads = 0;
 	*tx_offloads = 0;
+	*hw_reassembly = 0;
 
 	ret = rte_eth_dev_info_get(port_id, &dev_info);
 	if (ret != 0)
@@ -1832,6 +1849,11 @@ sa_check_offloads(uint16_t port_id, uint64_t *rx_offloads,
 				RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL)
 				&& rule->portid == port_id)
 			*rx_offloads |= RTE_ETH_RX_OFFLOAD_SECURITY;
+		if (IS_HW_REASSEMBLY_EN(rule->flags)) {
+			*rx_offloads |= RTE_ETH_RX_OFFLOAD_SCATTER;
+			*tx_offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+			*hw_reassembly = 1;
+		}
 	}
 
 	/* Check for outbound rules that use offloads and use this port */

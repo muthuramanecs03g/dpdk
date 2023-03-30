@@ -7,6 +7,7 @@
 
 #include "roc_platform.h" /* for __plt_always_inline macro */
 
+#ifndef ROC_LMT_BASE_ID_GET
 #define ROC_LMT_BASE_ID_GET(lmt_addr, lmt_id)                                  \
 	do {                                                                   \
 		/* 32 Lines per core */                                        \
@@ -14,7 +15,10 @@
 		/* Each line is of 128B */                                     \
 		(lmt_addr) += ((uint64_t)lmt_id << ROC_LMT_LINE_SIZE_LOG2);    \
 	} while (0)
+#endif
 
+/* Define it if not defined in roc_platform.h */
+#ifndef ROC_LMT_CPT_BASE_ID_GET
 #define ROC_LMT_CPT_BASE_ID_GET(lmt_addr, lmt_id)                              \
 	do {                                                                   \
 		/* 16 Lines per core */                                        \
@@ -23,6 +27,7 @@
 		/* Each line is of 128B */                                     \
 		(lmt_addr) += ((uint64_t)lmt_id << ROC_LMT_LINE_SIZE_LOG2);    \
 	} while (0)
+#endif
 
 #define roc_load_pair(val0, val1, addr)                                        \
 	({                                                                     \
@@ -125,7 +130,8 @@ roc_lmt_submit_ldeor(plt_iova_t io_address)
 
 	asm volatile(PLT_CPU_FEATURE_PREAMBLE "ldeor xzr, %x[rf], [%[rs]]"
 		     : [rf] "=r"(result)
-		     : [rs] "r"(io_address));
+		     : [rs] "r"(io_address)
+		     : "memory");
 	return result;
 }
 
@@ -136,7 +142,8 @@ roc_lmt_submit_ldeorl(plt_iova_t io_address)
 
 	asm volatile(PLT_CPU_FEATURE_PREAMBLE "ldeorl xzr,%x[rf],[%[rs]]"
 		     : [rf] "=r"(result)
-		     : [rs] "r"(io_address));
+		     : [rs] "r"(io_address)
+		     : "memory");
 	return result;
 }
 
@@ -145,7 +152,8 @@ roc_lmt_submit_steor(uint64_t data, plt_iova_t io_address)
 {
 	asm volatile(PLT_CPU_FEATURE_PREAMBLE
 		     "steor %x[d], [%[rs]]" ::[d] "r"(data),
-		     [rs] "r"(io_address));
+		     [rs] "r"(io_address)
+		     : "memory");
 }
 
 static __plt_always_inline void
@@ -153,7 +161,8 @@ roc_lmt_submit_steorl(uint64_t data, plt_iova_t io_address)
 {
 	asm volatile(PLT_CPU_FEATURE_PREAMBLE
 		     "steorl %x[d], [%[rs]]" ::[d] "r"(data),
-		     [rs] "r"(io_address));
+		     [rs] "r"(io_address)
+		     : "memory");
 }
 
 static __plt_always_inline void

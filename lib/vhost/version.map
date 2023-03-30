@@ -57,6 +57,9 @@ DPDK_23 {
 	rte_vhost_set_vring_base;
 	rte_vhost_va_from_guest_pa;
 	rte_vhost_vring_call;
+	rte_vhost_vring_stats_get;
+	rte_vhost_vring_stats_get_names;
+	rte_vhost_vring_stats_reset;
 
 	local: *;
 };
@@ -65,7 +68,7 @@ EXPERIMENTAL {
 	global:
 
 	rte_vhost_crypto_driver_start;
-	rte_vhost_slave_config_change;
+	rte_vhost_backend_config_change;
 	rte_vhost_async_channel_register;
 	rte_vhost_async_channel_unregister;
 	rte_vhost_submit_enqueue_burst;
@@ -88,12 +91,13 @@ EXPERIMENTAL {
 
 	# added in 22.07
 	rte_vhost_async_get_inflight_thread_unsafe;
-	rte_vhost_vring_stats_get_names;
-	rte_vhost_vring_stats_get;
-	rte_vhost_vring_stats_reset;
 	rte_vhost_async_try_dequeue_burst;
 	rte_vhost_driver_get_vdpa_dev_type;
 	rte_vhost_clear_queue;
+
+	# added in 22.11
+	rte_vhost_async_dma_unconfigure;
+	rte_vhost_vring_call_nonblock;
 };
 
 INTERNAL {

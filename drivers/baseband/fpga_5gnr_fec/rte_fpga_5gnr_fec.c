@@ -13,9 +13,7 @@
 #include <rte_pci.h>
 #include <bus_pci_driver.h>
 #include <rte_byteorder.h>
-#ifdef RTE_BBDEV_OFFLOAD_COST
 #include <rte_cycles.h>
-#endif
 
 #include <rte_bbdev.h>
 #include <rte_bbdev_pmd.h>
@@ -369,6 +367,7 @@ fpga_dev_info_get(struct rte_bbdev *dev,
 	dev_info->capabilities = bbdev_capabilities;
 	dev_info->cpu_flag_reqs = NULL;
 	dev_info->data_endianness = RTE_LITTLE_ENDIAN;
+	dev_info->device_status = RTE_BBDEV_DEV_NOT_SUPPORTED;
 
 	/* Calculates number of queues assigned to device */
 	dev_info->max_num_queues = 0;
@@ -378,6 +377,14 @@ fpga_dev_info_get(struct rte_bbdev *dev,
 		if (hw_q_id != FPGA_INVALID_HW_QUEUE_ID)
 			dev_info->max_num_queues++;
 	}
+	/* Expose number of queue per operation type */
+	dev_info->num_queues[RTE_BBDEV_OP_NONE] = 0;
+	dev_info->num_queues[RTE_BBDEV_OP_TURBO_DEC] = 0;
+	dev_info->num_queues[RTE_BBDEV_OP_TURBO_ENC] = 0;
+	dev_info->num_queues[RTE_BBDEV_OP_LDPC_DEC] = dev_info->max_num_queues / 2;
+	dev_info->num_queues[RTE_BBDEV_OP_LDPC_ENC] = dev_info->max_num_queues / 2;
+	dev_info->queue_priority[RTE_BBDEV_OP_LDPC_DEC] = 1;
+	dev_info->queue_priority[RTE_BBDEV_OP_LDPC_ENC] = 1;
 }
 
 /**
@@ -789,28 +796,20 @@ static inline void
 fpga_dma_enqueue(struct fpga_queue *q, uint16_t num_desc,
 		struct rte_bbdev_stats *queue_stats)
 {
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time = 0;
 	queue_stats->acc_offload_cycles = 0;
-#else
-	RTE_SET_USED(queue_stats);
-#endif
 
 	/* Update tail and shadow_tail register */
 	q->tail = (q->tail + num_desc) & q->sw_ring_wrap_mask;
 
 	rte_wmb();
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	/* Start time measurement for enqueue function offload. */
 	start_time = rte_rdtsc_precise();
-#endif
 	mmio_write_16(q->shadow_tail_addr, q->tail);
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	rte_wmb();
 	queue_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 }
 
 /* Read flag value 0/1/ from bitmap */

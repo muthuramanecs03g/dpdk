@@ -198,6 +198,7 @@
 extern "C" {
 #endif
 
+#include <rte_compat.h>
 #include <rte_common.h>
 #include <rte_dev.h>
 #include <rte_mbuf.h>
@@ -612,6 +613,8 @@ struct rte_regexdev_info {
 	/**< Maximum payload size for a pattern match request or scan.
 	 * @see RTE_REGEXDEV_CFG_CROSS_BUFFER_SCAN_F
 	 */
+	uint16_t max_segs;
+	/**< Maximum number of mbuf segments that can be chained together. */
 	uint32_t max_rules_per_group;
 	/**< Maximum rules supported per group by this device. */
 	uint16_t max_groups;

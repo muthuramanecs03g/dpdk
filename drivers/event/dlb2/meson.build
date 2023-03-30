@@ -1,4 +1,3 @@
-
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright(c) 2019-2020 Intel Corporation
 
@@ -6,6 +5,10 @@ if not is_linux or not dpdk_conf.has('RTE_ARCH_X86_64')
         build = false
         reason = 'only supported on x86_64 Linux'
         subdir_done()
+endif
+
+if dpdk_conf.get('RTE_IOVA_IN_MBUF') == 0
+    subdir_done()
 endif
 
 sources = files(
@@ -38,7 +41,7 @@ if binutils_ok
 
     # check if all required flags already enabled (variant a).
     dlb2_avx512_on = false
-    if cc.get_define(f, args: machine_args) == '__AVX512VL__'
+    if cc.get_define('__AVX512VL__', args: machine_args) != ''
         dlb2_avx512_on = true
     endif
 

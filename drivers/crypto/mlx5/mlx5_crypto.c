@@ -171,14 +171,13 @@ mlx5_crypto_sym_session_get_size(struct rte_cryptodev *dev __rte_unused)
 static int
 mlx5_crypto_sym_session_configure(struct rte_cryptodev *dev,
 				  struct rte_crypto_sym_xform *xform,
-				  struct rte_cryptodev_sym_session *session,
-				  struct rte_mempool *mp)
+				  struct rte_cryptodev_sym_session *session)
 {
 	struct mlx5_crypto_priv *priv = dev->data->dev_private;
-	struct mlx5_crypto_session *sess_private_data;
+	struct mlx5_crypto_session *sess_private_data =
+		CRYPTODEV_GET_SYM_SESS_PRIV(session);
 	struct rte_crypto_cipher_xform *cipher;
 	uint8_t encryption_order;
-	int ret;
 
 	if (unlikely(xform->next != NULL)) {
 		DRV_LOG(ERR, "Xform next is not supported.");
@@ -189,17 +188,9 @@ mlx5_crypto_sym_session_configure(struct rte_cryptodev *dev,
 		DRV_LOG(ERR, "Only AES-XTS algorithm is supported.");
 		return -ENOTSUP;
 	}
-	ret = rte_mempool_get(mp, (void *)&sess_private_data);
-	if (ret != 0) {
-		DRV_LOG(ERR,
-			"Failed to get session %p private data from mempool.",
-			sess_private_data);
-		return -ENOMEM;
-	}
 	cipher = &xform->cipher;
 	sess_private_data->dek = mlx5_crypto_dek_prepare(priv, cipher);
 	if (sess_private_data->dek == NULL) {
-		rte_mempool_put(mp, sess_private_data);
 		DRV_LOG(ERR, "Failed to prepare dek.");
 		return -ENOMEM;
 	}
@@ -239,8 +230,6 @@ mlx5_crypto_sym_session_configure(struct rte_cryptodev *dev,
 	sess_private_data->dek_id =
 			rte_cpu_to_be_32(sess_private_data->dek->obj->id &
 					 0xffffff);
-	set_sym_session_private_data(session, dev->driver_id,
-				     sess_private_data);
 	DRV_LOG(DEBUG, "Session %p was configured.", sess_private_data);
 	return 0;
 }
@@ -250,16 +239,13 @@ mlx5_crypto_sym_session_clear(struct rte_cryptodev *dev,
 			      struct rte_cryptodev_sym_session *sess)
 {
 	struct mlx5_crypto_priv *priv = dev->data->dev_private;
-	struct mlx5_crypto_session *spriv = get_sym_session_private_data(sess,
-								dev->driver_id);
+	struct mlx5_crypto_session *spriv = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 
 	if (unlikely(spriv == NULL)) {
 		DRV_LOG(ERR, "Failed to get session %p private data.", spriv);
 		return;
 	}
 	mlx5_crypto_dek_destroy(priv, spriv->dek);
-	set_sym_session_private_data(sess, dev->driver_id, NULL);
-	rte_mempool_put(rte_mempool_from_obj(spriv), spriv);
 	DRV_LOG(DEBUG, "Session %p was cleared.", spriv);
 }
 
@@ -369,8 +355,7 @@ mlx5_crypto_wqe_set(struct mlx5_crypto_priv *priv,
 			 struct rte_crypto_op *op,
 			 struct mlx5_umr_wqe *umr)
 {
-	struct mlx5_crypto_session *sess = get_sym_session_private_data
-				(op->sym->session, mlx5_crypto_driver_id);
+	struct mlx5_crypto_session *sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 	struct mlx5_wqe_cseg *cseg = &umr->ctr;
 	struct mlx5_wqe_mkey_cseg *mkc = &umr->mkc;
 	struct mlx5_wqe_dseg *klms = &umr->kseg[0];
@@ -1007,7 +992,15 @@ static const struct rte_pci_id mlx5_crypto_pci_id_map[] = {
 		},
 		{
 			RTE_PCI_DEVICE(PCI_VENDOR_ID_MELLANOX,
-					PCI_DEVICE_ID_MELLANOX_CONNECTX6DXBF)
+					PCI_DEVICE_ID_MELLANOX_BLUEFIELD2)
+		},
+		{
+			RTE_PCI_DEVICE(PCI_VENDOR_ID_MELLANOX,
+					PCI_DEVICE_ID_MELLANOX_CONNECTX7)
+		},
+		{
+			RTE_PCI_DEVICE(PCI_VENDOR_ID_MELLANOX,
+					PCI_DEVICE_ID_MELLANOX_BLUEFIELD3)
 		},
 		{
 			.vendor_id = 0

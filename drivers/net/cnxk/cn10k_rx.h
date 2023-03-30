@@ -4,10 +4,11 @@
 #ifndef __CN10K_RX_H__
 #define __CN10K_RX_H__
 
-#include <rte_ether.h>
+#include <rte_ethdev.h>
 #include <rte_vect.h>
+#include "cn10k_rxtx.h"
 
-#include <cnxk_ethdev.h>
+#define NSEC_PER_SEC             1000000000L
 
 #define NIX_RX_OFFLOAD_NONE	     (0)
 #define NIX_RX_OFFLOAD_RSS_F	     BIT(0)
@@ -42,17 +43,12 @@
 		 (uint64_t *)(((uintptr_t)((uint64_t *)(b))[i]) - (o)) :       \
 		       (uint64_t *)(((uintptr_t)(b)) + CQE_SZ(i) - (o)))
 
-#define NIX_RX_SEC_UCC_CONST                                                   \
-	((RTE_MBUF_F_RX_IP_CKSUM_BAD >> 1) << 8 |                              \
-	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1)    \
-		 << 24 |                                                       \
-	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_BAD) >> 1)     \
-		 << 32 |                                                       \
-	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1)    \
-		 << 40 |                                                       \
-	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1)    \
-		 << 48 |                                                       \
-	 (RTE_MBUF_F_RX_IP_CKSUM_GOOD >> 1) << 56)
+#define NIX_RX_SEC_UCC_CONST                                                                       \
+	((RTE_MBUF_F_RX_IP_CKSUM_BAD >> 1) |                                                       \
+	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1) << 8 |                 \
+	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_BAD) >> 1) << 16 |                 \
+	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1) << 32 |                \
+	 ((RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1) << 48)
 
 #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
 static inline void
@@ -475,16 +471,23 @@ nix_sec_meta_to_mbuf_sc(uint64_t cq_w1, uint64_t cq_w5, const uint64_t sa_base,
 			inner->data_len = len;
 			*(uint64_t *)(&inner->rearm_data) = mbuf_init;
 
-			inner->ol_flags = ((ucc == CPT_COMP_WARN) ?
+			inner->ol_flags = ((CPT_COMP_HWGOOD_MASK & (1U << ucc)) ?
 					   RTE_MBUF_F_RX_SEC_OFFLOAD :
 					   (RTE_MBUF_F_RX_SEC_OFFLOAD |
 					    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED));
 
 			ucc = hdr->w3.uc_ccode;
-			inner->ol_flags |= ((ucc & 0xF0) == 0xF0) ?
-				((NIX_RX_SEC_UCC_CONST >> ((ucc & 0xF) << 3))
-				 & 0xFF) << 1 : 0;
-		} else if (!(hdr->w0.err_sum) && !(hdr->w0.reas_sts)) {
+
+			if (ucc && ucc < 0xED) {
+				inner->ol_flags |= RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+			} else {
+				ucc += 3; /* To make codes in 0xFx series except 0 */
+				inner->ol_flags |= ((ucc & 0xF0) == 0xF0) ?
+						   ((NIX_RX_SEC_UCC_CONST >> ((ucc & 0xF) << 3))
+						    & 0xFF) << 1 : RTE_MBUF_F_RX_IP_CKSUM_GOOD;
+			}
+		} else if ((!(hdr->w0.err_sum) || roc_ie_ot_ucc_is_success(hdr->w3.uc_ccode)) &&
+			   !(hdr->w0.reas_sts)) {
 			/* Reassembly success */
 			inner = nix_sec_reassemble_frags(hdr, cq_w1, cq_w5,
 							 mbuf_init);
@@ -541,15 +544,21 @@ nix_sec_meta_to_mbuf_sc(uint64_t cq_w1, uint64_t cq_w5, const uint64_t sa_base,
 		inner->data_len = len;
 		*(uint64_t *)(&inner->rearm_data) = mbuf_init;
 
-		inner->ol_flags = ((ucc == CPT_COMP_WARN) ?
+		inner->ol_flags = ((CPT_COMP_HWGOOD_MASK & (1U << ucc)) ?
 				   RTE_MBUF_F_RX_SEC_OFFLOAD :
 				   (RTE_MBUF_F_RX_SEC_OFFLOAD |
 				    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED));
 
 		ucc = hdr->w3.uc_ccode;
-		inner->ol_flags |= ((ucc & 0xF0) == 0xF0) ?
-			((NIX_RX_SEC_UCC_CONST >> ((ucc & 0xF) << 3))
-			 & 0xFF) << 1 : 0;
+
+		if (ucc && ucc < 0xED) {
+			inner->ol_flags |= RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+		} else {
+			ucc += 3; /* To make codes in 0xFx series except 0 */
+			inner->ol_flags |= ((ucc & 0xF0) == 0xF0) ?
+					   ((NIX_RX_SEC_UCC_CONST >> ((ucc & 0xF) << 3))
+					    & 0xFF) << 1 : RTE_MBUF_F_RX_IP_CKSUM_GOOD;
+		}
 
 		/* Store meta in lmtline to free
 		 * Assume all meta's from same aura.
@@ -596,7 +605,8 @@ nix_sec_meta_to_mbuf(uint64_t cq_w1, uint64_t cq_w5, uintptr_t inb_sa,
 	RTE_MEMPOOL_CHECK_COOKIES(inner->pool, (void **)&inner, 1, 1);
 
 	if (flags & NIX_RX_REAS_F && hdr->w0.num_frags) {
-		if (!(hdr->w0.err_sum) && !(hdr->w0.reas_sts)) {
+		if ((!(hdr->w0.err_sum) || roc_ie_ot_ucc_is_success(hdr->w3.uc_ccode)) &&
+		    !(hdr->w0.reas_sts)) {
 			/* Reassembly success */
 			nix_sec_reassemble_frags(hdr, cq_w1, cq_w5, mbuf_init);
 
@@ -682,6 +692,7 @@ nix_cqe_xtract_mseg(const union nix_rx_parse_u *rx, struct rte_mbuf *mbuf,
 		    uint64_t rearm, const uint16_t flags)
 {
 	const rte_iova_t *iova_list;
+	uint16_t later_skip = 0;
 	struct rte_mbuf *head;
 	const rte_iova_t *eol;
 	uint8_t nb_segs;
@@ -720,10 +731,11 @@ nix_cqe_xtract_mseg(const union nix_rx_parse_u *rx, struct rte_mbuf *mbuf,
 	nb_segs--;
 
 	rearm = rearm & ~0xFFFF;
+	later_skip = (uintptr_t)mbuf->buf_addr - (uintptr_t)mbuf;
 
 	head = mbuf;
 	while (nb_segs) {
-		mbuf->next = ((struct rte_mbuf *)*iova_list) - 1;
+		mbuf->next = (struct rte_mbuf *)(*iova_list - later_skip);
 		mbuf = mbuf->next;
 
 		RTE_MEMPOOL_CHECK_COOKIES(mbuf->pool, (void **)&mbuf, 1, 1);
@@ -1201,9 +1213,11 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 			mbuf23 = vqsubq_u64(mbuf23, data_off);
 		} else {
 			mbuf01 =
-				vsubq_u64(vld1q_u64((uint64_t *)cq0), data_off);
-			mbuf23 = vsubq_u64(vld1q_u64((uint64_t *)(cq0 + 16)),
-					   data_off);
+				vsubq_u64(vld1q_u64((uint64_t *)cq0),
+					  vdupq_n_u64(sizeof(struct rte_mbuf)));
+			mbuf23 =
+				vsubq_u64(vld1q_u64((uint64_t *)(cq0 + 16)),
+					  vdupq_n_u64(sizeof(struct rte_mbuf)));
 		}
 
 		/* Move mbufs to scalar registers for future use */
@@ -1305,12 +1319,6 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 			ol_flags3 |= nix_rx_olflags_get(lookup_mem, cq3_w1);
 		}
 
-		/* Mark mempool obj as "get" as it is alloc'ed by NIX */
-		RTE_MEMPOOL_CHECK_COOKIES(mbuf0->pool, (void **)&mbuf0, 1, 1);
-		RTE_MEMPOOL_CHECK_COOKIES(mbuf1->pool, (void **)&mbuf1, 1, 1);
-		RTE_MEMPOOL_CHECK_COOKIES(mbuf2->pool, (void **)&mbuf2, 1, 1);
-		RTE_MEMPOOL_CHECK_COOKIES(mbuf3->pool, (void **)&mbuf3, 1, 1);
-
 		/* Translate meta to mbuf */
 		if (flags & NIX_RX_OFFLOAD_SECURITY_F) {
 			uint64_t cq0_w5 = *CQE_PTR_OFF(cq0, 0, 40, flags);
@@ -1321,6 +1329,7 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 			uintptr_t cpth1 = (uintptr_t)mbuf1 + d_off;
 			uintptr_t cpth2 = (uintptr_t)mbuf2 + d_off;
 			uintptr_t cpth3 = (uintptr_t)mbuf3 + d_off;
+			uint8_t code;
 
 			uint64x2_t inner0, inner1, inner2, inner3;
 			uint64x2_t wqe01, wqe23, sa01, sa23;
@@ -1356,42 +1365,46 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 			sa01 = vaddq_u64(sa01, vdupq_n_u64(sa_base));
 			sa23 = vaddq_u64(sa23, vdupq_n_u64(sa_base));
 
-			const uint8x16_t tbl = {
-				/* ROC_IE_OT_UCC_SUCCESS_SA_SOFTEXP_FIRST */
-				0,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_IP_BADCSUM */
-				RTE_MBUF_F_RX_IP_CKSUM_BAD >> 1,
-				/* ROC_IE_OT_UCC_SUCCESS_SA_SOFTEXP_AGAIN */
-				0,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_L4_GOODCSUM */
-				(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
-				 RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_L4_BADCSUM */
-				(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
-				 RTE_MBUF_F_RX_L4_CKSUM_BAD) >> 1,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_UDPESP_NZCSUM */
-				(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
-				 RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_UDP_ZEROCSUM */
-				(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
-				 RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
-				/* ROC_IE_OT_UCC_SUCCESS_PKT_IP_GOODCSUM */
-				RTE_MBUF_F_RX_IP_CKSUM_GOOD >> 1,
-				/* HW_CCODE -> RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED */
-				1, 0, 1, 1, 1, 1, 0, 1,
-			};
+			const uint8x16x2_t tbl = {{
+				{
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_IP_BADCSUM */
+					RTE_MBUF_F_RX_IP_CKSUM_BAD >> 1,
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_L4_GOODCSUM */
+					(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
+					 RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_L4_BADCSUM */
+					(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
+					 RTE_MBUF_F_RX_L4_CKSUM_BAD) >> 1,
+					1,
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_UDPESP_NZCSUM */
+					(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
+					 RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
+					1,
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_UDP_ZEROCSUM */
+					(RTE_MBUF_F_RX_IP_CKSUM_GOOD |
+					RTE_MBUF_F_RX_L4_CKSUM_GOOD) >> 1,
+					3, 1, 3, 3, 3, 3, 1, 3, 1,
+				},
+				{
+					1, 1, 1,
+					/* ROC_IE_OT_UCC_SUCCESS_PKT_IP_GOODCSUM */
+					RTE_MBUF_F_RX_IP_CKSUM_GOOD >> 1,
+					/* Rest 0 to indicate RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED */
+					0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+				},
+			}};
 
-			const int8x8_t err_off = {
-				/* UCC of significance starts from 0xF0 */
-				0xF0,
-				/* Move HW_CCODE from 0:6 -> 8:14 */
-				-8,
-				0xF0,
-				-8,
-				0xF0,
-				-8,
-				0xF0,
-				-8,
+			const uint8x8_t err_off = {
+				/* UCC */
+				0xED,
+				/* HW_CCODE 0:6 -> 7:D */
+				-7,
+				0xED,
+				-7,
+				0xED,
+				-7,
+				0xED,
+				-7,
 			};
 
 			ucc = vdup_n_u8(0);
@@ -1399,8 +1412,13 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 			ucc = vset_lane_u16(*(uint16_t *)(cpth1 + 30), ucc, 1);
 			ucc = vset_lane_u16(*(uint16_t *)(cpth2 + 30), ucc, 2);
 			ucc = vset_lane_u16(*(uint16_t *)(cpth3 + 30), ucc, 3);
-			ucc = vsub_s8(ucc, err_off);
-			ucc = vqtbl1_u8(tbl, ucc);
+			ucc = vsub_u8(ucc, err_off);
+
+			/* Table lookup to get the corresponding flags, Out of the range
+			 * from this lookup will have value 0 and consider as
+			 * RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED.
+			 */
+			ucc = vqtbl2_u8(tbl, ucc);
 
 			RTE_BUILD_BUG_ON(NPC_LT_LC_IP != 2);
 			RTE_BUILD_BUG_ON(NPC_LT_LC_IP_OPT != 3);
@@ -1482,10 +1500,11 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 				nix_sec_meta_to_mbuf(cq0_w1, cq0_w5, sa, cpth0,
 						     mbuf0, &f0, &ol_flags0,
 						     flags, &rearm0);
-				ol_flags0 |= ((uint64_t)vget_lane_u8(ucc, 0))
-					     << 1;
-				ol_flags0 |= (RTE_MBUF_F_RX_SEC_OFFLOAD |
-					(uint64_t)vget_lane_u8(ucc, 1) << 19);
+				code = vget_lane_u8(ucc, 0);
+				ol_flags0 |= code ? (code > 1 ? ((uint64_t)code) << 1 : 0) :
+						    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+
+				ol_flags0 |= ((uint64_t)(vget_lane_u8(ucc, 1)) << 18);
 			}
 
 			if (cq1_w1 & BIT(11)) {
@@ -1506,10 +1525,10 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 				nix_sec_meta_to_mbuf(cq1_w1, cq1_w5, sa, cpth1,
 						     mbuf1, &f1, &ol_flags1,
 						     flags, &rearm1);
-				ol_flags1 |= ((uint64_t)vget_lane_u8(ucc, 2))
-					     << 1;
-				ol_flags1 |= (RTE_MBUF_F_RX_SEC_OFFLOAD |
-					(uint64_t)vget_lane_u8(ucc, 3) << 19);
+				code = vget_lane_u8(ucc, 2);
+				ol_flags1 |= code ? (code > 1 ? ((uint64_t)code) << 1 : 0) :
+						    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+				ol_flags1 |= ((uint64_t)(vget_lane_u8(ucc, 3)) << 18);
 			}
 
 			if (cq2_w1 & BIT(11)) {
@@ -1530,10 +1549,10 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 				nix_sec_meta_to_mbuf(cq2_w1, cq2_w5, sa, cpth2,
 						     mbuf2, &f2, &ol_flags2,
 						     flags, &rearm2);
-				ol_flags2 |= ((uint64_t)vget_lane_u8(ucc, 4))
-					     << 1;
-				ol_flags2 |= (RTE_MBUF_F_RX_SEC_OFFLOAD |
-					(uint64_t)vget_lane_u8(ucc, 5) << 19);
+				code = vget_lane_u8(ucc, 4);
+				ol_flags2 |= code ? (code > 1 ? ((uint64_t)code) << 1 : 0) :
+						    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+				ol_flags2 |= ((uint64_t)(vget_lane_u8(ucc, 5)) << 18);
 			}
 
 			if (cq3_w1 & BIT(11)) {
@@ -1554,10 +1573,10 @@ cn10k_nix_recv_pkts_vector(void *args, struct rte_mbuf **mbufs, uint16_t pkts,
 				nix_sec_meta_to_mbuf(cq3_w1, cq3_w5, sa, cpth3,
 						     mbuf3, &f3, &ol_flags3,
 						     flags, &rearm3);
-				ol_flags3 |= ((uint64_t)vget_lane_u8(ucc, 6))
-					     << 1;
-				ol_flags3 |= (RTE_MBUF_F_RX_SEC_OFFLOAD |
-					(uint64_t)vget_lane_u8(ucc, 7) << 19);
+				code = vget_lane_u8(ucc, 6);
+				ol_flags3 |= code ? (code > 1 ? ((uint64_t)code) << 1 : 0) :
+						    RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+				ol_flags3 |= ((uint64_t)(vget_lane_u8(ucc, 7)) << 18);
 			}
 		}
 

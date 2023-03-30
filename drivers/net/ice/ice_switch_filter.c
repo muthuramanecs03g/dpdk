@@ -592,8 +592,8 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 			eth_spec = item->spec;
 			eth_mask = item->mask;
 			if (eth_spec && eth_mask) {
-				const uint8_t *a = eth_mask->src.addr_bytes;
-				const uint8_t *b = eth_mask->dst.addr_bytes;
+				const uint8_t *a = eth_mask->hdr.src_addr.addr_bytes;
+				const uint8_t *b = eth_mask->hdr.dst_addr.addr_bytes;
 				if (tunnel_valid)
 					input = &inner_input_set;
 				else
@@ -610,7 +610,7 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 						break;
 					}
 				}
-				if (eth_mask->type)
+				if (eth_mask->hdr.ether_type)
 					*input |= ICE_INSET_ETHERTYPE;
 				list[t].type = (tunnel_valid  == 0) ?
 					ICE_MAC_OFOS : ICE_MAC_IL;
@@ -620,31 +620,31 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 				h = &list[t].h_u.eth_hdr;
 				m = &list[t].m_u.eth_hdr;
 				for (j = 0; j < RTE_ETHER_ADDR_LEN; j++) {
-					if (eth_mask->src.addr_bytes[j]) {
+					if (eth_mask->hdr.src_addr.addr_bytes[j]) {
 						h->src_addr[j] =
-						eth_spec->src.addr_bytes[j];
+						eth_spec->hdr.src_addr.addr_bytes[j];
 						m->src_addr[j] =
-						eth_mask->src.addr_bytes[j];
+						eth_mask->hdr.src_addr.addr_bytes[j];
 						i = 1;
 						input_set_byte++;
 					}
-					if (eth_mask->dst.addr_bytes[j]) {
+					if (eth_mask->hdr.dst_addr.addr_bytes[j]) {
 						h->dst_addr[j] =
-						eth_spec->dst.addr_bytes[j];
+						eth_spec->hdr.dst_addr.addr_bytes[j];
 						m->dst_addr[j] =
-						eth_mask->dst.addr_bytes[j];
+						eth_mask->hdr.dst_addr.addr_bytes[j];
 						i = 1;
 						input_set_byte++;
 					}
 				}
 				if (i)
 					t++;
-				if (eth_mask->type) {
+				if (eth_mask->hdr.ether_type) {
 					list[t].type = ICE_ETYPE_OL;
 					list[t].h_u.ethertype.ethtype_id =
-						eth_spec->type;
+						eth_spec->hdr.ether_type;
 					list[t].m_u.ethertype.ethtype_id =
-						eth_mask->type;
+						eth_mask->hdr.ether_type;
 					input_set_byte += 2;
 					t++;
 				}
@@ -990,17 +990,17 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 			input = &inner_input_set;
 			if (vxlan_spec && vxlan_mask) {
 				list[t].type = ICE_VXLAN;
-				if (vxlan_mask->vni[0] ||
-					vxlan_mask->vni[1] ||
-					vxlan_mask->vni[2]) {
+				if (vxlan_mask->hdr.vni[0] ||
+					vxlan_mask->hdr.vni[1] ||
+					vxlan_mask->hdr.vni[2]) {
 					list[t].h_u.tnl_hdr.vni =
-						(vxlan_spec->vni[2] << 16) |
-						(vxlan_spec->vni[1] << 8) |
-						vxlan_spec->vni[0];
+						(vxlan_spec->hdr.vni[2] << 16) |
+						(vxlan_spec->hdr.vni[1] << 8) |
+						vxlan_spec->hdr.vni[0];
 					list[t].m_u.tnl_hdr.vni =
-						(vxlan_mask->vni[2] << 16) |
-						(vxlan_mask->vni[1] << 8) |
-						vxlan_mask->vni[0];
+						(vxlan_mask->hdr.vni[2] << 16) |
+						(vxlan_mask->hdr.vni[1] << 8) |
+						vxlan_mask->hdr.vni[0];
 					*input |= ICE_INSET_VXLAN_VNI;
 					input_set_byte += 2;
 				}
@@ -1087,14 +1087,14 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 					*input |= ICE_INSET_VLAN_INNER;
 				}
 
-				if (vlan_mask->tci) {
+				if (vlan_mask->hdr.vlan_tci) {
 					list[t].h_u.vlan_hdr.vlan =
-						vlan_spec->tci;
+						vlan_spec->hdr.vlan_tci;
 					list[t].m_u.vlan_hdr.vlan =
-						vlan_mask->tci;
+						vlan_mask->hdr.vlan_tci;
 					input_set_byte += 2;
 				}
-				if (vlan_mask->inner_type) {
+				if (vlan_mask->hdr.eth_proto) {
 					rte_flow_error_set(error, EINVAL,
 						RTE_FLOW_ERROR_TYPE_ITEM,
 						item,
@@ -1405,9 +1405,9 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 				return false;
 			}
 			if (gtp_spec && gtp_mask) {
-				if (gtp_mask->v_pt_rsv_flags ||
-				    gtp_mask->msg_type ||
-				    gtp_mask->msg_len) {
+				if (gtp_mask->hdr.gtp_hdr_info ||
+				    gtp_mask->hdr.msg_type ||
+				    gtp_mask->hdr.plen) {
 					rte_flow_error_set(error, EINVAL,
 						RTE_FLOW_ERROR_TYPE_ITEM,
 						item,
@@ -1415,13 +1415,13 @@ ice_switch_parse_pattern(const struct rte_flow_item pattern[],
 					return false;
 				}
 				input = &outer_input_set;
-				if (gtp_mask->teid)
+				if (gtp_mask->hdr.teid)
 					*input |= ICE_INSET_GTPU_TEID;
 				list[t].type = ICE_GTP;
 				list[t].h_u.gtp_hdr.teid =
-					gtp_spec->teid;
+					gtp_spec->hdr.teid;
 				list[t].m_u.gtp_hdr.teid =
-					gtp_mask->teid;
+					gtp_mask->hdr.teid;
 				input_set_byte += 4;
 				t++;
 			}
@@ -1715,6 +1715,7 @@ ice_switch_parse_action(struct ice_pf *pf,
 	struct rte_eth_dev_data *dev_data = pf->adapter->pf.dev_data;
 	const struct rte_flow_action_queue *act_q;
 	const struct rte_flow_action_rss *act_qgrop;
+	const struct rte_flow_action_mark *act_mark;
 	uint16_t base_queue, i;
 	const struct rte_flow_action *action;
 	enum rte_flow_action_type action_type;
@@ -1765,6 +1766,13 @@ ice_switch_parse_action(struct ice_pf *pf,
 		case RTE_FLOW_ACTION_TYPE_DROP:
 			rule_info->sw_act.fltr_act =
 				ICE_DROP_PACKET;
+			break;
+
+		case RTE_FLOW_ACTION_TYPE_MARK:
+			act_mark = action->conf;
+			rule_info->sw_act.fltr_act =
+				ICE_SET_MARK;
+			rule_info->sw_act.markid = act_mark->id;
 			break;
 
 		case RTE_FLOW_ACTION_TYPE_VOID:
@@ -1822,6 +1830,7 @@ ice_switch_check_action(const struct rte_flow_action *actions,
 		case RTE_FLOW_ACTION_TYPE_RSS:
 		case RTE_FLOW_ACTION_TYPE_QUEUE:
 		case RTE_FLOW_ACTION_TYPE_DROP:
+		case RTE_FLOW_ACTION_TYPE_MARK:
 		case RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT:
 		case RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR:
 			actions_num++;
@@ -1879,7 +1888,7 @@ ice_switch_parse_pattern_action(struct ice_adapter *ad,
 				eth_mask = item->mask;
 			else
 				continue;
-			if (eth_mask->type == UINT16_MAX)
+			if (eth_mask->hdr.ether_type == UINT16_MAX)
 				tun_type = ICE_SW_TUN_AND_NON_TUN;
 		}
 

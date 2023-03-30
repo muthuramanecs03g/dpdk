@@ -670,15 +670,10 @@ dpaa_sec_dump(struct dpaa_sec_op_ctx *ctx, struct dpaa_sec_qp *qp)
 	struct qm_sg_entry sg[2];
 
 	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)
-		sess = (dpaa_sec_session *)
-			get_sym_session_private_data(
-					op->sym->session,
-					dpaa_cryptodev_driver_id);
+		sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 #ifdef RTE_LIBRTE_SECURITY
 	else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION)
-		sess = (dpaa_sec_session *)
-			get_sec_session_private_data(
-					op->sym->sec_session);
+		sess = SECURITY_GET_SESS_PRIV(op->sym->session);
 #endif
 	if (sess == NULL) {
 		printf("session is NULL\n");
@@ -759,14 +754,14 @@ mbuf_dump:
 	printf("ctx info:\n");
 	printf("job->sg[0] output info:\n");
 	memcpy(&sg[0], &job->sg[0], sizeof(sg[0]));
-	printf("\taddr = %"PRIx64",\n\tlen = %d,\n\tfinal = %d,\n\textention = %d"
+	printf("\taddr = %"PRIx64",\n\tlen = %d,\n\tfinal = %d,\n\textension = %d"
 		"\n\tbpid = %d\n\toffset = %d\n",
 		(uint64_t)sg[0].addr, sg[0].length, sg[0].final,
 		sg[0].extension, sg[0].bpid, sg[0].offset);
 	printf("\njob->sg[1] input info:\n");
 	memcpy(&sg[1], &job->sg[1], sizeof(sg[1]));
 	hw_sg_to_cpu(&sg[1]);
-	printf("\taddr = %"PRIx64",\n\tlen = %d,\n\tfinal = %d,\n\textention = %d"
+	printf("\taddr = %"PRIx64",\n\tlen = %d,\n\tfinal = %d,\n\textension = %d"
 		"\n\tbpid = %d\n\toffset = %d\n",
 		(uint64_t)sg[1].addr, sg[1].length, sg[1].final,
 		sg[1].extension, sg[1].bpid, sg[1].offset);
@@ -1927,16 +1922,11 @@ dpaa_sec_enqueue_burst(void *qp, struct rte_crypto_op **ops,
 
 			switch (op->sess_type) {
 			case RTE_CRYPTO_OP_WITH_SESSION:
-				ses = (dpaa_sec_session *)
-					get_sym_session_private_data(
-						op->sym->session,
-						dpaa_cryptodev_driver_id);
+				ses = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 				break;
 #ifdef RTE_LIB_SECURITY
 			case RTE_CRYPTO_OP_SECURITY_SESSION:
-				ses = (dpaa_sec_session *)
-					get_sec_session_private_data(
-							op->sym->sec_session);
+				ses = SECURITY_GET_SESS_PRIV(op->sym->session);
 				break;
 #endif
 			default:
@@ -2676,30 +2666,18 @@ err1:
 static int
 dpaa_sec_sym_session_configure(struct rte_cryptodev *dev,
 		struct rte_crypto_sym_xform *xform,
-		struct rte_cryptodev_sym_session *sess,
-		struct rte_mempool *mempool)
+		struct rte_cryptodev_sym_session *sess)
 {
-	void *sess_private_data;
+	void *sess_private_data = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 	int ret;
 
 	PMD_INIT_FUNC_TRACE();
 
-	if (rte_mempool_get(mempool, &sess_private_data)) {
-		DPAA_SEC_ERR("Couldn't get object from session mempool");
-		return -ENOMEM;
-	}
-
 	ret = dpaa_sec_set_session_parameters(dev, xform, sess_private_data);
 	if (ret != 0) {
 		DPAA_SEC_ERR("failed to configure session parameters");
-
-		/* Return session to mempool */
-		rte_mempool_put(mempool, sess_private_data);
 		return ret;
 	}
-
-	set_sym_session_private_data(sess, dev->driver_id,
-			sess_private_data);
 
 	ret = dpaa_sec_prep_cdb(sess_private_data);
 	if (ret) {
@@ -2714,7 +2692,6 @@ static inline void
 free_session_memory(struct rte_cryptodev *dev, dpaa_sec_session *s)
 {
 	struct dpaa_sec_dev_private *qi = dev->data->dev_private;
-	struct rte_mempool *sess_mp = rte_mempool_from_obj((void *)s);
 	uint8_t i;
 
 	for (i = 0; i < MAX_DPAA_CORES; i++) {
@@ -2724,7 +2701,6 @@ free_session_memory(struct rte_cryptodev *dev, dpaa_sec_session *s)
 		s->qp[i] = NULL;
 	}
 	free_session_data(s);
-	rte_mempool_put(sess_mp, (void *)s);
 }
 
 /** Clear the memory of session so it doesn't leave key material behind */
@@ -2733,14 +2709,10 @@ dpaa_sec_sym_session_clear(struct rte_cryptodev *dev,
 		struct rte_cryptodev_sym_session *sess)
 {
 	PMD_INIT_FUNC_TRACE();
-	uint8_t index = dev->driver_id;
-	void *sess_priv = get_sym_session_private_data(sess, index);
+	void *sess_priv = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 	dpaa_sec_session *s = (dpaa_sec_session *)sess_priv;
 
-	if (sess_priv) {
-		free_session_memory(dev, s);
-		set_sym_session_private_data(sess, index, NULL);
-	}
+	free_session_memory(dev, s);
 }
 
 #ifdef RTE_LIB_SECURITY
@@ -3269,17 +3241,11 @@ out:
 static int
 dpaa_sec_security_session_create(void *dev,
 				 struct rte_security_session_conf *conf,
-				 struct rte_security_session *sess,
-				 struct rte_mempool *mempool)
+				 struct rte_security_session *sess)
 {
-	void *sess_private_data;
+	void *sess_private_data = SECURITY_GET_SESS_PRIV(sess);
 	struct rte_cryptodev *cdev = (struct rte_cryptodev *)dev;
 	int ret;
-
-	if (rte_mempool_get(mempool, &sess_private_data)) {
-		DPAA_SEC_ERR("Couldn't get object from session mempool");
-		return -ENOMEM;
-	}
 
 	switch (conf->protocol) {
 	case RTE_SECURITY_PROTOCOL_IPSEC:
@@ -3297,12 +3263,8 @@ dpaa_sec_security_session_create(void *dev,
 	}
 	if (ret != 0) {
 		DPAA_SEC_ERR("failed to configure session parameters");
-		/* Return session to mempool */
-		rte_mempool_put(mempool, sess_private_data);
 		return ret;
 	}
-
-	set_sec_session_private_data(sess, sess_private_data);
 
 	ret = dpaa_sec_prep_cdb(sess_private_data);
 	if (ret) {
@@ -3319,15 +3281,21 @@ dpaa_sec_security_session_destroy(void *dev __rte_unused,
 		struct rte_security_session *sess)
 {
 	PMD_INIT_FUNC_TRACE();
-	void *sess_priv = get_sec_session_private_data(sess);
+	void *sess_priv = SECURITY_GET_SESS_PRIV(sess);
 	dpaa_sec_session *s = (dpaa_sec_session *)sess_priv;
 
 	if (sess_priv) {
 		free_session_memory((struct rte_cryptodev *)dev, s);
-		set_sec_session_private_data(sess, NULL);
 	}
 	return 0;
 }
+
+static unsigned int
+dpaa_sec_security_session_get_size(void *device __rte_unused)
+{
+	return sizeof(dpaa_sec_session);
+}
+
 #endif
 static int
 dpaa_sec_dev_configure(struct rte_cryptodev *dev __rte_unused,
@@ -3586,6 +3554,7 @@ dpaa_sec_capabilities_get(void *device __rte_unused)
 static const struct rte_security_ops dpaa_sec_security_ops = {
 	.session_create = dpaa_sec_security_session_create,
 	.session_update = NULL,
+	.session_get_size = dpaa_sec_security_session_get_size,
 	.session_stats_get = NULL,
 	.session_destroy = dpaa_sec_security_session_destroy,
 	.set_pkt_metadata = NULL,

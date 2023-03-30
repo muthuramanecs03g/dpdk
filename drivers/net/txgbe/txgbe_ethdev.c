@@ -114,6 +114,7 @@ static int txgbe_dev_interrupt_get_status(struct rte_eth_dev *dev,
 static int txgbe_dev_interrupt_action(struct rte_eth_dev *dev,
 				      struct rte_intr_handle *handle);
 static void txgbe_dev_interrupt_handler(void *param);
+static void txgbe_dev_detect_sfp(void *param);
 static void txgbe_dev_interrupt_delayed_handler(void *param);
 static void txgbe_configure_msix(struct rte_eth_dev *dev);
 
@@ -1535,13 +1536,23 @@ txgbe_dev_phy_intr_setup(struct rte_eth_dev *dev)
 {
 	struct txgbe_hw *hw = TXGBE_DEV_HW(dev);
 	struct txgbe_interrupt *intr = TXGBE_DEV_INTR(dev);
+	u8 device_type = hw->subsystem_device_id & 0xF0;
 	uint32_t gpie;
 
-	gpie = rd32(hw, TXGBE_GPIOINTEN);
-	gpie |= TXGBE_GPIOBIT_6;
-	wr32(hw, TXGBE_GPIOINTEN, gpie);
+	if (device_type != TXGBE_DEV_ID_MAC_XAUI &&
+			device_type != TXGBE_DEV_ID_MAC_SGMII) {
+		gpie = rd32(hw, TXGBE_GPIOINTEN);
+		gpie |= TXGBE_GPIOBIT_2 | TXGBE_GPIOBIT_3 | TXGBE_GPIOBIT_6;
+		wr32(hw, TXGBE_GPIOINTEN, gpie);
+
+		gpie = rd32(hw, TXGBE_GPIOINTTYPE);
+		gpie |= TXGBE_GPIOBIT_2 | TXGBE_GPIOBIT_3 | TXGBE_GPIOBIT_6;
+		wr32(hw, TXGBE_GPIOINTTYPE, gpie);
+	}
+
 	intr->mask_misc |= TXGBE_ICRMISC_GPIO;
 	intr->mask_misc |= TXGBE_ICRMISC_ANDONE;
+	intr->mask_misc |= TXGBE_ICRMISC_HEAT;
 }
 
 int
@@ -1647,6 +1658,7 @@ txgbe_dev_start(struct rte_eth_dev *dev)
 	PMD_INIT_FUNC_TRACE();
 
 	/* Stop the link setup handler before resetting the HW. */
+	rte_eal_alarm_cancel(txgbe_dev_detect_sfp, dev);
 	rte_eal_alarm_cancel(txgbe_dev_setup_link_alarm_handler, dev);
 
 	/* disable uio/vfio intr/eventfd mapping */
@@ -1879,6 +1891,7 @@ txgbe_dev_stop(struct rte_eth_dev *dev)
 
 	PMD_INIT_FUNC_TRACE();
 
+	rte_eal_alarm_cancel(txgbe_dev_detect_sfp, dev);
 	rte_eal_alarm_cancel(txgbe_dev_setup_link_alarm_handler, dev);
 
 	/* disable interrupts */
@@ -2672,6 +2685,73 @@ txgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev)
 	return NULL;
 }
 
+static void
+txgbe_dev_detect_sfp(void *param)
+{
+	struct rte_eth_dev *dev = (struct rte_eth_dev *)param;
+	struct txgbe_hw *hw = TXGBE_DEV_HW(dev);
+	s32 err;
+
+	err = hw->phy.identify_sfp(hw);
+	if (err == TXGBE_ERR_SFP_NOT_SUPPORTED) {
+		PMD_DRV_LOG(ERR, "Unsupported SFP+ module type was detected.");
+	} else if (err == TXGBE_ERR_SFP_NOT_PRESENT) {
+		PMD_DRV_LOG(INFO, "SFP not present.");
+	} else if (err == 0) {
+		hw->mac.setup_sfp(hw);
+		PMD_DRV_LOG(INFO, "detected SFP+: %d\n", hw->phy.sfp_type);
+		txgbe_dev_setup_link_alarm_handler(dev);
+		txgbe_dev_link_update(dev, 0);
+	}
+}
+
+static void
+txgbe_dev_sfp_event(struct rte_eth_dev *dev)
+{
+	struct txgbe_interrupt *intr = TXGBE_DEV_INTR(dev);
+	struct txgbe_hw *hw = TXGBE_DEV_HW(dev);
+	u32 reg;
+
+	wr32(hw, TXGBE_GPIOINTMASK, 0xFF);
+	reg = rd32(hw, TXGBE_GPIORAWINTSTAT);
+	if (reg & TXGBE_GPIOBIT_2) {
+		wr32(hw, TXGBE_GPIOEOI, TXGBE_GPIOBIT_2);
+		rte_eal_alarm_set(1000 * 100, txgbe_dev_detect_sfp, dev);
+	}
+	if (reg & TXGBE_GPIOBIT_3) {
+		wr32(hw, TXGBE_GPIOEOI, TXGBE_GPIOBIT_3);
+		intr->flags |= TXGBE_FLAG_NEED_LINK_UPDATE;
+	}
+	if (reg & TXGBE_GPIOBIT_6) {
+		wr32(hw, TXGBE_GPIOEOI, TXGBE_GPIOBIT_6);
+		intr->flags |= TXGBE_FLAG_NEED_LINK_UPDATE;
+	}
+
+	wr32(hw, TXGBE_GPIOINTMASK, 0);
+}
+
+static void
+txgbe_dev_overheat(struct rte_eth_dev *dev)
+{
+	struct txgbe_hw *hw = TXGBE_DEV_HW(dev);
+	s32 temp_state;
+
+	temp_state = hw->phy.check_overtemp(hw);
+	if (!temp_state)
+		return;
+
+	if (temp_state == TXGBE_ERR_UNDERTEMP) {
+		PMD_DRV_LOG(CRIT, "Network adapter has been started again, "
+			"since the temperature has been back to normal state.");
+		wr32m(hw, TXGBE_PBRXCTL, TXGBE_PBRXCTL_ENA, TXGBE_PBRXCTL_ENA);
+		txgbe_dev_set_link_up(dev);
+	} else if (temp_state == TXGBE_ERR_OVERTEMP) {
+		PMD_DRV_LOG(CRIT, "Network adapter has been stopped because it has over heated.");
+		wr32m(hw, TXGBE_PBRXCTL, TXGBE_PBRXCTL_ENA, 0);
+		txgbe_dev_set_link_down(dev);
+	}
+}
+
 void
 txgbe_dev_setup_link_alarm_handler(void *param)
 {
@@ -2949,9 +3029,6 @@ txgbe_dev_interrupt_get_status(struct rte_eth_dev *dev,
 		rte_intr_type_get(intr_handle) != RTE_INTR_HANDLE_VFIO_MSIX)
 		wr32(hw, TXGBE_PX_INTA, 1);
 
-	/* clear all cause mask */
-	txgbe_disable_intr(hw);
-
 	/* read-on-clear nic registers here */
 	eicr = ((u32 *)hw->isb_mem)[TXGBE_ISB_MISC];
 	PMD_DRV_LOG(DEBUG, "eicr %x", eicr);
@@ -2973,6 +3050,11 @@ txgbe_dev_interrupt_get_status(struct rte_eth_dev *dev,
 
 	if (eicr & TXGBE_ICRMISC_GPIO)
 		intr->flags |= TXGBE_FLAG_PHY_INTERRUPT;
+
+	if (eicr & TXGBE_ICRMISC_HEAT)
+		intr->flags |= TXGBE_FLAG_OVERHEAT;
+
+	((u32 *)hw->isb_mem)[TXGBE_ISB_MISC] = 0;
 
 	return 0;
 }
@@ -3038,7 +3120,7 @@ txgbe_dev_interrupt_action(struct rte_eth_dev *dev,
 	}
 
 	if (intr->flags & TXGBE_FLAG_PHY_INTERRUPT) {
-		hw->phy.handle_lasi(hw);
+		txgbe_dev_sfp_event(dev);
 		intr->flags &= ~TXGBE_FLAG_PHY_INTERRUPT;
 	}
 
@@ -3084,6 +3166,11 @@ txgbe_dev_interrupt_action(struct rte_eth_dev *dev,
 			/* only disable all misc interrupts */
 			intr->mask &= ~(1ULL << TXGBE_MISC_VEC_ID);
 		}
+	}
+
+	if (intr->flags & TXGBE_FLAG_OVERHEAT) {
+		txgbe_dev_overheat(dev);
+		intr->flags &= ~TXGBE_FLAG_OVERHEAT;
 	}
 
 	PMD_DRV_LOG(DEBUG, "enable intr immediately");
@@ -3764,7 +3851,7 @@ txgbe_configure_msix(struct rte_eth_dev *dev)
 
 int
 txgbe_set_queue_rate_limit(struct rte_eth_dev *dev,
-			   uint16_t queue_idx, uint16_t tx_rate)
+			   uint16_t queue_idx, uint32_t tx_rate)
 {
 	struct txgbe_hw *hw = TXGBE_DEV_HW(dev);
 	uint32_t bcnrc_val;

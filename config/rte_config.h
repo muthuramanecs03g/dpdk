@@ -37,7 +37,6 @@
 #define RTE_MAX_MEMZONE 2560
 #define RTE_MAX_TAILQ 32
 #define RTE_LOG_DP_LEVEL RTE_LOG_INFO
-#define RTE_BACKTRACE 1
 #define RTE_MAX_VFIO_CONTAINERS 64
 
 /* bsd module defines */
@@ -47,6 +46,8 @@
 
 /* mempool defines */
 #define RTE_MEMPOOL_CACHE_MAX_SIZE 512
+/* RTE_LIBRTE_MEMPOOL_STATS is not set */
+/* RTE_LIBRTE_MEMPOOL_DEBUG is not set */
 
 /* mbuf defines */
 #define RTE_MBUF_DEFAULT_MEMPOOL_OPS "ring_mp_mc"

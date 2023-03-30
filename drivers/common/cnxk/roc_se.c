@@ -149,6 +149,53 @@ cpt_ciph_aes_key_type_set(struct roc_se_context *fctx, uint16_t key_len)
 	fctx->enc.aes_key = aes_key_type;
 }
 
+static void
+cpt_hmac_opad_ipad_gen(roc_se_auth_type auth_type, const uint8_t *key, uint16_t length,
+		       struct roc_se_hmac_context *hmac)
+{
+	uint8_t opad[128] = {[0 ... 127] = 0x5c};
+	uint8_t ipad[128] = {[0 ... 127] = 0x36};
+	uint32_t i;
+
+	/* HMAC OPAD and IPAD */
+	for (i = 0; i < 128 && i < length; i++) {
+		opad[i] = opad[i] ^ key[i];
+		ipad[i] = ipad[i] ^ key[i];
+	}
+
+	/* Precompute hash of HMAC OPAD and IPAD to avoid
+	 * per packet computation
+	 */
+	switch (auth_type) {
+	case ROC_SE_MD5_TYPE:
+		roc_hash_md5_gen(opad, (uint32_t *)hmac->opad);
+		roc_hash_md5_gen(ipad, (uint32_t *)hmac->ipad);
+		break;
+	case ROC_SE_SHA1_TYPE:
+		roc_hash_sha1_gen(opad, (uint32_t *)hmac->opad);
+		roc_hash_sha1_gen(ipad, (uint32_t *)hmac->ipad);
+		break;
+	case ROC_SE_SHA2_SHA224:
+		roc_hash_sha256_gen(opad, (uint32_t *)hmac->opad, 224);
+		roc_hash_sha256_gen(ipad, (uint32_t *)hmac->ipad, 224);
+		break;
+	case ROC_SE_SHA2_SHA256:
+		roc_hash_sha256_gen(opad, (uint32_t *)hmac->opad, 256);
+		roc_hash_sha256_gen(ipad, (uint32_t *)hmac->ipad, 256);
+		break;
+	case ROC_SE_SHA2_SHA384:
+		roc_hash_sha512_gen(opad, (uint64_t *)hmac->opad, 384);
+		roc_hash_sha512_gen(ipad, (uint64_t *)hmac->ipad, 384);
+		break;
+	case ROC_SE_SHA2_SHA512:
+		roc_hash_sha512_gen(opad, (uint64_t *)hmac->opad, 512);
+		roc_hash_sha512_gen(ipad, (uint64_t *)hmac->ipad, 512);
+		break;
+	default:
+		break;
+	}
+}
+
 static int
 cpt_pdcp_key_type_set(struct roc_se_zuc_snow3g_ctx *zs_ctx, uint16_t key_len)
 {
@@ -261,6 +308,7 @@ roc_se_auth_key_set(struct roc_se_ctx *se_ctx, roc_se_auth_type type,
 	struct roc_se_context *fctx;
 	uint8_t opcode_minor;
 	uint8_t pdcp_alg;
+	bool chained_op;
 	int ret;
 
 	if (se_ctx == NULL)
@@ -271,12 +319,12 @@ roc_se_auth_key_set(struct roc_se_ctx *se_ctx, roc_se_auth_type type,
 	k_ctx = &se_ctx->se_ctx.k_ctx;
 	fctx = &se_ctx->se_ctx.fctx;
 
+	chained_op = se_ctx->ciph_then_auth || se_ctx->auth_then_ciph;
+
 	if ((type >= ROC_SE_ZUC_EIA3) && (type <= ROC_SE_KASUMI_F9_ECB)) {
 		uint8_t *zuc_const;
 		uint32_t keyx[4];
 		uint8_t *ci_key;
-		bool chained_op =
-			se_ctx->ciph_then_auth || se_ctx->auth_then_ciph;
 
 		if (!key_len)
 			return -1;
@@ -414,8 +462,10 @@ roc_se_auth_key_set(struct roc_se_ctx *se_ctx, roc_se_auth_type type,
 		return -1;
 
 	/* For GMAC auth, cipher must be NULL */
-	if (type == ROC_SE_GMAC_TYPE)
+	if (type == ROC_SE_GMAC_TYPE) {
 		fctx->enc.enc_cipher = 0;
+		se_ctx->template_w4.s.opcode_minor = BIT(5);
+	}
 
 	fctx->enc.hash_type = type;
 	se_ctx->hash_type = type;
@@ -423,27 +473,32 @@ roc_se_auth_key_set(struct roc_se_ctx *se_ctx, roc_se_auth_type type,
 	se_ctx->mac_len = mac_len;
 
 	if (key_len) {
-		se_ctx->hmac = 1;
+		/*
+		 * Chained operation (FC opcode) requires precomputed ipad and opad hashes, but for
+		 * auth only (HMAC opcode) this is not required
+		 */
+		if (chained_op) {
+			memset(fctx->hmac.ipad, 0, sizeof(fctx->hmac.ipad));
+			memset(fctx->hmac.opad, 0, sizeof(fctx->hmac.opad));
+			cpt_hmac_opad_ipad_gen(type, key, key_len, &fctx->hmac);
+			fctx->enc.auth_input_type = 0;
+		} else {
+			se_ctx->hmac = 1;
 
-		se_ctx->auth_key = plt_zmalloc(key_len, 8);
-		if (se_ctx->auth_key == NULL)
-			return -1;
+			se_ctx->auth_key = plt_zmalloc(key_len, 8);
+			if (se_ctx->auth_key == NULL)
+				return -1;
 
-		memcpy(se_ctx->auth_key, key, key_len);
-		se_ctx->auth_key_len = key_len;
-		memset(fctx->hmac.ipad, 0, sizeof(fctx->hmac.ipad));
-		memset(fctx->hmac.opad, 0, sizeof(fctx->hmac.opad));
-
-		if (key_len <= 64)
-			memcpy(fctx->hmac.opad, key, key_len);
-		fctx->enc.auth_input_type = 1;
+			memcpy(se_ctx->auth_key, key, key_len);
+			se_ctx->auth_key_len = key_len;
+		}
 	}
 	return 0;
 }
 
 int
-roc_se_ciph_key_set(struct roc_se_ctx *se_ctx, roc_se_cipher_type type,
-		    const uint8_t *key, uint16_t key_len, uint8_t *salt)
+roc_se_ciph_key_set(struct roc_se_ctx *se_ctx, roc_se_cipher_type type, const uint8_t *key,
+		    uint16_t key_len)
 {
 	bool chained_op = se_ctx->ciph_then_auth || se_ctx->auth_then_ciph;
 	struct roc_se_zuc_snow3g_ctx *zs_ctx = &se_ctx->se_ctx.zs_ctx;
@@ -465,17 +520,8 @@ roc_se_ciph_key_set(struct roc_se_ctx *se_ctx, roc_se_cipher_type type,
 		zuc_const = zs_ctx->zuc.otk_ctx.zuc_const;
 	}
 
-	/* For AES-GCM, salt is taken from ctx even if IV source
-	 * is from DPTR
-	 */
-	if ((salt != NULL) && (type == ROC_SE_AES_GCM)) {
-		memcpy(fctx->enc.encr_iv, salt, 4);
-		/* Assuming it was just salt update
-		 * and nothing else
-		 */
-		if (key == NULL)
-			return 0;
-	}
+	if (type == ROC_SE_AES_GCM)
+		se_ctx->template_w4.s.opcode_minor = BIT(5);
 
 	ret = cpt_ciph_type_set(type, se_ctx, key_len);
 	if (unlikely(ret))
@@ -672,4 +718,51 @@ roc_se_ctx_swap(struct roc_se_ctx *se_ctx)
 		return;
 
 	zs_ctx->zuc.otk_ctx.w0.u64 = htobe64(zs_ctx->zuc.otk_ctx.w0.u64);
+}
+
+void
+roc_se_ctx_init(struct roc_se_ctx *roc_se_ctx)
+{
+	struct se_ctx_s *ctx = &roc_se_ctx->se_ctx;
+	uint64_t ctx_len, *uc_ctx;
+	uint8_t i;
+
+	switch (roc_se_ctx->fc_type) {
+	case ROC_SE_FC_GEN:
+		ctx_len = sizeof(struct roc_se_context);
+		break;
+	case ROC_SE_PDCP:
+		ctx_len = sizeof(struct roc_se_zuc_snow3g_ctx);
+		break;
+	case ROC_SE_KASUMI:
+		ctx_len = sizeof(struct roc_se_kasumi_ctx);
+		break;
+	case ROC_SE_PDCP_CHAIN:
+		ctx_len = sizeof(struct roc_se_zuc_snow3g_chain_ctx);
+		break;
+	default:
+		ctx_len = 0;
+	}
+
+	ctx_len = PLT_ALIGN_CEIL(ctx_len, 8);
+
+	/* Skip w0 for swap */
+	uc_ctx = PLT_PTR_ADD(ctx, sizeof(ctx->w0));
+	for (i = 0; i < (ctx_len / 8); i++)
+		uc_ctx[i] = plt_cpu_to_be_64(((uint64_t *)uc_ctx)[i]);
+
+	/* Include w0 */
+	ctx_len += sizeof(ctx->w0);
+	ctx_len = PLT_ALIGN_CEIL(ctx_len, 8);
+
+	ctx->w0.s.aop_valid = 1;
+	ctx->w0.s.ctx_hdr_size = 0;
+
+	ctx->w0.s.ctx_size = PLT_ALIGN_FLOOR(ctx_len, 128);
+	if (ctx->w0.s.ctx_size == 0)
+		ctx->w0.s.ctx_size = 1;
+
+	ctx->w0.s.ctx_push_size = ctx_len / 8;
+	if (ctx->w0.s.ctx_push_size > 32)
+		ctx->w0.s.ctx_push_size = 32;
 }

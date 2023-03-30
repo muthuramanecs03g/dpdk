@@ -64,13 +64,17 @@ The detailed information can refer to chapter Tested Platforms/Tested NICs in re
    +-----------+---------------+-----------------+-----------+--------------+-----------+
    |    22.03  |     1.8.3     |      1.3.28     |  1.3.35   |    1.3.8     |    3.2    |
    +-----------+---------------+-----------------+-----------+--------------+-----------+
+   |    22.07  |     1.9.11    |      1.3.30     |  1.3.37   |    1.3.10    |    4.0    |
+   +-----------+---------------+-----------------+-----------+--------------+-----------+
+   |    22.11  |     1.10.1    |      1.3.30     |  1.3.37   |    1.3.10    |    4.1    |
+   +-----------+---------------+-----------------+-----------+--------------+-----------+
 
-Pre-Installation Configuration
-------------------------------
 
+Configuration
+-------------
 
-Runtime Config Options
-~~~~~~~~~~~~~~~~~~~~~~
+Runtime Configuration
+~~~~~~~~~~~~~~~~~~~~~
 
 - ``Safe Mode Support`` (default ``0``)
 
@@ -102,6 +106,16 @@ Runtime Config Options
   for example::
 
     -a 80:00.0,pipeline-mode-support=1
+
+- ``Default MAC Disable`` (default ``0``)
+
+  Disable the default MAC make the device drop all packets by default,
+  only packets hit on filter rules will pass.
+
+  Default MAC can be disabled by setting the devargs parameter ``default-mac-disable``,
+  for example::
+
+    -a 80:00.0,default-mac-disable=1
 
 - ``Protocol extraction for per queue``
 

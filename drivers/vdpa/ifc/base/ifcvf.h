@@ -12,14 +12,17 @@
 #define IFCVF_BLK	1
 
 #define IFCVF_VENDOR_ID                     0x1AF4
-#define IFCVF_NET_DEVICE_ID                 0x1041
+#define IFCVF_NET_MODERN_DEVICE_ID          0x1041
 #define IFCVF_BLK_MODERN_DEVICE_ID          0x1042
+#define IFCVF_NET_TRANSITIONAL_DEVICE_ID    0x1000
 #define IFCVF_BLK_TRANSITIONAL_DEVICE_ID    0x1001
 #define IFCVF_SUBSYS_VENDOR_ID              0x8086
 #define IFCVF_SUBSYS_DEVICE_ID              0x001A
-#define IFCVF_BLK_DEVICE_ID                 0x0002
+#define IFCVF_SUBSYS_NET_DEVICE_ID          0x0001
+#define IFCVF_SUBSYS_BLK_DEVICE_ID          0x0002
+#define IFCVF_SUBSYS_DEFAULT_DEVICE_ID      0x0000
 
-#define IFCVF_MAX_QUEUES		1
+#define IFCVF_MAX_QUEUES		32
 
 #ifndef VIRTIO_F_IOMMU_PLATFORM
 #define VIRTIO_F_IOMMU_PLATFORM		33
@@ -48,6 +51,7 @@
 
 #define IFCVF_LM_CFG_SIZE		0x40
 #define IFCVF_LM_RING_STATE_OFFSET	0x20
+#define IFCVF_MQ_OFFSET			0x28
 
 #define IFCVF_LM_LOGGING_CTRL		0x0
 
@@ -147,6 +151,7 @@ struct ifcvf_hw {
 	u16    *notify_base;
 	u16    *notify_addr[IFCVF_MAX_QUEUES * 2];
 	u8     *lm_cfg;
+	u8     *mq_cfg;
 	struct vring_info vring[IFCVF_MAX_QUEUES * 2];
 	u8 nr_vring;
 	int device_type;
@@ -158,6 +163,12 @@ ifcvf_init_hw(struct ifcvf_hw *hw, PCI_DEV *dev);
 
 u64
 ifcvf_get_features(struct ifcvf_hw *hw);
+
+int
+ifcvf_enable_vring_hw(struct ifcvf_hw *hw, int i);
+
+void
+ifcvf_disable_vring_hw(struct ifcvf_hw *hw, int i);
 
 int
 ifcvf_start_hw(struct ifcvf_hw *hw);

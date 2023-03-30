@@ -474,10 +474,20 @@ mlx5_alloc_shared_dr(struct mlx5_priv *priv)
 	err = mlx5_alloc_table_hash_list(priv);
 	if (err)
 		goto error;
-	if (priv->sh->config.dv_flow_en == 2)
-		return 0;
 	/* The resources below are only valid with DV support. */
 #ifdef HAVE_IBV_FLOW_DV_SUPPORT
+	/* Init shared flex parsers list, no need lcore_share */
+	snprintf(s, sizeof(s), "%s_flex_parsers_list", sh->ibdev_name);
+	sh->flex_parsers_dv = mlx5_list_create(s, sh, false,
+					       mlx5_flex_parser_create_cb,
+					       mlx5_flex_parser_match_cb,
+					       mlx5_flex_parser_remove_cb,
+					       mlx5_flex_parser_clone_cb,
+					       mlx5_flex_parser_clone_free_cb);
+	if (!sh->flex_parsers_dv)
+		goto error;
+	if (priv->sh->config.dv_flow_en == 2)
+		return 0;
 	/* Init port id action list. */
 	snprintf(s, sizeof(s), "%s_port_id_action_list", sh->ibdev_name);
 	sh->port_id_action_list = mlx5_list_create(s, sh, true,
@@ -518,16 +528,9 @@ mlx5_alloc_shared_dr(struct mlx5_priv *priv)
 					      flow_dv_dest_array_clone_free_cb);
 	if (!sh->dest_array_list)
 		goto error;
-	/* Init shared flex parsers list, no need lcore_share */
-	snprintf(s, sizeof(s), "%s_flex_parsers_list", sh->ibdev_name);
-	sh->flex_parsers_dv = mlx5_list_create(s, sh, false,
-					       mlx5_flex_parser_create_cb,
-					       mlx5_flex_parser_match_cb,
-					       mlx5_flex_parser_remove_cb,
-					       mlx5_flex_parser_clone_cb,
-					       mlx5_flex_parser_clone_free_cb);
-	if (!sh->flex_parsers_dv)
-		goto error;
+#else
+	if (priv->sh->config.dv_flow_en == 2)
+		return 0;
 #endif
 #ifdef HAVE_MLX5DV_DR
 	void *domain;
@@ -699,6 +702,19 @@ mlx5_os_free_shared_dr(struct mlx5_priv *priv)
 	if (sh->pop_vlan_action) {
 		mlx5_glue->destroy_flow_action(sh->pop_vlan_action);
 		sh->pop_vlan_action = NULL;
+	}
+	if (sh->send_to_kernel_action.action) {
+		void *action = sh->send_to_kernel_action.action;
+
+		mlx5_glue->destroy_flow_action(action);
+		sh->send_to_kernel_action.action = NULL;
+	}
+	if (sh->send_to_kernel_action.tbl) {
+		struct mlx5_flow_tbl_resource *tbl =
+				sh->send_to_kernel_action.tbl;
+
+		flow_dv_tbl_resource_release(sh, tbl);
+		sh->send_to_kernel_action.tbl = NULL;
 	}
 #endif /* HAVE_MLX5DV_DR */
 	if (sh->default_miss_action)
@@ -1349,9 +1365,11 @@ err_secondary:
 			DRV_LOG(DEBUG, "Flow Hit ASO is supported.");
 		}
 #endif /* HAVE_MLX5_DR_CREATE_ACTION_ASO */
-#if defined(HAVE_MLX5_DR_CREATE_ACTION_ASO) && \
-	defined(HAVE_MLX5_DR_ACTION_ASO_CT)
-		if (hca_attr->ct_offload && priv->mtr_color_reg == REG_C_3) {
+#if defined (HAVE_MLX5_DR_CREATE_ACTION_ASO) && \
+    defined (HAVE_MLX5_DR_ACTION_ASO_CT)
+		/* HWS create CT ASO SQ based on HWS configure queue number. */
+		if (sh->config.dv_flow_en != 2 &&
+		    hca_attr->ct_offload && priv->mtr_color_reg == REG_C_3) {
 			err = mlx5_flow_aso_ct_mng_init(sh);
 			if (err) {
 				err = -err;
@@ -1375,6 +1393,12 @@ err_secondary:
 				DRV_LOG(DEBUG, "DV flow is not supported!");
 		}
 #endif
+		if (hca_attr->lag_rx_port_affinity) {
+			sh->lag_rx_port_affinity_en = 1;
+			DRV_LOG(DEBUG, "LAG Rx Port Affinity enabled");
+		}
+		priv->num_lag_ports = hca_attr->num_lag_ports;
+		DRV_LOG(DEBUG, "The number of lag ports is %d", priv->num_lag_ports);
 	}
 	/* Process parameters and store port configuration on priv structure. */
 	err = mlx5_port_args_config(priv, mkvlist, &priv->config);
@@ -1540,10 +1564,86 @@ err_secondary:
 				       mlx5_hrxq_clone_free_cb);
 	if (!priv->hrxqs)
 		goto error;
+	mlx5_set_metadata_mask(eth_dev);
+	if (sh->config.dv_xmeta_en != MLX5_XMETA_MODE_LEGACY &&
+	    !priv->sh->dv_regc0_mask) {
+		DRV_LOG(ERR, "metadata mode %u is not supported "
+			     "(no metadata reg_c[0] is available)",
+			     sh->config.dv_xmeta_en);
+			err = ENOTSUP;
+			goto error;
+	}
 	rte_rwlock_init(&priv->ind_tbls_lock);
-	if (priv->sh->config.dv_flow_en == 2)
+	if (priv->sh->config.dv_flow_en == 2) {
+#ifdef HAVE_MLX5_HWS_SUPPORT
+		if (priv->sh->config.dv_esw_en) {
+			uint32_t usable_bits;
+			uint32_t required_bits;
+
+			if (priv->sh->dv_regc0_mask == UINT32_MAX) {
+				DRV_LOG(ERR, "E-Switch port metadata is required when using HWS "
+					     "but it is disabled (configure it through devlink)");
+				err = ENOTSUP;
+				goto error;
+			}
+			if (priv->sh->dv_regc0_mask == 0) {
+				DRV_LOG(ERR, "E-Switch with HWS is not supported "
+					     "(no available bits in reg_c[0])");
+				err = ENOTSUP;
+				goto error;
+			}
+			usable_bits = __builtin_popcount(priv->sh->dv_regc0_mask);
+			required_bits = __builtin_popcount(priv->vport_meta_mask);
+			if (usable_bits < required_bits) {
+				DRV_LOG(ERR, "Not enough bits available in reg_c[0] to provide "
+					     "representor matching.");
+				err = ENOTSUP;
+				goto error;
+			}
+		}
+		if (priv->vport_meta_mask)
+			flow_hw_set_port_info(eth_dev);
+		if (priv->sh->config.dv_esw_en &&
+		    priv->sh->config.dv_xmeta_en != MLX5_XMETA_MODE_LEGACY &&
+		    priv->sh->config.dv_xmeta_en != MLX5_XMETA_MODE_META32_HWS) {
+			DRV_LOG(ERR,
+				"metadata mode %u is not supported in HWS eswitch mode",
+				priv->sh->config.dv_xmeta_en);
+				err = ENOTSUP;
+				goto error;
+		}
+		/* Only HWS requires this information. */
+		flow_hw_init_tags_set(eth_dev);
+		flow_hw_init_flow_metadata_config(eth_dev);
+		if (priv->sh->config.dv_esw_en &&
+		    flow_hw_create_vport_action(eth_dev)) {
+			DRV_LOG(ERR, "port %u failed to create vport action",
+				eth_dev->data->port_id);
+			err = EINVAL;
+			goto error;
+		}
+		/*
+		 * If representor matching is disabled, PMD cannot create default flow rules
+		 * to receive traffic for all ports, since implicit source port match is not added.
+		 * Isolated mode is forced.
+		 */
+		if (priv->sh->config.dv_esw_en && !priv->sh->config.repr_matching) {
+			err = mlx5_flow_isolate(eth_dev, 1, NULL);
+			if (err < 0) {
+				err = -err;
+				goto error;
+			}
+			DRV_LOG(WARNING, "port %u ingress traffic is restricted to defined "
+					 "flow rules (isolated mode) since representor "
+					 "matching is disabled",
+				eth_dev->data->port_id);
+		}
 		return eth_dev;
-	/* Port representor shares the same max priority with pf port. */
+#else
+		DRV_LOG(ERR, "DV support is missing for HWS.");
+		goto error;
+#endif
+	}
 	if (!priv->sh->flow_priority_check_flag) {
 		/* Supported Verbs flow priority number detection. */
 		err = mlx5_flow_discover_priorities(eth_dev);
@@ -1555,15 +1655,6 @@ err_secondary:
 	if (err < 0) {
 		err = -err;
 		goto error;
-	}
-	mlx5_set_metadata_mask(eth_dev);
-	if (sh->config.dv_xmeta_en != MLX5_XMETA_MODE_LEGACY &&
-	    !priv->sh->dv_regc0_mask) {
-		DRV_LOG(ERR, "metadata mode %u is not supported "
-			     "(no metadata reg_c[0] is available)",
-			     sh->config.dv_xmeta_en);
-			err = ENOTSUP;
-			goto error;
 	}
 	/* Query availability of metadata reg_c's. */
 	if (!priv->sh->metadata_regc_check_flag) {
@@ -1610,6 +1701,16 @@ err_secondary:
 	return eth_dev;
 error:
 	if (priv) {
+		priv->sh->port[priv->dev_port - 1].nl_ih_port_id =
+							       RTE_MAX_ETHPORTS;
+		rte_io_wmb();
+#ifdef HAVE_MLX5_HWS_SUPPORT
+		if (eth_dev &&
+		    priv->sh &&
+		    priv->sh->config.dv_flow_en == 2 &&
+		    priv->sh->config.dv_esw_en)
+			flow_hw_destroy_vport_action(eth_dev);
+#endif
 		if (priv->mreg_cp_tbl)
 			mlx5_hlist_destroy(priv->mreg_cp_tbl);
 		if (priv->sh)
@@ -2338,7 +2439,7 @@ mlx5_os_parse_eth_devargs(struct rte_device *dev,
 			dev->devargs->cls_str);
 		return -rte_errno;
 	}
-	if (eth_da->type == RTE_ETH_REPRESENTOR_NONE) {
+	if (eth_da->type == RTE_ETH_REPRESENTOR_NONE && dev->devargs->args) {
 		/* Parse legacy device argument */
 		ret = rte_eth_devargs_parse(dev->devargs->args, eth_da);
 		if (ret) {

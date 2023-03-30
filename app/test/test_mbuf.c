@@ -1232,11 +1232,13 @@ test_failing_mbuf_sanity_check(struct rte_mempool *pktmbuf_pool)
 		return -1;
 	}
 
-	badbuf = *buf;
-	badbuf.buf_iova = 0;
-	if (verify_mbuf_check_panics(&badbuf)) {
-		printf("Error with bad-physaddr mbuf test\n");
-		return -1;
+	if (RTE_IOVA_IN_MBUF) {
+		badbuf = *buf;
+		rte_mbuf_iova_set(&badbuf, 0);
+		if (verify_mbuf_check_panics(&badbuf)) {
+			printf("Error with bad-physaddr mbuf test\n");
+			return -1;
+		}
 	}
 
 	badbuf = *buf;
@@ -2677,7 +2679,7 @@ test_mbuf_dyn(struct rte_mempool *pktmbuf_pool)
 
 	flag3 = rte_mbuf_dynflag_register_bitnum(&dynflag3,
 						rte_bsf64(RTE_MBUF_F_LAST_FREE));
-	if (flag3 != rte_bsf64(RTE_MBUF_F_LAST_FREE))
+	if ((uint32_t)flag3 != rte_bsf64(RTE_MBUF_F_LAST_FREE))
 		GOTO_FAIL("failed to register dynamic flag 3, flag3=%d: %s",
 			flag3, strerror(errno));
 
@@ -2742,6 +2744,7 @@ test_nb_segs_and_next_reset(void)
 
 	/* split m0 chain in two, between m1 and m2 */
 	m0->nb_segs = 2;
+	m0->pkt_len -= m2->data_len;
 	m1->next = NULL;
 	m2->nb_segs = 1;
 
@@ -2762,6 +2765,7 @@ test_nb_segs_and_next_reset(void)
 			m2->nb_segs != 1 || m2->next != NULL)
 		GOTO_FAIL("nb_segs or next was not reset properly");
 
+	rte_mempool_free(pool);
 	return 0;
 
 fail:

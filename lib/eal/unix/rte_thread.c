@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,16 @@
 
 struct eal_tls_key {
 	pthread_key_t thread_index;
+};
+
+struct thread_start_context {
+	rte_thread_func thread_func;
+	void *thread_args;
+	const rte_thread_attr_t *thread_attr;
+	pthread_mutex_t wrapper_mutex;
+	pthread_cond_t wrapper_cond;
+	int wrapper_ret;
+	bool wrapper_done;
 };
 
 static int
@@ -73,6 +84,153 @@ thread_map_os_priority_to_eal_priority(int policy, int os_pri,
 	}
 
 	return 0;
+}
+
+static void *
+thread_start_wrapper(void *arg)
+{
+	struct thread_start_context *ctx = (struct thread_start_context *)arg;
+	rte_thread_func thread_func = ctx->thread_func;
+	void *thread_args = ctx->thread_args;
+	int ret = 0;
+
+	if (ctx->thread_attr != NULL && CPU_COUNT(&ctx->thread_attr->cpuset) > 0) {
+		ret = rte_thread_set_affinity_by_id(rte_thread_self(), &ctx->thread_attr->cpuset);
+		if (ret != 0)
+			RTE_LOG(DEBUG, EAL, "rte_thread_set_affinity_by_id failed\n");
+	}
+
+	pthread_mutex_lock(&ctx->wrapper_mutex);
+	ctx->wrapper_ret = ret;
+	ctx->wrapper_done = true;
+	pthread_cond_signal(&ctx->wrapper_cond);
+	pthread_mutex_unlock(&ctx->wrapper_mutex);
+
+	if (ret != 0)
+		return NULL;
+
+	return (void *)(uintptr_t)thread_func(thread_args);
+}
+
+int
+rte_thread_create(rte_thread_t *thread_id,
+		const rte_thread_attr_t *thread_attr,
+		rte_thread_func thread_func, void *args)
+{
+	int ret = 0;
+	pthread_attr_t attr;
+	pthread_attr_t *attrp = NULL;
+	struct sched_param param = {
+		.sched_priority = 0,
+	};
+	int policy = SCHED_OTHER;
+	struct thread_start_context ctx = {
+		.thread_func = thread_func,
+		.thread_args = args,
+		.thread_attr = thread_attr,
+		.wrapper_done = false,
+		.wrapper_mutex = PTHREAD_MUTEX_INITIALIZER,
+		.wrapper_cond = PTHREAD_COND_INITIALIZER,
+	};
+
+	if (thread_attr != NULL) {
+		ret = pthread_attr_init(&attr);
+		if (ret != 0) {
+			RTE_LOG(DEBUG, EAL, "pthread_attr_init failed\n");
+			goto cleanup;
+		}
+
+		attrp = &attr;
+
+		/*
+		 * Set the inherit scheduler parameter to explicit,
+		 * otherwise the priority attribute is ignored.
+		 */
+		ret = pthread_attr_setinheritsched(attrp,
+				PTHREAD_EXPLICIT_SCHED);
+		if (ret != 0) {
+			RTE_LOG(DEBUG, EAL, "pthread_attr_setinheritsched failed\n");
+			goto cleanup;
+		}
+
+		if (thread_attr->priority ==
+				RTE_THREAD_PRIORITY_REALTIME_CRITICAL) {
+			ret = ENOTSUP;
+			goto cleanup;
+		}
+		ret = thread_map_priority_to_os_value(thread_attr->priority,
+				&param.sched_priority, &policy);
+		if (ret != 0)
+			goto cleanup;
+
+		ret = pthread_attr_setschedpolicy(attrp, policy);
+		if (ret != 0) {
+			RTE_LOG(DEBUG, EAL, "pthread_attr_setschedpolicy failed\n");
+			goto cleanup;
+		}
+
+		ret = pthread_attr_setschedparam(attrp, &param);
+		if (ret != 0) {
+			RTE_LOG(DEBUG, EAL, "pthread_attr_setschedparam failed\n");
+			goto cleanup;
+		}
+	}
+
+	ret = pthread_create((pthread_t *)&thread_id->opaque_id, attrp,
+		thread_start_wrapper, &ctx);
+	if (ret != 0) {
+		RTE_LOG(DEBUG, EAL, "pthread_create failed\n");
+		goto cleanup;
+	}
+
+	pthread_mutex_lock(&ctx.wrapper_mutex);
+	while (!ctx.wrapper_done)
+		pthread_cond_wait(&ctx.wrapper_cond, &ctx.wrapper_mutex);
+	ret = ctx.wrapper_ret;
+	pthread_mutex_unlock(&ctx.wrapper_mutex);
+
+	if (ret != 0)
+		pthread_join((pthread_t)thread_id->opaque_id, NULL);
+
+cleanup:
+	if (attrp != NULL)
+		pthread_attr_destroy(&attr);
+
+	return ret;
+}
+
+int
+rte_thread_join(rte_thread_t thread_id, uint32_t *value_ptr)
+{
+	int ret = 0;
+	void *res = (void *)(uintptr_t)0;
+	void **pres = NULL;
+
+	if (value_ptr != NULL)
+		pres = &res;
+
+	ret = pthread_join((pthread_t)thread_id.opaque_id, pres);
+	if (ret != 0) {
+		RTE_LOG(DEBUG, EAL, "pthread_join failed\n");
+		return ret;
+	}
+
+	if (value_ptr != NULL)
+		*value_ptr = (uint32_t)(uintptr_t)res;
+
+	return 0;
+}
+
+int
+rte_thread_detach(rte_thread_t thread_id)
+{
+	return pthread_detach((pthread_t)thread_id.opaque_id);
+}
+
+int
+rte_thread_equal(rte_thread_t t1, rte_thread_t t2)
+{
+	return pthread_equal((pthread_t)t1.opaque_id, (pthread_t)t2.opaque_id);
 }
 
 rte_thread_t

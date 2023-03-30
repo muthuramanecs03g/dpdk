@@ -10,6 +10,7 @@
 
 #include "hns3_ethdev.h"
 #include "hns3_common.h"
+#include "hns3_dump.h"
 #include "hns3_logs.h"
 #include "hns3_rxtx.h"
 #include "hns3_regs.h"
@@ -687,64 +688,6 @@ hns3vf_interrupt_handler(void *param)
 	hns3vf_enable_irq0(hw);
 }
 
-static void
-hns3vf_set_default_dev_specifications(struct hns3_hw *hw)
-{
-	hw->max_non_tso_bd_num = HNS3_MAX_NON_TSO_BD_PER_PKT;
-	hw->rss_ind_tbl_size = HNS3_RSS_IND_TBL_SIZE;
-	hw->rss_key_size = HNS3_RSS_KEY_SIZE;
-	hw->intr.int_ql_max = HNS3_INTR_QL_NONE;
-}
-
-static void
-hns3vf_parse_dev_specifications(struct hns3_hw *hw, struct hns3_cmd_desc *desc)
-{
-	struct hns3_dev_specs_0_cmd *req0;
-
-	req0 = (struct hns3_dev_specs_0_cmd *)desc[0].data;
-
-	hw->max_non_tso_bd_num = req0->max_non_tso_bd_num;
-	hw->rss_ind_tbl_size = rte_le_to_cpu_16(req0->rss_ind_tbl_size);
-	hw->rss_key_size = rte_le_to_cpu_16(req0->rss_key_size);
-	hw->intr.int_ql_max = rte_le_to_cpu_16(req0->intr_ql_max);
-}
-
-static int
-hns3vf_check_dev_specifications(struct hns3_hw *hw)
-{
-	if (hw->rss_ind_tbl_size == 0 ||
-	    hw->rss_ind_tbl_size > HNS3_RSS_IND_TBL_SIZE_MAX) {
-		hns3_warn(hw, "the size of hash lookup table configured (%u) exceeds the maximum(%u)",
-			  hw->rss_ind_tbl_size, HNS3_RSS_IND_TBL_SIZE_MAX);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int
-hns3vf_query_dev_specifications(struct hns3_hw *hw)
-{
-	struct hns3_cmd_desc desc[HNS3_QUERY_DEV_SPECS_BD_NUM];
-	int ret;
-	int i;
-
-	for (i = 0; i < HNS3_QUERY_DEV_SPECS_BD_NUM - 1; i++) {
-		hns3_cmd_setup_basic_desc(&desc[i], HNS3_OPC_QUERY_DEV_SPECS,
-					  true);
-		desc[i].flag |= rte_cpu_to_le_16(HNS3_CMD_FLAG_NEXT);
-	}
-	hns3_cmd_setup_basic_desc(&desc[i], HNS3_OPC_QUERY_DEV_SPECS, true);
-
-	ret = hns3_cmd_send(hw, desc, HNS3_QUERY_DEV_SPECS_BD_NUM);
-	if (ret)
-		return ret;
-
-	hns3vf_parse_dev_specifications(hw, desc);
-
-	return hns3vf_check_dev_specifications(hw);
-}
-
 void
 hns3vf_update_push_lsc_cap(struct hns3_hw *hw, bool supported)
 {
@@ -822,7 +765,7 @@ hns3vf_get_capability(struct hns3_hw *hw)
 		return ret;
 
 	if (hw->revision < PCI_REVISION_ID_HIP09_A) {
-		hns3vf_set_default_dev_specifications(hw);
+		hns3_set_default_dev_specifications(hw);
 		hw->intr.mapping_mode = HNS3_INTR_MAPPING_VEC_RSV_ONE;
 		hw->intr.gl_unit = HNS3_INTR_COALESCE_GL_UINT_2US;
 		hw->tso_mode = HNS3_TSO_SW_CAL_PSEUDO_H_CSUM;
@@ -833,7 +776,7 @@ hns3vf_get_capability(struct hns3_hw *hw)
 		return 0;
 	}
 
-	ret = hns3vf_query_dev_specifications(hw);
+	ret = hns3_query_dev_specifications(hw);
 	if (ret) {
 		PMD_INIT_LOG(ERR,
 			     "failed to query dev specifications, ret = %d",
@@ -845,7 +788,6 @@ hns3vf_get_capability(struct hns3_hw *hw)
 	hw->intr.gl_unit = HNS3_INTR_COALESCE_GL_UINT_1US;
 	hw->tso_mode = HNS3_TSO_HW_CAL_PSEUDO_H_CSUM;
 	hw->drop_stats_mode = HNS3_PKTS_DROP_STATS_MODE2;
-	hw->min_tx_pkt_len = HNS3_HIP09_MIN_TX_PKT_LEN;
 	hw->rss_info.ipv6_sctp_offload_supported = true;
 	hw->promisc_mode = HNS3_LIMIT_PROMISC_MODE;
 
@@ -1630,12 +1572,7 @@ hns3vf_dev_stop(struct rte_eth_dev *dev)
 	dev->data->dev_started = 0;
 
 	hw->adapter_state = HNS3_NIC_STOPPING;
-	hns3_set_rxtx_function(dev);
-	rte_wmb();
-	/* Disable datapath on secondary process. */
-	hns3_mp_req_stop_rxtx(dev);
-	/* Prevent crashes when queues are still in use. */
-	rte_delay_ms(hw->cfg_max_queues);
+	hns3_stop_rxtx_datapath(dev);
 
 	rte_spinlock_lock(&hw->lock);
 	if (__atomic_load_n(&hw->reset.resetting, __ATOMIC_RELAXED) == 0) {
@@ -1740,13 +1677,7 @@ hns3vf_do_start(struct hns3_adapter *hns, bool reset_queue)
 	if (ret)
 		hns3_err(hw, "failed to init queues, ret = %d.", ret);
 
-	return ret;
-}
-
-static void
-hns3vf_restore_filter(struct rte_eth_dev *dev)
-{
-	hns3_restore_rss_filter(dev);
+	return hns3_restore_filter(hns);
 }
 
 static int
@@ -1795,10 +1726,7 @@ hns3vf_dev_start(struct rte_eth_dev *dev)
 	rte_spinlock_unlock(&hw->lock);
 
 	hns3_rx_scattered_calc(dev);
-	hns3_set_rxtx_function(dev);
-	hns3_mp_req_start_rxtx(dev);
-
-	hns3vf_restore_filter(dev);
+	hns3_start_rxtx_datapath(dev);
 
 	/* Enable interrupt of all rx queues before enabling queues */
 	hns3_dev_all_rx_queue_intr_enable(hw, true);
@@ -1863,8 +1791,15 @@ hns3vf_is_reset_pending(struct hns3_adapter *hns)
 	if (hw->reset.level == HNS3_VF_FULL_RESET)
 		return false;
 
-	/* Check the registers to confirm whether there is reset pending */
-	hns3vf_check_event_cause(hns, NULL);
+	/*
+	 * Check the registers to confirm whether there is reset pending.
+	 * Note: This check may lead to schedule reset task, but only primary
+	 *       process can process the reset event. Therefore, limit the
+	 *       checking under only primary process.
+	 */
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
+		hns3vf_check_event_cause(hns, NULL);
+
 	reset = hns3vf_get_reset_level(hw, &hw->reset.pending);
 	if (hw->reset.level != HNS3_NONE_RESET && reset != HNS3_NONE_RESET &&
 	    hw->reset.level < reset) {
@@ -1961,11 +1896,7 @@ hns3vf_stop_service(struct hns3_adapter *hns)
 	}
 	hw->mac.link_status = RTE_ETH_LINK_DOWN;
 
-	hns3_set_rxtx_function(eth_dev);
-	rte_wmb();
-	/* Disable datapath on secondary process. */
-	hns3_mp_req_stop_rxtx(eth_dev);
-	rte_delay_ms(hw->cfg_max_queues);
+	hns3_stop_rxtx_datapath(eth_dev);
 
 	rte_spinlock_lock(&hw->lock);
 	if (hw->adapter_state == HNS3_NIC_STARTED ||
@@ -1997,8 +1928,7 @@ hns3vf_start_service(struct hns3_adapter *hns)
 	struct rte_eth_dev *eth_dev;
 
 	eth_dev = &rte_eth_devices[hw->data->port_id];
-	hns3_set_rxtx_function(eth_dev);
-	hns3_mp_req_start_rxtx(eth_dev);
+	hns3_start_rxtx_datapath(eth_dev);
 
 	rte_eal_alarm_set(HNS3VF_KEEP_ALIVE_INTERVAL, hns3vf_keep_alive_handler,
 			  eth_dev);
@@ -2300,6 +2230,8 @@ static const struct eth_dev_ops hns3vf_eth_dev_ops = {
 	.dev_supported_ptypes_get = hns3_dev_supported_ptypes_get,
 	.tx_done_cleanup    = hns3_tx_done_cleanup,
 	.eth_dev_priv_dump  = hns3_eth_dev_priv_dump,
+	.eth_rx_descriptor_dump = hns3_rx_descriptor_dump,
+	.eth_tx_descriptor_dump = hns3_tx_descriptor_dump,
 };
 
 static const struct hns3_reset_ops hns3vf_reset_ops = {

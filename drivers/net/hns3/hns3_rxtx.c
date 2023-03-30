@@ -17,10 +17,10 @@
 #endif
 
 #include "hns3_common.h"
-#include "hns3_rxtx.h"
 #include "hns3_regs.h"
 #include "hns3_logs.h"
 #include "hns3_mp.h"
+#include "hns3_rxtx.h"
 
 #define HNS3_CFG_DESC_NUM(num)	((num) / 8 - 1)
 #define HNS3_RX_RING_PREFETCTH_MASK	3
@@ -1992,7 +1992,7 @@ hns3_dev_supported_ptypes_get(struct rte_eth_dev *dev)
 		RTE_PTYPE_INNER_L4_TCP,
 		RTE_PTYPE_INNER_L4_SCTP,
 		RTE_PTYPE_INNER_L4_ICMP,
-		RTE_PTYPE_TUNNEL_VXLAN,
+		RTE_PTYPE_TUNNEL_GRENAT,
 		RTE_PTYPE_TUNNEL_NVGRE,
 		RTE_PTYPE_UNKNOWN
 	};
@@ -2089,7 +2089,7 @@ hns3_init_tunnel_ptype_tbl(struct hns3_ptype_table *tbl)
 	tbl->ol3table[5] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT;
 
 	tbl->ol4table[0] = RTE_PTYPE_UNKNOWN;
-	tbl->ol4table[1] = RTE_PTYPE_L4_UDP | RTE_PTYPE_TUNNEL_VXLAN;
+	tbl->ol4table[1] = RTE_PTYPE_L4_UDP | RTE_PTYPE_TUNNEL_GRENAT;
 	tbl->ol4table[2] = RTE_PTYPE_TUNNEL_NVGRE;
 }
 
@@ -2759,7 +2759,7 @@ hns3_rx_check_vec_support(__rte_unused struct rte_eth_dev *dev)
 }
 
 uint16_t __rte_weak
-hns3_recv_pkts_vec(__rte_unused void *tx_queue,
+hns3_recv_pkts_vec(__rte_unused void *rx_queue,
 		   __rte_unused struct rte_mbuf **rx_pkts,
 		   __rte_unused uint16_t nb_pkts)
 {
@@ -2767,7 +2767,7 @@ hns3_recv_pkts_vec(__rte_unused void *tx_queue,
 }
 
 uint16_t __rte_weak
-hns3_recv_pkts_vec_sve(__rte_unused void *tx_queue,
+hns3_recv_pkts_vec_sve(__rte_unused void *rx_queue,
 		       __rte_unused struct rte_mbuf **rx_pkts,
 		       __rte_unused uint16_t nb_pkts)
 {
@@ -2786,6 +2786,7 @@ hns3_rx_burst_mode_get(struct rte_eth_dev *dev, __rte_unused uint16_t queue_id,
 		{ hns3_recv_scattered_pkts,	"Scalar Scattered" },
 		{ hns3_recv_pkts_vec,		"Vector Neon"   },
 		{ hns3_recv_pkts_vec_sve,	"Vector Sve"    },
+		{ rte_eth_pkt_burst_dummy,	"Dummy"         },
 	};
 
 	eth_rx_burst_t pkt_burst = dev->rx_pkt_burst;
@@ -3072,51 +3073,40 @@ hns3_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t nb_desc,
 	return 0;
 }
 
-static int
+static void
 hns3_tx_free_useless_buffer(struct hns3_tx_queue *txq)
 {
 	uint16_t tx_next_clean = txq->next_to_clean;
-	uint16_t tx_next_use = txq->next_to_use;
-	struct hns3_entry *tx_entry = &txq->sw_ring[tx_next_clean];
+	uint16_t tx_next_use   = txq->next_to_use;
+	uint16_t tx_bd_ready   = txq->tx_bd_ready;
+	uint16_t tx_bd_max     = txq->nb_tx_desc;
+	struct hns3_entry *tx_bak_pkt = &txq->sw_ring[tx_next_clean];
 	struct hns3_desc *desc = &txq->tx_ring[tx_next_clean];
-	uint16_t i;
+	struct rte_mbuf *mbuf;
 
-	if (tx_next_use >= tx_next_clean &&
-	    tx_next_use < tx_next_clean + txq->tx_rs_thresh)
-		return -1;
+	while ((!(desc->tx.tp_fe_sc_vld_ra_ri &
+		rte_cpu_to_le_16(BIT(HNS3_TXD_VLD_B)))) &&
+		tx_next_use != tx_next_clean) {
+		mbuf = tx_bak_pkt->mbuf;
+		if (mbuf) {
+			rte_pktmbuf_free_seg(mbuf);
+			tx_bak_pkt->mbuf = NULL;
+		}
 
-	/*
-	 * All mbufs can be released only when the VLD bits of all
-	 * descriptors in a batch are cleared.
-	 */
-	for (i = 0; i < txq->tx_rs_thresh; i++) {
-		if (desc[i].tx.tp_fe_sc_vld_ra_ri &
-			rte_le_to_cpu_16(BIT(HNS3_TXD_VLD_B)))
-			return -1;
+		desc++;
+		tx_bak_pkt++;
+		tx_next_clean++;
+		tx_bd_ready++;
+
+		if (tx_next_clean >= tx_bd_max) {
+			tx_next_clean = 0;
+			desc = txq->tx_ring;
+			tx_bak_pkt = txq->sw_ring;
+		}
 	}
 
-	for (i = 0; i < txq->tx_rs_thresh; i++) {
-		rte_pktmbuf_free_seg(tx_entry[i].mbuf);
-		tx_entry[i].mbuf = NULL;
-	}
-
-	/* Update numbers of available descriptor due to buffer freed */
-	txq->tx_bd_ready += txq->tx_rs_thresh;
-	txq->next_to_clean += txq->tx_rs_thresh;
-	if (txq->next_to_clean >= txq->nb_tx_desc)
-		txq->next_to_clean = 0;
-
-	return 0;
-}
-
-static inline int
-hns3_tx_free_required_buffer(struct hns3_tx_queue *txq, uint16_t required_bds)
-{
-	while (required_bds > txq->tx_bd_ready) {
-		if (hns3_tx_free_useless_buffer(txq) != 0)
-			return -1;
-	}
-	return 0;
+	txq->next_to_clean = tx_next_clean;
+	txq->tx_bd_ready   = tx_bd_ready;
 }
 
 int
@@ -4126,14 +4116,16 @@ hns3_xmit_pkts_simple(void *tx_queue,
 	}
 
 	txq->tx_bd_ready -= nb_pkts;
-	if (txq->next_to_use + nb_pkts > txq->nb_tx_desc) {
+	if (txq->next_to_use + nb_pkts >= txq->nb_tx_desc) {
 		nb_tx = txq->nb_tx_desc - txq->next_to_use;
 		hns3_tx_fill_hw_ring(txq, tx_pkts, nb_tx);
 		txq->next_to_use = 0;
 	}
 
-	hns3_tx_fill_hw_ring(txq, tx_pkts + nb_tx, nb_pkts - nb_tx);
-	txq->next_to_use += nb_pkts - nb_tx;
+	if (nb_pkts > nb_tx) {
+		hns3_tx_fill_hw_ring(txq, tx_pkts + nb_tx, nb_pkts - nb_tx);
+		txq->next_to_use += nb_pkts - nb_tx;
+	}
 
 	hns3_write_txq_tail_reg(txq, nb_pkts);
 
@@ -4157,8 +4149,7 @@ hns3_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	uint16_t nb_tx;
 	uint16_t i;
 
-	if (txq->tx_bd_ready < txq->tx_free_thresh)
-		(void)hns3_tx_free_useless_buffer(txq);
+	hns3_tx_free_useless_buffer(txq);
 
 	tx_next_use   = txq->next_to_use;
 	tx_bd_max     = txq->nb_tx_desc;
@@ -4173,14 +4164,10 @@ hns3_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		nb_buf = tx_pkt->nb_segs;
 
 		if (nb_buf > txq->tx_bd_ready) {
-			/* Try to release the required MBUF, but avoid releasing
-			 * all MBUFs, otherwise, the MBUFs will be released for
-			 * a long time and may cause jitter.
-			 */
-			if (hns3_tx_free_required_buffer(txq, nb_buf) != 0) {
-				txq->dfx_stats.queue_full_cnt++;
-				goto end_of_tx;
-			}
+			txq->dfx_stats.queue_full_cnt++;
+			if (nb_tx == 0)
+				return 0;
+			goto end_of_tx;
 		}
 
 		/*
@@ -4286,24 +4273,31 @@ int
 hns3_tx_burst_mode_get(struct rte_eth_dev *dev, __rte_unused uint16_t queue_id,
 		       struct rte_eth_burst_mode *mode)
 {
+	static const struct {
+		eth_tx_burst_t pkt_burst;
+		const char *info;
+	} burst_infos[] = {
+		{ hns3_xmit_pkts_simple,	"Scalar Simple" },
+		{ hns3_xmit_pkts,		"Scalar"        },
+		{ hns3_xmit_pkts_vec,		"Vector Neon"   },
+		{ hns3_xmit_pkts_vec_sve,	"Vector Sve"    },
+		{ rte_eth_pkt_burst_dummy,	"Dummy"         },
+	};
+
 	eth_tx_burst_t pkt_burst = dev->tx_pkt_burst;
-	const char *info = NULL;
+	int ret = -EINVAL;
+	unsigned int i;
 
-	if (pkt_burst == hns3_xmit_pkts_simple)
-		info = "Scalar Simple";
-	else if (pkt_burst == hns3_xmit_pkts)
-		info = "Scalar";
-	else if (pkt_burst == hns3_xmit_pkts_vec)
-		info = "Vector Neon";
-	else if (pkt_burst == hns3_xmit_pkts_vec_sve)
-		info = "Vector Sve";
+	for (i = 0; i < RTE_DIM(burst_infos); i++) {
+		if (pkt_burst == burst_infos[i].pkt_burst) {
+			snprintf(mode->info, sizeof(mode->info), "%s",
+				 burst_infos[i].info);
+			ret = 0;
+			break;
+		}
+	}
 
-	if (info == NULL)
-		return -EINVAL;
-
-	snprintf(mode->info, sizeof(mode->info), "%s", info);
-
-	return 0;
+	return ret;
 }
 
 static bool
@@ -4317,11 +4311,6 @@ hns3_tx_check_simple_support(struct rte_eth_dev *dev)
 static bool
 hns3_get_tx_prep_needed(struct rte_eth_dev *dev)
 {
-#ifdef RTE_LIBRTE_ETHDEV_DEBUG
-	RTE_SET_USED(dev);
-	/* always perform tx_prepare when debug */
-	return true;
-#else
 #define HNS3_DEV_TX_CSKUM_TSO_OFFLOAD_MASK (\
 		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | \
 		RTE_ETH_TX_OFFLOAD_TCP_CKSUM | \
@@ -4335,27 +4324,30 @@ hns3_get_tx_prep_needed(struct rte_eth_dev *dev)
 		RTE_ETH_TX_OFFLOAD_GENEVE_TNL_TSO)
 
 	uint64_t tx_offload = dev->data->dev_conf.txmode.offloads;
+
 	if (tx_offload & HNS3_DEV_TX_CSKUM_TSO_OFFLOAD_MASK)
 		return true;
 
 	return false;
-#endif
 }
 
-eth_tx_burst_t
-hns3_get_tx_function(struct rte_eth_dev *dev, eth_tx_prep_t *prep)
+static eth_tx_prep_t
+hns3_get_tx_prepare(struct rte_eth_dev *dev)
+{
+	return hns3_get_tx_prep_needed(dev) ? hns3_prep_pkts : NULL;
+}
+
+static eth_tx_burst_t
+hns3_get_tx_function(struct rte_eth_dev *dev)
 {
 	struct hns3_adapter *hns = dev->data->dev_private;
 	bool vec_allowed, sve_allowed, simple_allowed;
-	bool vec_support, tx_prepare_needed;
+	bool vec_support;
 
 	vec_support = hns3_tx_check_vec_support(dev) == 0;
 	vec_allowed = vec_support && hns3_get_default_vec_support();
 	sve_allowed = vec_support && hns3_get_sve_support();
 	simple_allowed = hns3_tx_check_simple_support(dev);
-	tx_prepare_needed = hns3_get_tx_prep_needed(dev);
-
-	*prep = NULL;
 
 	if (hns->tx_func_hint == HNS3_IO_FUNC_HINT_VEC && vec_allowed)
 		return hns3_xmit_pkts_vec;
@@ -4363,19 +4355,14 @@ hns3_get_tx_function(struct rte_eth_dev *dev, eth_tx_prep_t *prep)
 		return hns3_xmit_pkts_vec_sve;
 	if (hns->tx_func_hint == HNS3_IO_FUNC_HINT_SIMPLE && simple_allowed)
 		return hns3_xmit_pkts_simple;
-	if (hns->tx_func_hint == HNS3_IO_FUNC_HINT_COMMON) {
-		if (tx_prepare_needed)
-			*prep = hns3_prep_pkts;
+	if (hns->tx_func_hint == HNS3_IO_FUNC_HINT_COMMON)
 		return hns3_xmit_pkts;
-	}
 
 	if (vec_allowed)
 		return hns3_xmit_pkts_vec;
 	if (simple_allowed)
 		return hns3_xmit_pkts_simple;
 
-	if (tx_prepare_needed)
-		*prep = hns3_prep_pkts;
 	return hns3_xmit_pkts;
 }
 
@@ -4415,7 +4402,6 @@ hns3_set_rxtx_function(struct rte_eth_dev *eth_dev)
 {
 	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
 	struct hns3_adapter *hns = eth_dev->data->dev_private;
-	eth_tx_prep_t prep = NULL;
 
 	if (hns->hw.adapter_state == HNS3_NIC_STARTED &&
 	    __atomic_load_n(&hns->hw.reset.resetting, __ATOMIC_RELAXED) == 0) {
@@ -4423,16 +4409,16 @@ hns3_set_rxtx_function(struct rte_eth_dev *eth_dev)
 		eth_dev->rx_descriptor_status = hns3_dev_rx_descriptor_status;
 		eth_dev->tx_pkt_burst = hw->set_link_down ?
 					rte_eth_pkt_burst_dummy :
-					hns3_get_tx_function(eth_dev, &prep);
-		eth_dev->tx_pkt_prepare = prep;
+					hns3_get_tx_function(eth_dev);
+		eth_dev->tx_pkt_prepare = hns3_get_tx_prepare(eth_dev);
 		eth_dev->tx_descriptor_status = hns3_dev_tx_descriptor_status;
-		hns3_trace_rxtx_function(eth_dev);
 	} else {
 		eth_dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
 		eth_dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
 		eth_dev->tx_pkt_prepare = NULL;
 	}
 
+	hns3_trace_rxtx_function(eth_dev);
 	hns3_eth_dev_fp_ops_config(eth_dev);
 }
 
@@ -4596,22 +4582,43 @@ hns3_dev_tx_queue_stop(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 static int
 hns3_tx_done_cleanup_full(struct hns3_tx_queue *txq, uint32_t free_cnt)
 {
-	uint16_t round_cnt;
+	uint16_t next_to_clean = txq->next_to_clean;
+	uint16_t next_to_use   = txq->next_to_use;
+	uint16_t tx_bd_ready   = txq->tx_bd_ready;
+	struct hns3_entry *tx_pkt = &txq->sw_ring[next_to_clean];
+	struct hns3_desc *desc = &txq->tx_ring[next_to_clean];
 	uint32_t idx;
 
 	if (free_cnt == 0 || free_cnt > txq->nb_tx_desc)
 		free_cnt = txq->nb_tx_desc;
 
-	if (txq->tx_rs_thresh == 0)
-		return 0;
-
-	round_cnt = rounddown(free_cnt, txq->tx_rs_thresh);
-	for (idx = 0; idx < round_cnt; idx += txq->tx_rs_thresh) {
-		if (hns3_tx_free_useless_buffer(txq) != 0)
+	for (idx = 0; idx < free_cnt; idx++) {
+		if (next_to_clean == next_to_use)
 			break;
+		if (desc->tx.tp_fe_sc_vld_ra_ri &
+		    rte_cpu_to_le_16(BIT(HNS3_TXD_VLD_B)))
+			break;
+		if (tx_pkt->mbuf != NULL) {
+			rte_pktmbuf_free_seg(tx_pkt->mbuf);
+			tx_pkt->mbuf = NULL;
+		}
+		next_to_clean++;
+		tx_bd_ready++;
+		tx_pkt++;
+		desc++;
+		if (next_to_clean == txq->nb_tx_desc) {
+			tx_pkt = txq->sw_ring;
+			desc = txq->tx_ring;
+			next_to_clean = 0;
+		}
 	}
 
-	return idx;
+	if (idx > 0) {
+		txq->next_to_clean = next_to_clean;
+		txq->tx_bd_ready = tx_bd_ready;
+	}
+
+	return (int)idx;
 }
 
 int
@@ -4749,14 +4756,40 @@ hns3_stop_tx_datapath(struct rte_eth_dev *dev)
 void
 hns3_start_tx_datapath(struct rte_eth_dev *dev)
 {
-	eth_tx_prep_t prep = NULL;
-
-	dev->tx_pkt_burst = hns3_get_tx_function(dev, &prep);
-	dev->tx_pkt_prepare = prep;
+	dev->tx_pkt_burst = hns3_get_tx_function(dev);
+	dev->tx_pkt_prepare = hns3_get_tx_prepare(dev);
 	hns3_eth_dev_fp_ops_config(dev);
 
 	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
 		return;
 
 	hns3_mp_req_start_tx(dev);
+}
+
+void
+hns3_stop_rxtx_datapath(struct rte_eth_dev *dev)
+{
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	hns3_set_rxtx_function(dev);
+
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+		return;
+
+	rte_wmb();
+	/* Disable datapath on secondary process. */
+	hns3_mp_req_stop_rxtx(dev);
+	/* Prevent crashes when queues are still in use. */
+	rte_delay_ms(hw->cfg_max_queues);
+}
+
+void
+hns3_start_rxtx_datapath(struct rte_eth_dev *dev)
+{
+	hns3_set_rxtx_function(dev);
+
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+		return;
+
+	hns3_mp_req_start_rxtx(dev);
 }

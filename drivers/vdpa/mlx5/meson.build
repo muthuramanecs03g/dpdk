@@ -8,6 +8,11 @@ if not is_linux
 endif
 
 deps += ['hash', 'common_mlx5', 'vhost', 'pci', 'eal', 'sched']
+if not dpdk_conf.has('RTE_COMMON_MLX5')
+    # avoid referencing undefined variables from common/mlx5
+    subdir_done()
+endif
+
 sources = files(
         'mlx5_vdpa.c',
         'mlx5_vdpa_mem.c',

@@ -20,8 +20,8 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
 #define MAX_PKT_BURST     32
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
@@ -55,7 +55,6 @@
 /* 32-bit has less address-space for hugepage memory, limit to 1M entries */
 #define L3FWD_HASH_ENTRIES		(1024*1024*1)
 #endif
-#define HASH_ENTRY_NUMBER_DEFAULT	16
 
 struct parm_cfg {
 	const char *rule_ipv4_name;
@@ -113,6 +112,8 @@ extern struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 extern struct parm_cfg parm_config;
 
 extern struct acl_algorithms acl_alg[];
+
+extern uint32_t max_pkt_len;
 
 /* Send burst of packets on an output interface */
 static inline int
@@ -205,6 +206,9 @@ usage_acl_alg(char *buf, size_t sz);
 
 int
 init_mem(uint16_t portid, unsigned int nb_mbuf);
+
+int config_port_max_pkt_len(struct rte_eth_conf *conf,
+			    struct rte_eth_dev_info *dev_info);
 
 /* Function pointers for ACL, LPM, EM or FIB functionality. */
 void

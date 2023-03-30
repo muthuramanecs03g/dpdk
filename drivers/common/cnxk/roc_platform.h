@@ -5,6 +5,7 @@
 #ifndef _ROC_PLATFORM_H_
 #define _ROC_PLATFORM_H_
 
+#include <rte_compat.h>
 #include <rte_alarm.h>
 #include <rte_bitmap.h>
 #include <bus_pci_driver.h>
@@ -40,6 +41,7 @@
 #endif
 
 #define PLT_ASSERT		 RTE_ASSERT
+#define PLT_VERIFY		 RTE_VERIFY
 #define PLT_MEMZONE_NAMESIZE	 RTE_MEMZONE_NAMESIZE
 #define PLT_STD_C11		 RTE_STD_C11
 #define PLT_PTR_ADD		 RTE_PTR_ADD
@@ -56,9 +58,10 @@
 #define PLT_ALIGN		 RTE_ALIGN
 #define PLT_ALIGN_MUL_CEIL	 RTE_ALIGN_MUL_CEIL
 #define PLT_MODEL_MZ_NAME	 "roc_model_mz"
-#define PLT_CACHE_LINE_SIZE      RTE_CACHE_LINE_SIZE
+#define PLT_CACHE_LINE_SIZE	 RTE_CACHE_LINE_SIZE
 #define BITMASK_ULL		 GENMASK_ULL
 #define PLT_ALIGN_CEIL		 RTE_ALIGN_CEIL
+#define PLT_ALIGN_FLOOR		 RTE_ALIGN_FLOOR
 #define PLT_INIT		 RTE_INIT
 #define PLT_MAX_ETHPORTS	 RTE_MAX_ETHPORTS
 #define PLT_TAILQ_FOREACH_SAFE	 RTE_TAILQ_FOREACH_SAFE
@@ -223,15 +226,16 @@
 #define plt_tel_data_start_dict      rte_tel_data_start_dict
 #define plt_tel_data_add_dict_int    rte_tel_data_add_dict_int
 #define plt_tel_data_add_dict_ptr(d, n, v)			\
-	rte_tel_data_add_dict_u64(d, n, (uint64_t)v)
+	rte_tel_data_add_dict_uint(d, n, (uint64_t)v)
 #define plt_tel_data_add_dict_string rte_tel_data_add_dict_string
-#define plt_tel_data_add_dict_u64    rte_tel_data_add_dict_u64
+#define plt_tel_data_add_dict_u64    rte_tel_data_add_dict_uint
 #define plt_telemetry_register_cmd   rte_telemetry_register_cmd
 
 /* Log */
 extern int cnxk_logtype_base;
 extern int cnxk_logtype_mbox;
 extern int cnxk_logtype_cpt;
+extern int cnxk_logtype_ml;
 extern int cnxk_logtype_npa;
 extern int cnxk_logtype_nix;
 extern int cnxk_logtype_npc;
@@ -259,6 +263,7 @@ extern int cnxk_logtype_ree;
 #define plt_base_dbg(fmt, ...)	plt_dbg(base, fmt, ##__VA_ARGS__)
 #define plt_cpt_dbg(fmt, ...)	plt_dbg(cpt, fmt, ##__VA_ARGS__)
 #define plt_mbox_dbg(fmt, ...)	plt_dbg(mbox, fmt, ##__VA_ARGS__)
+#define plt_ml_dbg(fmt, ...)	plt_dbg(ml, fmt, ##__VA_ARGS__)
 #define plt_npa_dbg(fmt, ...)	plt_dbg(npa, fmt, ##__VA_ARGS__)
 #define plt_nix_dbg(fmt, ...)	plt_dbg(nix, fmt, ##__VA_ARGS__)
 #define plt_npc_dbg(fmt, ...)	plt_dbg(npc, fmt, ##__VA_ARGS__)
@@ -289,6 +294,13 @@ extern int cnxk_logtype_ree;
 	.subsystem_vendor_id = RTE_PCI_ANY_ID,                         \
 	.subsystem_device_id = (subsystem_dev),                        \
 }
+#endif
+
+/* Device memory does not support unaligned access, instruct compiler to
+ * not optimize the memory access when working with mailbox memory.
+ */
+#ifndef __io
+#define __io volatile
 #endif
 
 __rte_internal

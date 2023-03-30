@@ -53,8 +53,8 @@
 
 #define MAX_LCORE_PARAMS 1024
 
-uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+uint16_t nb_rxd = RX_DESC_DEFAULT;
+uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /**< Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
@@ -89,7 +89,6 @@ uint32_t enabled_port_mask;
 
 /* Used only in exact match mode. */
 int ipv6; /**< ipv6 is false by default. */
-uint32_t hash_entry_number = HASH_ENTRY_NUMBER_DEFAULT;
 
 struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
@@ -121,7 +120,6 @@ static uint16_t nb_lcore_params = sizeof(lcore_params_array_default) /
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = RTE_ETH_MQ_RX_RSS,
-		.split_hdr_size = 0,
 		.offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
 	},
 	.rx_adv_conf = {
@@ -135,7 +133,7 @@ static struct rte_eth_conf port_conf = {
 	},
 };
 
-static uint32_t max_pkt_len;
+uint32_t max_pkt_len;
 
 static struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 static struct rte_mempool *vector_pool[RTE_MAX_ETHPORTS];
@@ -396,7 +394,6 @@ print_usage(const char *prgname)
 		" [--eth-dest=X,MM:MM:MM:MM:MM:MM]"
 		" [--max-pkt-len PKTLEN]"
 		" [--no-numa]"
-		" [--hash-entry-num]"
 		" [--ipv6]"
 		" [--parse-ptype]"
 		" [--per-port-pool]"
@@ -420,7 +417,6 @@ print_usage(const char *prgname)
 		"  --eth-dest=X,MM:MM:MM:MM:MM:MM: Ethernet destination for port X\n"
 		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
 		"  --no-numa: Disable numa awareness\n"
-		"  --hash-entry-num: Specify the hash entry number in hexadecimal to be setup\n"
 		"  --ipv6: Set if running ipv6 packets\n"
 		"  --parse-ptype: Set to use software to analyze packet type\n"
 		"  --per-port-pool: Use separate buffer pool per port\n"
@@ -445,7 +441,7 @@ print_usage(const char *prgname)
 		"                    another is route entry at while line leads with character '%c'.\n"
 		"  --rule_ipv6=FILE: Specify the ipv6 rules entries file.\n"
 		"  --alg: ACL classify method to use, one of: %s.\n\n",
-		prgname, RTE_TEST_RX_DESC_DEFAULT, RTE_TEST_TX_DESC_DEFAULT,
+		prgname, RX_DESC_DEFAULT, TX_DESC_DEFAULT,
 		ACL_LEAD_CHAR, ROUTE_LEAD_CHAR, alg);
 }
 
@@ -478,22 +474,6 @@ parse_portmask(const char *portmask)
 		return 0;
 
 	return pm;
-}
-
-static int
-parse_hash_entry_number(const char *hash_entry_num)
-{
-	char *end = NULL;
-	unsigned long hash_en;
-	/* parse hexadecimal string */
-	hash_en = strtoul(hash_entry_num, &end, 16);
-	if ((hash_entry_num[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (hash_en == 0)
-		return -1;
-
-	return hash_en;
 }
 
 static int
@@ -853,14 +833,7 @@ parse_args(int argc, char **argv)
 			break;
 
 		case CMD_LINE_OPT_HASH_ENTRY_NUM_NUM:
-			ret = parse_hash_entry_number(optarg);
-			if ((ret > 0) && (ret <= L3FWD_HASH_ENTRIES)) {
-				hash_entry_number = ret;
-			} else {
-				fprintf(stderr, "invalid hash entry number\n");
-				print_usage(prgname);
-				return -1;
-			}
+			fprintf(stderr, "Hash entry number will be ignored\n");
 			break;
 
 		case CMD_LINE_OPT_PARSE_PTYPE_NUM:
@@ -962,16 +935,6 @@ parse_args(int argc, char **argv)
 	if (lookup_mode == L3FWD_LOOKUP_DEFAULT) {
 		fprintf(stderr, "Neither ACL, LPM, EM, or FIB selected, defaulting to LPM\n");
 		lookup_mode = L3FWD_LOOKUP_LPM;
-	}
-
-	/*
-	 * ipv6 and hash flags are valid only for
-	 * exact match, reset them to default for
-	 * longest-prefix match.
-	 */
-	if (lookup_mode == L3FWD_LOOKUP_LPM) {
-		ipv6 = 0;
-		hash_entry_number = HASH_ENTRY_NUMBER_DEFAULT;
 	}
 
 	/* For ACL, update port config rss hash filter */
@@ -1181,7 +1144,7 @@ eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
 	return overhead_len;
 }
 
-static int
+int
 config_port_max_pkt_len(struct rte_eth_conf *conf,
 		struct rte_eth_dev_info *dev_info)
 {

@@ -909,6 +909,12 @@ is_iommu_enabled(void)
 	return n > 2;
 }
 
+static __rte_noreturn void *
+eal_worker_thread_loop(void *arg)
+{
+	eal_thread_loop(arg);
+}
+
 static int
 eal_worker_thread_create(unsigned int lcore_id)
 {
@@ -943,8 +949,8 @@ eal_worker_thread_create(unsigned int lcore_id)
 		}
 	}
 
-	if (pthread_create(&lcore_config[lcore_id].thread_id, attrp,
-			eal_thread_loop, (void *)(uintptr_t)lcore_id) == 0)
+	if (pthread_create((pthread_t *)&lcore_config[lcore_id].thread_id.opaque_id,
+			attrp, eal_worker_thread_loop, (void *)(uintptr_t)lcore_id) == 0)
 		ret = 0;
 
 out:
@@ -962,8 +968,6 @@ rte_eal_init(int argc, char **argv)
 	int i, fctret, ret;
 	static uint32_t run_once;
 	uint32_t has_run = 0;
-	const char *p;
-	static char logid[PATH_MAX];
 	char cpuset[RTE_CPU_AFFINITY_STR_LEN];
 	char thread_name[RTE_MAX_THREAD_NAME_LEN];
 	bool phys_addrs;
@@ -984,9 +988,6 @@ rte_eal_init(int argc, char **argv)
 		rte_errno = EALREADY;
 		return -1;
 	}
-
-	p = strrchr(argv[0], '/');
-	strlcpy(logid, p ? p + 1 : argv[0], sizeof(logid));
 
 	eal_reset_internal_config(internal_conf);
 
@@ -1128,6 +1129,12 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 
+	if (rte_eal_iova_mode() == RTE_IOVA_PA && !RTE_IOVA_IN_MBUF) {
+		rte_eal_init_alert("Cannot use IOVA as 'PA' as it is disabled during build");
+		rte_errno = EINVAL;
+		return -1;
+	}
+
 	RTE_LOG(INFO, EAL, "Selected IOVA mode '%s'\n",
 		rte_eal_iova_mode() == RTE_IOVA_PA ? "PA" : "VA");
 
@@ -1160,7 +1167,8 @@ rte_eal_init(int argc, char **argv)
 #endif
 	}
 
-	if (eal_log_init(logid, internal_conf->syslog_facility) < 0) {
+	if (eal_log_init(program_invocation_short_name,
+			 internal_conf->syslog_facility) < 0) {
 		rte_eal_init_alert("Cannot init logging.");
 		rte_errno = ENOMEM;
 		__atomic_store_n(&run_once, 0, __ATOMIC_RELAXED);
@@ -1214,7 +1222,7 @@ rte_eal_init(int argc, char **argv)
 
 	eal_check_mem_on_local_socket();
 
-	if (pthread_setaffinity_np(pthread_self(), sizeof(rte_cpuset_t),
+	if (rte_thread_set_affinity_by_id(rte_thread_self(),
 			&lcore_config[config->main_lcore].cpuset) != 0) {
 		rte_eal_init_alert("Cannot set affinity");
 		rte_errno = EINVAL;
@@ -1249,14 +1257,10 @@ rte_eal_init(int argc, char **argv)
 		/* Set thread_name for aid in debugging. */
 		snprintf(thread_name, sizeof(thread_name),
 			"rte-worker-%d", i);
-		ret = rte_thread_setname(lcore_config[i].thread_id,
-						thread_name);
-		if (ret != 0)
-			RTE_LOG(DEBUG, EAL,
-				"Cannot set name for lcore thread\n");
+		rte_thread_set_name(lcore_config[i].thread_id, thread_name);
 
-		ret = pthread_setaffinity_np(lcore_config[i].thread_id,
-			sizeof(rte_cpuset_t), &lcore_config[i].cpuset);
+		ret = rte_thread_set_affinity_by_id(lcore_config[i].thread_id,
+			&lcore_config[i].cpuset);
 		if (ret != 0)
 			rte_panic("Cannot set affinity\n");
 	}
@@ -1363,13 +1367,14 @@ rte_eal_cleanup(void)
 	vfio_mp_sync_cleanup();
 #endif
 	rte_mp_channel_cleanup();
+	eal_bus_cleanup();
 	rte_trace_save();
 	eal_trace_fini();
+	eal_mp_dev_hotplug_cleanup();
+	rte_eal_alarm_cleanup();
 	/* after this point, any DPDK pointers will become dangling */
 	rte_eal_memory_detach();
-	eal_mp_dev_hotplug_cleanup();
 	rte_eal_malloc_heap_cleanup();
-	rte_eal_alarm_cleanup();
 	eal_cleanup_config(internal_conf);
 	rte_eal_log_cleanup();
 	return 0;

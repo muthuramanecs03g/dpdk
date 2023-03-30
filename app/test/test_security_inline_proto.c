@@ -28,6 +28,13 @@ test_event_inline_ipsec(void)
 	return TEST_SKIPPED;
 }
 
+static int
+test_inline_ipsec_sg(void)
+{
+	printf("Inline ipsec SG not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
 #else
 
 #include <rte_eventdev.h>
@@ -37,8 +44,8 @@ test_event_inline_ipsec(void)
 #define NB_ETHPORTS_USED		1
 #define MEMPOOL_CACHE_SIZE		32
 #define MAX_PKT_BURST			32
-#define RTE_TEST_RX_DESC_DEFAULT	1024
-#define RTE_TEST_TX_DESC_DEFAULT	1024
+#define RX_DESC_DEFAULT	1024
+#define TX_DESC_DEFAULT	1024
 #define RTE_PORT_ALL		(~(uint16_t)0x0)
 
 #define RX_PTHRESH 8 /**< Default values of RX prefetch threshold reg. */
@@ -63,17 +70,24 @@ extern struct ipsec_test_data pkt_aes_128_cbc_null;
 extern struct ipsec_test_data pkt_null_aes_xcbc;
 extern struct ipsec_test_data pkt_aes_128_cbc_hmac_sha384;
 extern struct ipsec_test_data pkt_aes_128_cbc_hmac_sha512;
+extern struct ipsec_test_data pkt_3des_cbc_hmac_sha256;
+extern struct ipsec_test_data pkt_3des_cbc_hmac_sha384;
+extern struct ipsec_test_data pkt_3des_cbc_hmac_sha512;
+extern struct ipsec_test_data pkt_3des_cbc_hmac_sha256_v6;
+extern struct ipsec_test_data pkt_des_cbc_hmac_sha256;
+extern struct ipsec_test_data pkt_des_cbc_hmac_sha384;
+extern struct ipsec_test_data pkt_des_cbc_hmac_sha512;
+extern struct ipsec_test_data pkt_des_cbc_hmac_sha256_v6;
+extern struct ipsec_test_data pkt_aes_128_cbc_md5;
 
 static struct rte_mempool *mbufpool;
 static struct rte_mempool *sess_pool;
-static struct rte_mempool *sess_priv_pool;
 /* ethernet addresses of ports */
 static struct rte_ether_addr ports_eth_addr[RTE_MAX_ETHPORTS];
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = RTE_ETH_MQ_RX_NONE,
-		.split_hdr_size = 0,
 		.offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM |
 			    RTE_ETH_RX_OFFLOAD_SECURITY,
 	},
@@ -108,6 +122,8 @@ static uint16_t port_id;
 static uint8_t eventdev_id;
 static uint8_t rx_adapter_id;
 static uint8_t tx_adapter_id;
+static uint16_t plaintext_len;
+static bool sg_mode;
 
 static bool event_mode_enabled;
 
@@ -120,7 +136,7 @@ static struct rte_flow *default_flow[RTE_MAX_ETHPORTS];
 /* Create Inline IPsec session */
 static int
 create_inline_ipsec_session(struct ipsec_test_data *sa, uint16_t portid,
-		struct rte_security_session **sess, struct rte_security_ctx **ctx,
+		void **sess, struct rte_security_ctx **ctx,
 		uint32_t *ol_flags, const struct ipsec_test_flags *flags,
 		struct rte_security_session_conf *sess_conf)
 {
@@ -311,8 +327,7 @@ create_inline_ipsec_session(struct ipsec_test_data *sa, uint16_t portid,
 		setenv("ETH_SEC_IV_OVR", arr, 1);
 	}
 
-	*sess = rte_security_session_create(sec_ctx,
-				sess_conf, sess_pool, sess_priv_pool);
+	*sess = rte_security_session_create(sec_ctx, sess_conf, sess_pool);
 	if (*sess == NULL) {
 		printf("SEC Session init failed.\n");
 		return TEST_FAILED;
@@ -402,20 +417,26 @@ copy_buf_to_pkt_segs(const uint8_t *buf, unsigned int len,
 	void *seg_buf;
 
 	seg = pkt;
-	while (offset >= seg->data_len) {
-		offset -= seg->data_len;
+	while (offset >= rte_pktmbuf_tailroom(seg)) {
+		offset -= rte_pktmbuf_tailroom(seg);
 		seg = seg->next;
 	}
-	copy_len = seg->data_len - offset;
+	copy_len = seg->buf_len - seg->data_off - offset;
 	seg_buf = rte_pktmbuf_mtod_offset(seg, char *, offset);
 	while (len > copy_len) {
 		rte_memcpy(seg_buf, buf + copied, (size_t) copy_len);
 		len -= copy_len;
 		copied += copy_len;
+		seg->data_len += copy_len;
+
 		seg = seg->next;
+		copy_len = seg->buf_len - seg->data_off;
 		seg_buf = rte_pktmbuf_mtod(seg, void *);
 	}
 	rte_memcpy(seg_buf, buf + copied, (size_t) len);
+	seg->data_len = len;
+
+	pkt->pkt_len += copied + len;
 }
 
 static bool
@@ -434,7 +455,8 @@ is_outer_ipv4(struct ipsec_test_data *td)
 static inline struct rte_mbuf *
 init_packet(struct rte_mempool *mp, const uint8_t *data, unsigned int len, bool outer_ipv4)
 {
-	struct rte_mbuf *pkt;
+	struct rte_mbuf *pkt, *tail;
+	uint16_t space;
 
 	pkt = rte_pktmbuf_alloc(mp);
 	if (pkt == NULL)
@@ -451,11 +473,31 @@ init_packet(struct rte_mempool *mp, const uint8_t *data, unsigned int len, bool 
 	}
 	pkt->l2_len = RTE_ETHER_HDR_LEN;
 
-	if (pkt->buf_len > (len + RTE_ETHER_HDR_LEN))
+	space = rte_pktmbuf_tailroom(pkt);
+	tail = pkt;
+	/* Error if SG mode is not enabled */
+	if (!sg_mode && space < len) {
+		rte_pktmbuf_free(pkt);
+		return NULL;
+	}
+	/* Extra room for expansion */
+	while (space < len) {
+		tail->next = rte_pktmbuf_alloc(mp);
+		if (!tail->next)
+			goto error;
+		tail = tail->next;
+		space += rte_pktmbuf_tailroom(tail);
+		pkt->nb_segs++;
+	}
+
+	if (pkt->buf_len > len + RTE_ETHER_HDR_LEN)
 		rte_memcpy(rte_pktmbuf_append(pkt, len), data, len);
 	else
 		copy_buf_to_pkt_segs(data, len, pkt, RTE_ETHER_HDR_LEN);
 	return pkt;
+error:
+	rte_pktmbuf_free(pkt);
+	return NULL;
 }
 
 static int
@@ -469,7 +511,7 @@ init_mempools(unsigned int nb_mbuf)
 	if (mbufpool == NULL) {
 		snprintf(s, sizeof(s), "mbuf_pool");
 		mbufpool = rte_pktmbuf_pool_create(s, nb_mbuf,
-				MEMPOOL_CACHE_SIZE, 0,
+				MEMPOOL_CACHE_SIZE, RTE_CACHE_LINE_SIZE,
 				RTE_MBUF_DEFAULT_BUF_SIZE, SOCKET_ID_ANY);
 		if (mbufpool == NULL) {
 			printf("Cannot init mbuf pool\n");
@@ -495,18 +537,6 @@ init_mempools(unsigned int nb_mbuf)
 			return TEST_FAILED;
 		}
 		printf("Allocated sess pool\n");
-	}
-	if (sess_priv_pool == NULL) {
-		snprintf(s, sizeof(s), "sess_priv_pool");
-		sess_priv_pool = rte_mempool_create(s, nb_sess, sess_sz,
-				MEMPOOL_CACHE_SIZE, 0,
-				NULL, NULL, NULL, NULL,
-				SOCKET_ID_ANY, 0);
-		if (sess_priv_pool == NULL) {
-			printf("Cannot init sess_priv pool\n");
-			return TEST_FAILED;
-		}
-		printf("Allocated sess_priv pool\n");
 	}
 
 	return 0;
@@ -709,8 +739,8 @@ static int
 test_ipsec_with_reassembly(struct reassembly_vector *vector,
 		const struct ipsec_test_flags *flags)
 {
-	struct rte_security_session *out_ses[ENCAP_DECAP_BURST_SZ] = {0};
-	struct rte_security_session *in_ses[ENCAP_DECAP_BURST_SZ] = {0};
+	void *out_ses[ENCAP_DECAP_BURST_SZ] = {0};
+	void *in_ses[ENCAP_DECAP_BURST_SZ] = {0};
 	struct rte_eth_ip_reassembly_params reass_capa = {0};
 	struct rte_security_session_conf sess_conf_out = {0};
 	struct rte_security_session_conf sess_conf_in = {0};
@@ -1046,12 +1076,12 @@ test_ipsec_inline_proto_process(struct ipsec_test_data *td,
 	struct rte_crypto_sym_xform auth = {0};
 	struct rte_crypto_sym_xform aead = {0};
 	struct sa_expiry_vector vector = {0};
-	struct rte_security_session *ses;
 	struct rte_security_ctx *ctx;
 	int nb_rx = 0, nb_sent;
 	uint32_t ol_flags;
 	int i, j = 0, ret;
 	bool outer_ipv4;
+	void *ses;
 
 	memset(rx_pkts_burst, 0, sizeof(rx_pkts_burst[0]) * nb_pkts);
 
@@ -1315,7 +1345,7 @@ test_ipsec_inline_proto_process_with_esn(struct ipsec_test_data td[],
 	struct rte_mbuf *rx_pkt = NULL;
 	struct rte_mbuf *tx_pkt = NULL;
 	int nb_rx, nb_sent;
-	struct rte_security_session *ses;
+	void *ses;
 	struct rte_security_ctx *ctx;
 	uint32_t ol_flags;
 	bool outer_ipv4;
@@ -1384,8 +1414,13 @@ test_ipsec_inline_proto_process_with_esn(struct ipsec_test_data td[],
 						tx_pkt, NULL);
 			tx_pkt->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
 		}
+
 		/* Send packet to ethdev for inline IPsec processing. */
-		nb_sent = rte_eth_tx_burst(port_id, 0, &tx_pkt, 1);
+		if (event_mode_enabled)
+			nb_sent = event_tx_burst(&tx_pkt, 1);
+		else
+			nb_sent = rte_eth_tx_burst(port_id, 0, &tx_pkt, 1);
+
 		if (nb_sent != 1) {
 			printf("\nUnable to TX packets");
 			rte_pktmbuf_free(tx_pkt);
@@ -1396,11 +1431,14 @@ test_ipsec_inline_proto_process_with_esn(struct ipsec_test_data td[],
 		rte_pause();
 
 		/* Receive back packet on loopback interface. */
-		do {
-			rte_delay_ms(1);
-			nb_rx = rte_eth_rx_burst(port_id, 0, &rx_pkt, 1);
-		} while (nb_rx == 0);
-
+		if (event_mode_enabled)
+			nb_rx = event_rx_burst(&rx_pkt, nb_sent);
+		else {
+			do {
+				rte_delay_ms(1);
+				nb_rx = rte_eth_rx_burst(port_id, 0, &rx_pkt, 1);
+			} while (nb_rx == 0);
+		}
 		rte_pktmbuf_adj(rx_pkt, RTE_ETHER_HDR_LEN);
 
 		if (res_d != NULL)
@@ -1483,6 +1521,8 @@ ut_teardown_inline_ipsec(void)
 static int
 inline_ipsec_testsuite_setup(void)
 {
+	struct rte_eth_conf local_port_conf;
+	struct rte_eth_dev_info dev_info;
 	uint16_t nb_rxd;
 	uint16_t nb_txd;
 	uint16_t nb_ports;
@@ -1520,14 +1560,30 @@ inline_ipsec_testsuite_setup(void)
 
 	printf("Generate %d packets\n", MAX_TRAFFIC_BURST);
 
-	nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-	nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+	nb_rxd = RX_DESC_DEFAULT;
+	nb_txd = TX_DESC_DEFAULT;
 
 	/* configuring port 0 for the test is enough */
 	port_id = 0;
+	if (rte_eth_dev_info_get(0, &dev_info)) {
+		printf("Failed to get devinfo");
+		return -1;
+	}
+
+	memcpy(&local_port_conf, &port_conf, sizeof(port_conf));
+	/* Add Multi seg flags */
+	if (sg_mode) {
+		uint16_t max_data_room = RTE_MBUF_DEFAULT_DATAROOM *
+			dev_info.rx_desc_lim.nb_seg_max;
+
+		local_port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_SCATTER;
+		local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+		local_port_conf.rxmode.mtu = RTE_MIN(dev_info.max_mtu, max_data_room - 256);
+	}
+
 	/* port configure */
 	ret = rte_eth_dev_configure(port_id, nb_rx_queue,
-				    nb_tx_queue, &port_conf);
+				    nb_tx_queue, &local_port_conf);
 	if (ret < 0) {
 		printf("Cannot configure device: err=%d, port=%d\n",
 			 ret, port_id);
@@ -1560,6 +1616,15 @@ inline_ipsec_testsuite_setup(void)
 		return ret;
 	}
 	test_ipsec_alg_list_populate();
+
+	/* Change the plaintext size for tests without Known vectors */
+	if (sg_mode) {
+		/* Leave space of 256B as ESP packet would be bigger and we
+		 * expect packets to be received back on same interface.
+		 * Without SG mode, default value is picked.
+		 */
+		plaintext_len = local_port_conf.rxmode.mtu - 256;
+	}
 
 	return 0;
 }
@@ -1937,6 +2002,7 @@ test_ipsec_inline_proto_display_list(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.display_alg = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -1949,6 +2015,7 @@ test_ipsec_inline_proto_udp_encap(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.udp_encap = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -1962,6 +2029,7 @@ test_ipsec_inline_proto_udp_ports_verify(const void *data __rte_unused)
 
 	flags.udp_encap = true;
 	flags.udp_ports_verify = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -1974,6 +2042,7 @@ test_ipsec_inline_proto_err_icv_corrupt(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.icv_corrupt = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -1986,6 +2055,7 @@ test_ipsec_inline_proto_tunnel_dst_addr_verify(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.tunnel_hdr_verify = RTE_SECURITY_IPSEC_TUNNEL_VERIFY_DST_ADDR;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -1998,6 +2068,7 @@ test_ipsec_inline_proto_tunnel_src_dst_addr_verify(const void *data __rte_unused
 	memset(&flags, 0, sizeof(flags));
 
 	flags.tunnel_hdr_verify = RTE_SECURITY_IPSEC_TUNNEL_VERIFY_SRC_DST_ADDR;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2010,6 +2081,7 @@ test_ipsec_inline_proto_inner_ip_csum(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.ip_csum = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2022,6 +2094,7 @@ test_ipsec_inline_proto_inner_l4_csum(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.l4_csum = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2035,6 +2108,7 @@ test_ipsec_inline_proto_tunnel_v4_in_v4(const void *data __rte_unused)
 
 	flags.ipv6 = false;
 	flags.tunnel_ipv6 = false;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2048,6 +2122,7 @@ test_ipsec_inline_proto_tunnel_v6_in_v6(const void *data __rte_unused)
 
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2061,6 +2136,7 @@ test_ipsec_inline_proto_tunnel_v4_in_v6(const void *data __rte_unused)
 
 	flags.ipv6 = false;
 	flags.tunnel_ipv6 = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2074,6 +2150,7 @@ test_ipsec_inline_proto_tunnel_v6_in_v4(const void *data __rte_unused)
 
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = false;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2087,6 +2164,7 @@ test_ipsec_inline_proto_transport_v4(const void *data __rte_unused)
 
 	flags.ipv6 = false;
 	flags.transport = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2097,6 +2175,7 @@ test_ipsec_inline_proto_transport_l4_csum(const void *data __rte_unused)
 	struct ipsec_test_flags flags = {
 		.l4_csum = true,
 		.transport = true,
+		.plaintext_len = plaintext_len,
 	};
 
 	return test_ipsec_inline_proto_all(&flags);
@@ -2110,6 +2189,7 @@ test_ipsec_inline_proto_stats(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.stats_success = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2122,6 +2202,7 @@ test_ipsec_inline_proto_pkt_fragment(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.fragment = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 
@@ -2135,6 +2216,7 @@ test_ipsec_inline_proto_copy_df_inner_0(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.df = TEST_IPSEC_COPY_DF_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2147,6 +2229,7 @@ test_ipsec_inline_proto_copy_df_inner_1(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.df = TEST_IPSEC_COPY_DF_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2159,6 +2242,7 @@ test_ipsec_inline_proto_set_df_0_inner_1(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.df = TEST_IPSEC_SET_DF_0_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2171,6 +2255,7 @@ test_ipsec_inline_proto_set_df_1_inner_0(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.df = TEST_IPSEC_SET_DF_1_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2183,6 +2268,7 @@ test_ipsec_inline_proto_ipv4_copy_dscp_inner_0(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.dscp = TEST_IPSEC_COPY_DSCP_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2195,6 +2281,7 @@ test_ipsec_inline_proto_ipv4_copy_dscp_inner_1(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.dscp = TEST_IPSEC_COPY_DSCP_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2207,6 +2294,7 @@ test_ipsec_inline_proto_ipv4_set_dscp_0_inner_1(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.dscp = TEST_IPSEC_SET_DSCP_0_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2219,6 +2307,7 @@ test_ipsec_inline_proto_ipv4_set_dscp_1_inner_0(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.dscp = TEST_IPSEC_SET_DSCP_1_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2233,6 +2322,7 @@ test_ipsec_inline_proto_ipv6_copy_dscp_inner_0(const void *data __rte_unused)
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = true;
 	flags.dscp = TEST_IPSEC_COPY_DSCP_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2247,6 +2337,7 @@ test_ipsec_inline_proto_ipv6_copy_dscp_inner_1(const void *data __rte_unused)
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = true;
 	flags.dscp = TEST_IPSEC_COPY_DSCP_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2261,6 +2352,7 @@ test_ipsec_inline_proto_ipv6_set_dscp_0_inner_1(const void *data __rte_unused)
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = true;
 	flags.dscp = TEST_IPSEC_SET_DSCP_0_INNER_1;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2275,6 +2367,7 @@ test_ipsec_inline_proto_ipv6_set_dscp_1_inner_0(const void *data __rte_unused)
 	flags.ipv6 = true;
 	flags.tunnel_ipv6 = true;
 	flags.dscp = TEST_IPSEC_SET_DSCP_1_INNER_0;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2339,7 +2432,8 @@ static int
 test_ipsec_inline_proto_ipv4_ttl_decrement(const void *data __rte_unused)
 {
 	struct ipsec_test_flags flags = {
-		.dec_ttl_or_hop_limit = true
+		.dec_ttl_or_hop_limit = true,
+		.plaintext_len = plaintext_len,
 	};
 
 	return test_ipsec_inline_proto_all(&flags);
@@ -2350,7 +2444,8 @@ test_ipsec_inline_proto_ipv6_hop_limit_decrement(const void *data __rte_unused)
 {
 	struct ipsec_test_flags flags = {
 		.ipv6 = true,
-		.dec_ttl_or_hop_limit = true
+		.dec_ttl_or_hop_limit = true,
+		.plaintext_len = plaintext_len,
 	};
 
 	return test_ipsec_inline_proto_all(&flags);
@@ -2364,6 +2459,7 @@ test_ipsec_inline_proto_iv_gen(const void *data __rte_unused)
 	memset(&flags, 0, sizeof(flags));
 
 	flags.iv_gen = true;
+	flags.plaintext_len = plaintext_len;
 
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2372,7 +2468,8 @@ static int
 test_ipsec_inline_proto_sa_pkt_soft_expiry(const void *data __rte_unused)
 {
 	struct ipsec_test_flags flags = {
-		.sa_expiry_pkts_soft = true
+		.sa_expiry_pkts_soft = true,
+		.plaintext_len = plaintext_len,
 	};
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2380,7 +2477,8 @@ static int
 test_ipsec_inline_proto_sa_byte_soft_expiry(const void *data __rte_unused)
 {
 	struct ipsec_test_flags flags = {
-		.sa_expiry_bytes_soft = true
+		.sa_expiry_bytes_soft = true,
+		.plaintext_len = plaintext_len,
 	};
 	return test_ipsec_inline_proto_all(&flags);
 }
@@ -2413,6 +2511,7 @@ test_ipsec_inline_proto_known_vec_fragmented(const void *test_data)
 
 	memset(&flags, 0, sizeof(flags));
 	flags.fragment = true;
+	flags.plaintext_len = plaintext_len;
 
 	memcpy(&td_outb, test_data, sizeof(td_outb));
 
@@ -2435,6 +2534,7 @@ test_ipsec_inline_pkt_replay(const void *test_data, const uint64_t esn[],
 
 	memset(&flags, 0, sizeof(flags));
 	flags.antireplay = true;
+	flags.plaintext_len = plaintext_len;
 
 	for (i = 0; i < nb_pkts; i++) {
 		memcpy(&td_outb[i], test_data, sizeof(td_outb[0]));
@@ -2585,6 +2685,11 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec, &pkt_aes_256_gcm),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 AES-CBC MD5 [12B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_aes_128_cbc_md5),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Outbound known vector (ESP tunnel mode IPv4 AES-CBC 128 HMAC-SHA256 [16B ICV])",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec,
@@ -2600,6 +2705,21 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			test_ipsec_inline_proto_known_vec,
 			&pkt_aes_128_cbc_hmac_sha512),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_3des_cbc_hmac_sha256),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA384 [24B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_3des_cbc_hmac_sha384),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA512 [32B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_3des_cbc_hmac_sha512),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Outbound known vector (ESP tunnel mode IPv6 AES-GCM 128)",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec, &pkt_aes_256_gcm_v6),
@@ -2609,10 +2729,35 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			test_ipsec_inline_proto_known_vec,
 			&pkt_aes_128_cbc_hmac_sha256_v6),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv6 3DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_3des_cbc_hmac_sha256_v6),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Outbound known vector (ESP tunnel mode IPv4 NULL AES-XCBC-MAC [12B ICV])",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec,
 			&pkt_null_aes_xcbc),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_des_cbc_hmac_sha256),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA384 [24B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_des_cbc_hmac_sha384),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA512 [32B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_des_cbc_hmac_sha512),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Outbound known vector (ESP tunnel mode IPv6 DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec,
+			&pkt_des_cbc_hmac_sha256_v6),
 
 		TEST_CASE_NAMED_WITH_DATA(
 			"Outbound fragmented packet",
@@ -2637,6 +2782,11 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec_inb, &pkt_aes_128_cbc_null),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 AES-CBC MD5 [12B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_aes_128_cbc_md5),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Inbound known vector (ESP tunnel mode IPv4 AES-CBC 128 HMAC-SHA256 [16B ICV])",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec_inb,
@@ -2652,6 +2802,21 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			test_ipsec_inline_proto_known_vec_inb,
 			&pkt_aes_128_cbc_hmac_sha512),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_3des_cbc_hmac_sha256),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA384 [24B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_3des_cbc_hmac_sha384),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 3DES-CBC HMAC-SHA512 [32B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_3des_cbc_hmac_sha512),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Inbound known vector (ESP tunnel mode IPv6 AES-GCM 128)",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec_inb, &pkt_aes_256_gcm_v6),
@@ -2661,10 +2826,36 @@ static struct unit_test_suite inline_ipsec_testsuite  = {
 			test_ipsec_inline_proto_known_vec_inb,
 			&pkt_aes_128_cbc_hmac_sha256_v6),
 		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv6 3DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_3des_cbc_hmac_sha256_v6),
+		TEST_CASE_NAMED_WITH_DATA(
 			"Inbound known vector (ESP tunnel mode IPv4 NULL AES-XCBC-MAC [12B ICV])",
 			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
 			test_ipsec_inline_proto_known_vec_inb,
 			&pkt_null_aes_xcbc),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_des_cbc_hmac_sha256),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA384 [24B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_des_cbc_hmac_sha384),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv4 DES-CBC HMAC-SHA512 [32B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_des_cbc_hmac_sha512),
+		TEST_CASE_NAMED_WITH_DATA(
+			"Inbound known vector (ESP tunnel mode IPv6 DES-CBC HMAC-SHA256 [16B ICV])",
+			ut_setup_inline_ipsec, ut_teardown_inline_ipsec,
+			test_ipsec_inline_proto_known_vec_inb,
+			&pkt_des_cbc_hmac_sha256_v6),
+
 
 		TEST_CASE_NAMED_ST(
 			"Combined test alg list",
@@ -2909,6 +3100,25 @@ test_inline_ipsec(void)
 	return unit_test_suite_runner(&inline_ipsec_testsuite);
 }
 
+
+static int
+test_inline_ipsec_sg(void)
+{
+	int rc;
+
+	inline_ipsec_testsuite.setup = inline_ipsec_testsuite_setup;
+	inline_ipsec_testsuite.teardown = inline_ipsec_testsuite_teardown;
+
+	sg_mode = true;
+	/* Run the tests */
+	rc = unit_test_suite_runner(&inline_ipsec_testsuite);
+	sg_mode = false;
+
+	port_conf.rxmode.offloads &= ~RTE_ETH_RX_OFFLOAD_SCATTER;
+	port_conf.txmode.offloads &= ~RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+	return rc;
+}
+
 static int
 test_event_inline_ipsec(void)
 {
@@ -2920,4 +3130,5 @@ test_event_inline_ipsec(void)
 #endif /* !RTE_EXEC_ENV_WINDOWS */
 
 REGISTER_TEST_COMMAND(inline_ipsec_autotest, test_inline_ipsec);
+REGISTER_TEST_COMMAND(inline_ipsec_sg_autotest, test_inline_ipsec_sg);
 REGISTER_TEST_COMMAND(event_inline_ipsec_autotest, test_event_inline_ipsec);

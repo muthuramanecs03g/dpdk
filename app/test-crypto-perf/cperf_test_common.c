@@ -26,8 +26,7 @@ fill_single_seg_mbuf(struct rte_mbuf *m, struct rte_mempool *mp,
 	/* start of buffer is after mbuf structure and priv data */
 	m->priv_size = 0;
 	m->buf_addr = (char *)m + mbuf_hdr_size;
-	m->buf_iova = rte_mempool_virt2iova(obj) +
-		mbuf_offset + mbuf_hdr_size;
+	rte_mbuf_iova_set(m, rte_mempool_virt2iova(obj) + mbuf_offset + mbuf_hdr_size);
 	m->buf_len = segment_sz;
 	m->data_len = data_len;
 	m->pkt_len = data_len;
@@ -58,7 +57,7 @@ fill_multi_seg_mbuf(struct rte_mbuf *m, struct rte_mempool *mp,
 		/* start of buffer is after mbuf structure and priv data */
 		m->priv_size = 0;
 		m->buf_addr = (char *)m + mbuf_hdr_size;
-		m->buf_iova = next_seg_phys_addr;
+		rte_mbuf_iova_set(m, next_seg_phys_addr);
 		next_seg_phys_addr += mbuf_hdr_size + segment_sz;
 		m->buf_len = segment_sz;
 		m->data_len = data_len;
@@ -198,9 +197,11 @@ cperf_alloc_common_memory(const struct cperf_options *options,
 				RTE_CACHE_LINE_ROUNDUP(crypto_op_total_size);
 	uint32_t mbuf_size = sizeof(struct rte_mbuf) + options->segment_sz;
 	uint32_t max_size = options->max_buffer_size + options->digest_sz;
-	uint16_t segments_nb = (max_size % options->segment_sz) ?
-			(max_size / options->segment_sz) + 1 :
-			max_size / options->segment_sz;
+	uint32_t segment_data_len = options->segment_sz - options->headroom_sz -
+				    options->tailroom_sz;
+	uint16_t segments_nb = (max_size % segment_data_len) ?
+				(max_size / segment_data_len) + 1 :
+				(max_size / segment_data_len);
 	uint32_t obj_size = crypto_op_total_size_padded +
 				(mbuf_size * segments_nb);
 

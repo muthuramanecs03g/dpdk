@@ -7,7 +7,9 @@
 #include <rte_security.h>
 #include <rte_security_driver.h>
 
-#include "roc_api.h"
+#include "roc_cpt.h"
+#include "roc_ie_on.h"
+#include "roc_ie_ot.h"
 
 extern struct rte_security_ops cnxk_sec_ops;
 
@@ -21,6 +23,10 @@ static inline int
 ipsec_xform_cipher_verify(struct rte_crypto_sym_xform *crypto_xform)
 {
 	if (crypto_xform->cipher.algo == RTE_CRYPTO_CIPHER_NULL)
+		return 0;
+
+	if (crypto_xform->cipher.algo == RTE_CRYPTO_CIPHER_DES_CBC &&
+	    crypto_xform->cipher.key.length == 8)
 		return 0;
 
 	if (crypto_xform->cipher.algo == RTE_CRYPTO_CIPHER_AES_CBC ||
@@ -50,6 +56,11 @@ ipsec_xform_auth_verify(struct rte_crypto_sym_xform *crypto_xform)
 
 	if (crypto_xform->auth.algo == RTE_CRYPTO_AUTH_NULL)
 		return 0;
+
+	if (crypto_xform->auth.algo == RTE_CRYPTO_AUTH_MD5_HMAC) {
+		if (keylen == 16)
+			return 0;
+	}
 
 	if (crypto_xform->auth.algo == RTE_CRYPTO_AUTH_SHA1_HMAC) {
 		if (keylen >= 20 && keylen <= 64)

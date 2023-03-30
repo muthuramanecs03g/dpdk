@@ -191,7 +191,7 @@ build_proto_compound_sg_fd(dpaa2_sec_session *sess,
 	if (sess->ctxt_type == DPAA2_SEC_PDCP && sess->pdcp.hfn_ovd) {
 		uint32_t hfn_ovd = *(uint32_t *)((uint8_t *)op +
 					sess->pdcp.hfn_ovd_offset);
-		/*enable HFN override override */
+		/* enable HFN override */
 		DPAA2_SET_FLE_INTERNAL_JD(ip_fle, hfn_ovd);
 		DPAA2_SET_FLE_INTERNAL_JD(op_fle, hfn_ovd);
 		DPAA2_SET_FD_INTERNAL_JD(fd, hfn_ovd);
@@ -267,7 +267,7 @@ build_proto_compound_fd(dpaa2_sec_session *sess,
 	if (sess->ctxt_type == DPAA2_SEC_PDCP && sess->pdcp.hfn_ovd) {
 		uint32_t hfn_ovd = *(uint32_t *)((uint8_t *)op +
 					sess->pdcp.hfn_ovd_offset);
-		/*enable HFN override override */
+		/* enable HFN override */
 		DPAA2_SET_FLE_INTERNAL_JD(ip_fle, hfn_ovd);
 		DPAA2_SET_FLE_INTERNAL_JD(op_fle, hfn_ovd);
 		DPAA2_SET_FD_INTERNAL_JD(fd, hfn_ovd);
@@ -1379,12 +1379,10 @@ build_sec_fd(struct rte_crypto_op *op,
 	dpaa2_sec_session *sess;
 
 	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)
-		sess = (dpaa2_sec_session *)get_sym_session_private_data(
-				op->sym->session, cryptodev_driver_id);
+		sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 #ifdef RTE_LIB_SECURITY
 	else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION)
-		sess = (dpaa2_sec_session *)get_sec_session_private_data(
-				op->sym->sec_session);
+		sess = SECURITY_GET_SESS_PRIV(op->sym->session);
 #endif
 	else {
 		DPAA2_SEC_DP_ERR("Session type invalid\n");
@@ -1584,8 +1582,7 @@ sec_simple_fd_to_mbuf(const struct qbman_fd *fd)
 	mbuf->buf_iova = op->sym->aead.digest.phys_addr;
 	op->sym->aead.digest.phys_addr = 0L;
 
-	sess_priv = (dpaa2_sec_session *)get_sec_session_private_data(
-				op->sym->sec_session);
+	sess_priv = SECURITY_GET_SESS_PRIV(op->sym->session);
 	if (sess_priv->dir == DIR_ENC)
 		mbuf->data_off += SEC_FLC_DHR_OUTBOUND;
 	else
@@ -1678,12 +1675,10 @@ dpaa2_sec_dump(struct rte_crypto_op *op)
 	struct rte_crypto_sym_op *sym_op;
 
 	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION)
-		sess = (dpaa2_sec_session *)get_sym_session_private_data(
-			op->sym->session, cryptodev_driver_id);
+		sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 #ifdef RTE_LIBRTE_SECURITY
 	else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION)
-		sess = (dpaa2_sec_session *)get_sec_session_private_data(
-			op->sym->sec_session);
+		sess = SECURITY_GET_SESS_PRIV(op->sym->session);
 #endif
 
 	if (sess == NULL)
@@ -3692,17 +3687,11 @@ out:
 static int
 dpaa2_sec_security_session_create(void *dev,
 				  struct rte_security_session_conf *conf,
-				  struct rte_security_session *sess,
-				  struct rte_mempool *mempool)
+				  struct rte_security_session *sess)
 {
-	void *sess_private_data;
+	void *sess_private_data = SECURITY_GET_SESS_PRIV(sess);
 	struct rte_cryptodev *cdev = (struct rte_cryptodev *)dev;
 	int ret;
-
-	if (rte_mempool_get(mempool, &sess_private_data)) {
-		DPAA2_SEC_ERR("Couldn't get object from session mempool");
-		return -ENOMEM;
-	}
 
 	switch (conf->protocol) {
 	case RTE_SECURITY_PROTOCOL_IPSEC:
@@ -3720,12 +3709,8 @@ dpaa2_sec_security_session_create(void *dev,
 	}
 	if (ret != 0) {
 		DPAA2_SEC_ERR("Failed to configure session parameters");
-		/* Return session to mempool */
-		rte_mempool_put(mempool, sess_private_data);
 		return ret;
 	}
-
-	set_sec_session_private_data(sess, sess_private_data);
 
 	return ret;
 }
@@ -3736,69 +3721,55 @@ dpaa2_sec_security_session_destroy(void *dev __rte_unused,
 		struct rte_security_session *sess)
 {
 	PMD_INIT_FUNC_TRACE();
-	void *sess_priv = get_sec_session_private_data(sess);
+	void *sess_priv = SECURITY_GET_SESS_PRIV(sess);
 
 	dpaa2_sec_session *s = (dpaa2_sec_session *)sess_priv;
 
 	if (sess_priv) {
-		struct rte_mempool *sess_mp = rte_mempool_from_obj(sess_priv);
-
 		rte_free(s->ctxt);
 		rte_free(s->cipher_key.data);
 		rte_free(s->auth_key.data);
 		memset(s, 0, sizeof(dpaa2_sec_session));
-		set_sec_session_private_data(sess, NULL);
-		rte_mempool_put(sess_mp, sess_priv);
 	}
 	return 0;
 }
+
+static unsigned int
+dpaa2_sec_security_session_get_size(void *device __rte_unused)
+{
+	return sizeof(dpaa2_sec_session);
+}
 #endif
 static int
-dpaa2_sec_sym_session_configure(struct rte_cryptodev *dev,
+dpaa2_sec_sym_session_configure(struct rte_cryptodev *dev __rte_unused,
 		struct rte_crypto_sym_xform *xform,
-		struct rte_cryptodev_sym_session *sess,
-		struct rte_mempool *mempool)
+		struct rte_cryptodev_sym_session *sess)
 {
-	void *sess_private_data;
+	void *sess_private_data = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 	int ret;
-
-	if (rte_mempool_get(mempool, &sess_private_data)) {
-		DPAA2_SEC_ERR("Couldn't get object from session mempool");
-		return -ENOMEM;
-	}
 
 	ret = dpaa2_sec_set_session_parameters(xform, sess_private_data);
 	if (ret != 0) {
 		DPAA2_SEC_ERR("Failed to configure session parameters");
 		/* Return session to mempool */
-		rte_mempool_put(mempool, sess_private_data);
 		return ret;
 	}
-
-	set_sym_session_private_data(sess, dev->driver_id,
-		sess_private_data);
 
 	return 0;
 }
 
 /** Clear the memory of session so it doesn't leave key material behind */
 static void
-dpaa2_sec_sym_session_clear(struct rte_cryptodev *dev,
+dpaa2_sec_sym_session_clear(struct rte_cryptodev *dev __rte_unused,
 		struct rte_cryptodev_sym_session *sess)
 {
 	PMD_INIT_FUNC_TRACE();
-	uint8_t index = dev->driver_id;
-	void *sess_priv = get_sym_session_private_data(sess, index);
-	dpaa2_sec_session *s = (dpaa2_sec_session *)sess_priv;
+	dpaa2_sec_session *s = CRYPTODEV_GET_SYM_SESS_PRIV(sess);
 
-	if (sess_priv) {
+	if (s) {
 		rte_free(s->ctxt);
 		rte_free(s->cipher_key.data);
 		rte_free(s->auth_key.data);
-		memset(s, 0, sizeof(dpaa2_sec_session));
-		struct rte_mempool *sess_mp = rte_mempool_from_obj(sess_priv);
-		set_sym_session_private_data(sess, index, NULL);
-		rte_mempool_put(sess_mp, sess_priv);
 	}
 }
 
@@ -4219,6 +4190,7 @@ dpaa2_sec_capabilities_get(void *device __rte_unused)
 static const struct rte_security_ops dpaa2_sec_security_ops = {
 	.session_create = dpaa2_sec_security_session_create,
 	.session_update = NULL,
+	.session_get_size = dpaa2_sec_security_session_get_size,
 	.session_stats_get = NULL,
 	.session_destroy = dpaa2_sec_security_session_destroy,
 	.set_pkt_metadata = NULL,

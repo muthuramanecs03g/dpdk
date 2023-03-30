@@ -21,7 +21,9 @@ The public API headers are grouped by topics:
   [compressdev](@ref rte_compressdev.h),
   [compress](@ref rte_comp.h),
   [regexdev](@ref rte_regexdev.h),
+  [mldev](@ref rte_mldev.h),
   [dmadev](@ref rte_dmadev.h),
+  [gpudev](@ref rte_gpudev.h),
   [eventdev](@ref rte_eventdev.h),
   [event_eth_rx_adapter](@ref rte_event_eth_rx_adapter.h),
   [event_eth_tx_adapter](@ref rte_event_eth_tx_adapter.h),
@@ -210,7 +212,8 @@ The public API headers are grouped by topics:
   [random](@ref rte_random.h),
   [config file](@ref rte_cfgfile.h),
   [key/value args](@ref rte_kvargs.h),
-  [string](@ref rte_string_fns.h)
+  [string](@ref rte_string_fns.h),
+  [thread](@ref rte_thread.h)
 
 - **debug**:
   [jobstats](@ref rte_jobstats.h),

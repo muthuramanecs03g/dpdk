@@ -76,6 +76,7 @@ DPDK_23 {
 	rte_eal_wait_lcore;
 	rte_epoll_ctl;
 	rte_epoll_wait;
+	rte_epoll_wait_interruptible;
 	rte_exit;
 	rte_extmem_attach;
 	rte_extmem_detach;
@@ -147,6 +148,7 @@ DPDK_23 {
 	rte_log_get_global_level;
 	rte_log_get_level;
 	rte_log_get_stream;
+	rte_log_list_types;
 	rte_log_register;
 	rte_log_register_type_and_pick_level;
 	rte_log_set_global_level;
@@ -331,8 +333,6 @@ EXPERIMENTAL {
 	rte_dev_dma_unmap;
 
 	# added in 20.05
-	__rte_eal_trace_alarm_cancel;
-	__rte_eal_trace_alarm_set;
 	__rte_eal_trace_generic_double;
 	__rte_eal_trace_generic_float;
 	__rte_eal_trace_generic_func;
@@ -349,25 +349,11 @@ EXPERIMENTAL {
 	__rte_eal_trace_generic_u64;
 	__rte_eal_trace_generic_u8;
 	__rte_eal_trace_generic_void;
-	__rte_eal_trace_intr_callback_register;
-	__rte_eal_trace_intr_callback_unregister;
-	__rte_eal_trace_intr_enable;
-	__rte_eal_trace_intr_disable;
-	__rte_eal_trace_mem_free;
-	__rte_eal_trace_mem_malloc;
-	__rte_eal_trace_mem_realloc;
-	__rte_eal_trace_mem_zmalloc;
-	__rte_eal_trace_memzone_free;
-	__rte_eal_trace_memzone_lookup;
-	__rte_eal_trace_memzone_reserve;
-	__rte_eal_trace_thread_lcore_ready;
-	__rte_eal_trace_thread_remote_launch;
 	__rte_trace_mem_per_thread_alloc;
 	__rte_trace_point_emit_field;
 	__rte_trace_point_register;
 	per_lcore_trace_mem;
 	per_lcore_trace_point_sz;
-	rte_thread_getname; # WINDOWS_NO_EXPORT
 	rte_trace_dump; # WINDOWS_NO_EXPORT
 	rte_trace_is_enabled; # WINDOWS_NO_EXPORT
 	rte_trace_metadata_dump; # WINDOWS_NO_EXPORT
@@ -387,7 +373,6 @@ EXPERIMENTAL {
 	# added in 20.11
 	__rte_eal_trace_generic_size_t; # WINDOWS_NO_EXPORT
 	rte_cpu_get_intrinsics_support; # WINDOWS_NO_EXPORT
-	rte_epoll_wait_interruptible;
 	rte_service_lcore_may_be_active;
 	rte_vect_get_max_simd_bitwidth;
 	rte_vect_set_max_simd_bitwidth;
@@ -400,7 +385,6 @@ EXPERIMENTAL {
 	# added in 21.05
 	rte_devargs_reset;
 	rte_intr_callback_unregister_sync;
-	rte_log_list_types;
 	rte_thread_key_create;
 	rte_thread_key_delete;
 	rte_thread_value_get;
@@ -430,6 +414,22 @@ EXPERIMENTAL {
 	rte_thread_self;
 	rte_thread_set_affinity_by_id;
 	rte_thread_set_priority;
+
+	# added in 22.11
+	rte_thread_attr_get_affinity;
+	rte_thread_attr_init;
+	rte_thread_attr_set_affinity;
+	rte_thread_attr_set_priority;
+	rte_thread_create;
+	rte_thread_detach;
+	rte_thread_equal;
+	rte_thread_join;
+
+	# added in 23.03
+	rte_lcore_register_usage_cb;
+	rte_thread_create_control;
+	rte_thread_set_name;
+	__rte_eal_trace_generic_blob;
 };
 
 INTERNAL {

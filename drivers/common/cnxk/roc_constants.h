@@ -4,6 +4,8 @@
 #ifndef _ROC_CONSTANTS_H_
 #define _ROC_CONSTANTS_H_
 
+#define ROC_IPV6_ADDR_LEN 16
+
 /* ROC Cache */
 #define ROC_CACHE_LINE_SZ 128
 #define ROC_ALIGN	  ROC_CACHE_LINE_SZ
@@ -12,6 +14,7 @@
 /* [CN10K, .) */
 #define ROC_LMT_LINE_SZ		    128
 #define ROC_NUM_LMT_LINES	    2048
+#define ROC_LMT_LINES_PER_STR_LOG2  4
 #define ROC_LMT_LINES_PER_CORE_LOG2 5
 #define ROC_LMT_LINE_SIZE_LOG2	    7
 #define ROC_LMT_BASE_PER_CORE_LOG2                                             \
@@ -48,6 +51,8 @@
 #define PCI_DEVID_CN9K_RVU_CPT_VF  0xA0FE
 #define PCI_DEVID_CN10K_RVU_CPT_PF 0xA0F2
 #define PCI_DEVID_CN10K_RVU_CPT_VF 0xA0F3
+
+#define PCI_DEVID_CN10K_ML_PF 0xA092
 
 #define PCI_SUBSYSTEM_DEVID_CN10KA  0xB900
 #define PCI_SUBSYSTEM_DEVID_CN10KAS 0xB900

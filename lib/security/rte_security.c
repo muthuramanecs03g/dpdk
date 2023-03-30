@@ -42,35 +42,42 @@ rte_security_dynfield_register(void)
 	return rte_security_dynfield_offset;
 }
 
-struct rte_security_session *
+void *
 rte_security_session_create(struct rte_security_ctx *instance,
 			    struct rte_security_session_conf *conf,
-			    struct rte_mempool *mp,
-			    struct rte_mempool *priv_mp)
+			    struct rte_mempool *mp)
 {
 	struct rte_security_session *sess = NULL;
+	uint32_t sess_priv_size;
 
 	RTE_PTR_CHAIN3_OR_ERR_RET(instance, ops, session_create, NULL, NULL);
 	RTE_PTR_OR_ERR_RET(conf, NULL);
 	RTE_PTR_OR_ERR_RET(mp, NULL);
-	RTE_PTR_OR_ERR_RET(priv_mp, NULL);
+
+	sess_priv_size = instance->ops->session_get_size(instance->device);
+	if (mp->elt_size < (sizeof(struct rte_security_session) + sess_priv_size))
+		return NULL;
 
 	if (rte_mempool_get(mp, (void **)&sess))
 		return NULL;
 
-	if (instance->ops->session_create(instance->device, conf,
-				sess, priv_mp)) {
+	/* Clear session priv data */
+	memset(sess->driver_priv_data, 0, sess_priv_size);
+
+	sess->driver_priv_data_iova = rte_mempool_virt2iova(sess) +
+			offsetof(struct rte_security_session, driver_priv_data);
+	if (instance->ops->session_create(instance->device, conf, sess)) {
 		rte_mempool_put(mp, (void *)sess);
 		return NULL;
 	}
 	instance->sess_cnt++;
 
-	return sess;
+	return (void *)sess;
 }
 
 int
 rte_security_session_update(struct rte_security_ctx *instance,
-			    struct rte_security_session *sess,
+			    void *sess,
 			    struct rte_security_session_conf *conf)
 {
 	RTE_PTR_CHAIN3_OR_ERR_RET(instance, ops, session_update, -EINVAL,
@@ -86,12 +93,13 @@ rte_security_session_get_size(struct rte_security_ctx *instance)
 {
 	RTE_PTR_CHAIN3_OR_ERR_RET(instance, ops, session_get_size, 0, 0);
 
-	return instance->ops->session_get_size(instance->device);
+	return (sizeof(struct rte_security_session) +
+			instance->ops->session_get_size(instance->device));
 }
 
 int
 rte_security_session_stats_get(struct rte_security_ctx *instance,
-			       struct rte_security_session *sess,
+			       void *sess,
 			       struct rte_security_stats *stats)
 {
 	RTE_PTR_CHAIN3_OR_ERR_RET(instance, ops, session_stats_get, -EINVAL,
@@ -103,8 +111,7 @@ rte_security_session_stats_get(struct rte_security_ctx *instance,
 }
 
 int
-rte_security_session_destroy(struct rte_security_ctx *instance,
-			     struct rte_security_session *sess)
+rte_security_session_destroy(struct rte_security_ctx *instance, void *sess)
 {
 	int ret;
 
@@ -212,7 +219,7 @@ rte_security_macsec_sa_stats_get(struct rte_security_ctx *instance, uint16_t sa_
 
 int
 __rte_security_set_pkt_metadata(struct rte_security_ctx *instance,
-				struct rte_security_session *sess,
+				void *sess,
 				struct rte_mbuf *m, void *params)
 {
 #ifdef RTE_DEBUG
@@ -309,14 +316,14 @@ crypto_caps_array(struct rte_tel_data *d,
 	uint64_t caps_val[CRYPTO_CAPS_SZ];
 	unsigned int i = 0, j;
 
-	rte_tel_data_start_array(d, RTE_TEL_U64_VAL);
+	rte_tel_data_start_array(d, RTE_TEL_UINT_VAL);
 
 	while ((dev_caps = &capabilities[i++])->op !=
 	   RTE_CRYPTO_OP_TYPE_UNDEFINED) {
 		memset(&caps_val, 0, CRYPTO_CAPS_SZ * sizeof(caps_val[0]));
 		rte_memcpy(caps_val, dev_caps, sizeof(capabilities[0]));
 		for (j = 0; j < CRYPTO_CAPS_SZ; j++)
-			rte_tel_data_add_array_u64(d, caps_val[j]);
+			rte_tel_data_add_array_uint(d, caps_val[j]);
 	}
 
 	return (i - 1);
@@ -334,14 +341,14 @@ sec_caps_array(struct rte_tel_data *d,
 	uint64_t caps_val[SEC_CAPS_SZ];
 	unsigned int i = 0, j;
 
-	rte_tel_data_start_array(d, RTE_TEL_U64_VAL);
+	rte_tel_data_start_array(d, RTE_TEL_UINT_VAL);
 
 	while ((dev_caps = &capabilities[i++])->action !=
 	   RTE_SECURITY_ACTION_TYPE_NONE) {
 		memset(&caps_val, 0, SEC_CAPS_SZ * sizeof(caps_val[0]));
 		rte_memcpy(caps_val, dev_caps, sizeof(capabilities[0]));
 		for (j = 0; j < SEC_CAPS_SZ; j++)
-			rte_tel_data_add_array_u64(d, caps_val[j]);
+			rte_tel_data_add_array_uint(d, caps_val[j]);
 	}
 
 	return i - 1;

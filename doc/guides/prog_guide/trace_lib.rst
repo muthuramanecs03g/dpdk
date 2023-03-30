@@ -121,9 +121,11 @@ convention.
 .. note::
 
    The ``RTE_TRACE_POINT_REGISTER`` defines the placeholder for the
-   ``rte_trace_point_t`` tracepoint object. The user must export a
-   ``__<trace_function_name>`` symbol in the library ``.map`` file for this
-   tracepoint to be used out of the library, in shared builds.
+   ``rte_trace_point_t`` tracepoint object.
+   For generic tracepoint or for tracepoint used in public header files,
+   the user must export a ``__<trace_function_name>`` symbol
+   in the library ``.map`` file for this tracepoint
+   to be used out of the library, in shared builds.
    For example, ``__app_trace_string`` will be the exported symbol in the
    above example.
 
@@ -271,10 +273,16 @@ Trace memory
 The trace memory will be allocated through an internal function
 ``__rte_trace_mem_per_thread_alloc()``. The trace memory will be allocated
 per thread to enable lock less trace-emit function.
-The memory for the trace memory for DPDK lcores will be allocated on
-``rte_eal_init()`` if the trace is enabled through a EAL option.
-For non DPDK threads, on the first trace emission, the memory will be
-allocated.
+
+For non lcore threads, the trace memory is allocated on the first trace
+emission.
+
+For lcore threads, if trace points are enabled through a EAL option, the trace
+memory is allocated when the threads are known of DPDK
+(``rte_eal_init`` for EAL lcores, ``rte_thread_register`` for non-EAL lcores).
+Otherwise, when trace points are enabled later in the life of the application,
+the behavior is the same as non lcore threads and the trace memory is allocated
+on the first trace emission.
 
 Trace memory layout
 ~~~~~~~~~~~~~~~~~~~
@@ -346,3 +354,16 @@ event ID.
 The ``packet.header`` and ``packet.context`` will be written in the slow path
 at the time of trace memory creation. The ``trace.header`` and trace payload
 will be emitted when the tracepoint function is invoked.
+
+Limitations
+-----------
+
+- The ``rte_trace_point_emit_blob()`` function can capture a maximum blob
+  of length ``RTE_TRACE_BLOB_LEN_MAX`` bytes.
+  The application can call ``rte_trace_point_emit_blob()`` multiple times
+  with length less than or equal to ``RTE_TRACE_BLOB_LEN_MAX``,
+  if it needs to capture more than ``RTE_TRACE_BLOB_LEN_MAX`` bytes.
+- If the length passed to the ``rte_trace_point_emit_blob()``
+  is less than ``RTE_TRACE_BLOB_LEN_MAX``,
+  then the trailing ``(RTE_TRACE_BLOB_LEN_MAX - len)`` bytes in the trace
+  are set to zero.

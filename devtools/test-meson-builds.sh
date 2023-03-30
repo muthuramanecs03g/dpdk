@@ -12,6 +12,17 @@ PIPEFAIL=""
 set -o | grep -q pipefail && set -o pipefail && PIPEFAIL=1
 
 srcdir=$(dirname $(readlink -f $0))/..
+
+# Load config options:
+# - DPDK_BUILD_TEST_DIR
+#
+# - DPDK_MESON_OPTIONS
+#
+# - DPDK_ABI_REF_DIR
+# - DPDK_ABI_REF_SRC
+# - DPDK_ABI_REF_VERSION
+#
+# - DPDK_BUILD_TEST_EXAMPLES
 . $srcdir/devtools/load-devel-config
 
 MESON=${MESON:-meson}
@@ -109,6 +120,11 @@ config () # <dir> <builddir> <meson options>
 		return
 	fi
 	options=
+	# deprecated libs may be disabled by default, so for complete builds ensure
+	# no libs are disabled
+	if ! echo $* | grep -q -- 'disable_libs' ; then
+		options="$options -Ddisable_libs="
+	fi
 	if echo $* | grep -qw -- '--default-library=shared' ; then
 		options="$options -Dexamples=all"
 	else
@@ -119,8 +135,8 @@ config () # <dir> <builddir> <meson options>
 		options="$options -D$option"
 	done
 	options="$options $*"
-	echo "$MESON $options $dir $builddir" >&$verbose
-	$MESON $options $dir $builddir
+	echo "$MESON setup $options $dir $builddir" >&$verbose
+	$MESON setup $options $dir $builddir
 }
 
 compile () # <builddir>
@@ -172,10 +188,15 @@ build () # <directory> <target cc | cross file> <ABI check> [meson options]
 		if [ ! -d $abirefdir/$targetdir ]; then
 			# clone current sources
 			if [ ! -d $abirefdir/src ]; then
-				git clone --local --no-hardlinks \
+				abirefsrc=${DPDK_ABI_REF_SRC:-$srcdir}
+				abirefcloneopts=
+				if [ -d $abirefsrc ]; then
+					abirefcloneopts="--local --no-hardlinks"
+				fi
+				git clone $abirefcloneopts \
 					--single-branch \
 					-b $DPDK_ABI_REF_VERSION \
-					$srcdir $abirefdir/src
+					$abirefsrc $abirefdir/src
 			fi
 
 			rm -rf $abirefdir/build
@@ -183,7 +204,6 @@ build () # <directory> <target cc | cross file> <ABI check> [meson options]
 				-Dexamples= $*
 			compile $abirefdir/build
 			install_target $abirefdir/build $abirefdir/$targetdir
-			$srcdir/devtools/gen-abi.sh $abirefdir/$targetdir
 
 			# save disk space by removing static libs and apps
 			find $abirefdir/$targetdir/usr/local -name '*.a' -delete
@@ -194,10 +214,6 @@ build () # <directory> <target cc | cross file> <ABI check> [meson options]
 		install_target $builds_dir/$targetdir \
 			$(readlink -f $builds_dir/$targetdir/install)
 		echo "Checking ABI compatibility of $targetdir" >&$verbose
-		echo $srcdir/devtools/gen-abi.sh \
-			$(readlink -f $builds_dir/$targetdir/install) >&$veryverbose
-		$srcdir/devtools/gen-abi.sh \
-			$(readlink -f $builds_dir/$targetdir/install) >&$veryverbose
 		echo $srcdir/devtools/check-abi.sh $abirefdir/$targetdir \
 			$(readlink -f $builds_dir/$targetdir/install) >&$veryverbose
 		$srcdir/devtools/check-abi.sh $abirefdir/$targetdir \
@@ -259,6 +275,10 @@ build build-x86-mingw $f skipABI -Dexamples=helloworld
 # generic armv8
 f=$srcdir/config/arm/arm64_armv8_linux_gcc
 build build-arm64-generic-gcc $f ABI $use_shared
+
+# generic LoongArch
+f=$srcdir/config/loongarch/loongarch_loongarch64_linux_gcc
+build build-loongarch64-generic-gcc $f ABI $use_shared
 
 # IBM POWER
 f=$srcdir/config/ppc/ppc64le-power8-linux-gcc

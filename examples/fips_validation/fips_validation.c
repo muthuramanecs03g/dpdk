@@ -460,6 +460,10 @@ fips_test_parse_one_json_vector_set(void)
 	/* Vector sets contain the algorithm type, and nothing else we need. */
 	if (strstr(algo_str, "AES-GCM"))
 		info.algo = FIPS_TEST_ALGO_AES_GCM;
+	else if (strstr(algo_str, "AES-CCM"))
+		info.algo = FIPS_TEST_ALGO_AES_CCM;
+	else if (strstr(algo_str, "AES-GMAC"))
+		info.algo = FIPS_TEST_ALGO_AES_GMAC;
 	else if (strstr(algo_str, "HMAC"))
 		info.algo = FIPS_TEST_ALGO_HMAC;
 	else if (strstr(algo_str, "CMAC"))
@@ -468,8 +472,17 @@ fips_test_parse_one_json_vector_set(void)
 		info.algo = FIPS_TEST_ALGO_AES_CBC;
 	else if (strstr(algo_str, "AES-XTS"))
 		info.algo = FIPS_TEST_ALGO_AES_XTS;
+	else if (strstr(algo_str, "AES-CTR"))
+		info.algo = FIPS_TEST_ALGO_AES_CTR;
 	else if (strstr(algo_str, "SHA"))
 		info.algo = FIPS_TEST_ALGO_SHA;
+	else if (strstr(algo_str, "TDES-CBC") ||
+		strstr(algo_str, "TDES-ECB"))
+		info.algo = FIPS_TEST_ALGO_TDES;
+	else if (strstr(algo_str, "RSA"))
+		info.algo = FIPS_TEST_ALGO_RSA;
+	else if (strstr(algo_str, "ECDSA"))
+		info.algo = FIPS_TEST_ALGO_ECDSA;
 	else
 		return -EINVAL;
 
@@ -483,17 +496,21 @@ fips_test_parse_one_json_group(void)
 	json_t *param;
 
 	if (info.interim_callbacks) {
-		char json_value[256];
+		char json_value[FIPS_TEST_JSON_BUF_LEN];
 		for (i = 0; info.interim_callbacks[i].key != NULL; i++) {
 			param = json_object_get(json_info.json_test_group,
 					info.interim_callbacks[i].key);
+			if (!param)
+				continue;
+
 			switch (json_typeof(param)) {
 			case JSON_STRING:
-				snprintf(json_value, 256, "%s", json_string_value(param));
+				snprintf(json_value, sizeof(json_value), "%s",
+						 json_string_value(param));
 				break;
 
 			case JSON_INTEGER:
-				snprintf(json_value, 255, "%"JSON_INTEGER_FORMAT,
+				snprintf(json_value, sizeof(json_value), "%"JSON_INTEGER_FORMAT,
 						json_integer_value(param));
 				break;
 
@@ -501,13 +518,16 @@ fips_test_parse_one_json_group(void)
 				return -EINVAL;
 			}
 
-			/* First argument is blank because the key
-			 * is not included in the string being parsed.
-			 */
 			ret = info.interim_callbacks[i].cb(
-				"", json_value,
+				info.interim_callbacks[i].key, json_value,
 				info.interim_callbacks[i].val
 			);
+			if (ret < 0)
+				return ret;
+		}
+
+		if (info.parse_interim_writeback) {
+			ret = info.parse_interim_writeback(NULL);
 			if (ret < 0)
 				return ret;
 		}
@@ -525,18 +545,28 @@ fips_test_parse_one_json_case(void)
 
 	for (i = 0; info.callbacks[i].key != NULL; i++) {
 		param = json_object_get(json_info.json_test_case, info.callbacks[i].key);
-		if (param) {
-			strcpy(info.one_line_text, json_string_value(param));
-			/* First argument is blank because the key
-			 * is not included in the string being parsed.
-			 */
-			ret = info.callbacks[i].cb(
-				"", info.one_line_text,
-				info.callbacks[i].val
-			);
-			if (ret < 0)
-				return ret;
+		if (!param)
+			continue;
+
+		switch (json_typeof(param)) {
+		case JSON_STRING:
+			snprintf(info.one_line_text, MAX_LINE_CHAR, "%s",
+					 json_string_value(param));
+			break;
+
+		case JSON_INTEGER:
+			snprintf(info.one_line_text, MAX_LINE_CHAR, "%"JSON_INTEGER_FORMAT,
+					 json_integer_value(param));
+			break;
+
+		default:
+			return -EINVAL;
 		}
+
+		ret = info.callbacks[i].cb(info.callbacks[i].key, info.one_line_text,
+				info.callbacks[i].val);
+		if (ret < 0)
+			return ret;
 	}
 
 	return 0;
@@ -627,7 +657,15 @@ parse_uint8_hex_str(const char *key, char *src, struct fips_val *val)
 {
 	uint32_t len, j;
 
-	src += strlen(key);
+#ifdef USE_JANSSON
+	/*
+	 * Offset not applicable in case of JSON test vectors.
+	 */
+	if (info.file_type == FIPS_TYPE_JSON) {
+		RTE_SET_USED(key);
+	} else
+#endif
+		src += strlen(key);
 
 	len = strlen(src) / 2;
 
@@ -658,6 +696,13 @@ parse_uint8_hex_str(const char *key, char *src, struct fips_val *val)
 int
 parser_read_uint32_val(const char *key, char *src, struct fips_val *val)
 {
+#ifdef USE_JANSSON
+	if (info.file_type == FIPS_TYPE_JSON) {
+		RTE_SET_USED(key);
+
+		return parser_read_uint32(&val->len, src);
+	}
+# endif
 	char *data = src + strlen(key);
 	size_t data_len = strlen(data);
 	int ret;

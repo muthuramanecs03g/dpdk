@@ -9,6 +9,7 @@
 
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
+#include <rte_compat.h>
 #include <rte_kvargs.h>
 #include <rte_mbuf.h>
 #include <rte_mbuf_pool_ops.h>
@@ -21,6 +22,7 @@
 #include <rte_tm_driver.h>
 
 #include "roc_api.h"
+#include <cnxk_ethdev_dp.h>
 
 #define CNXK_ETH_DEV_PMD_VERSION "1.0"
 
@@ -44,19 +46,8 @@
 #define CNXK_NIX_RX_DEFAULT_RING_SZ 4096
 /* Max supported SQB count */
 #define CNXK_NIX_TX_MAX_SQB 512
-
-/* If PTP is enabled additional SEND MEM DESC is required which
- * takes 2 words, hence max 7 iova address are possible
- */
-#if defined(RTE_LIBRTE_IEEE1588)
-#define CNXK_NIX_TX_NB_SEG_MAX 7
-#else
-#define CNXK_NIX_TX_NB_SEG_MAX 9
-#endif
-
-#define CNXK_NIX_TX_MSEG_SG_DWORDS                                             \
-	((RTE_ALIGN_MUL_CEIL(CNXK_NIX_TX_NB_SEG_MAX, 3) / 3) +                 \
-	 CNXK_NIX_TX_NB_SEG_MAX)
+/* LPB & SPB */
+#define CNXK_NIX_NUM_POOLS_MAX 2
 
 #define CNXK_NIX_RSS_L3_L4_SRC_DST                                             \
 	(RTE_ETH_RSS_L3_SRC_ONLY | RTE_ETH_RSS_L3_DST_ONLY |                   \
@@ -108,46 +99,13 @@
 #define RSS_DMAC_INDEX 5
 
 /* Default mark value used when none is provided. */
-#define CNXK_FLOW_ACTION_FLAG_DEFAULT 0xffff
+#define CNXK_NIX_MTR_COUNT_MAX	      73 /* 64(leaf) + 8(mid) + 1(top) */
 
 /* Default cycle counter mask */
 #define CNXK_CYCLECOUNTER_MASK     0xffffffffffffffffULL
-#define CNXK_NIX_TIMESYNC_RX_OFFSET 8
-
-#define PTYPE_NON_TUNNEL_WIDTH	  16
-#define PTYPE_TUNNEL_WIDTH	  12
-#define PTYPE_NON_TUNNEL_ARRAY_SZ BIT(PTYPE_NON_TUNNEL_WIDTH)
-#define PTYPE_TUNNEL_ARRAY_SZ	  BIT(PTYPE_TUNNEL_WIDTH)
-#define PTYPE_ARRAY_SZ                                                         \
-	((PTYPE_NON_TUNNEL_ARRAY_SZ + PTYPE_TUNNEL_ARRAY_SZ) * sizeof(uint16_t))
-
-/* NIX_RX_PARSE_S's ERRCODE + ERRLEV (12 bits) */
-#define ERRCODE_ERRLEN_WIDTH 12
-#define ERR_ARRAY_SZ	     ((BIT(ERRCODE_ERRLEN_WIDTH)) * sizeof(uint32_t))
 
 /* Fastpath lookup */
 #define CNXK_NIX_FASTPATH_LOOKUP_MEM "cnxk_nix_fastpath_lookup_mem"
-
-#define CNXK_NIX_UDP_TUN_BITMASK                                               \
-	((1ull << (RTE_MBUF_F_TX_TUNNEL_VXLAN >> 45)) |                               \
-	 (1ull << (RTE_MBUF_F_TX_TUNNEL_GENEVE >> 45)))
-
-/* Subtype from inline outbound error event */
-#define CNXK_ETHDEV_SEC_OUTB_EV_SUB 0xFFUL
-
-/* SPI will be in 20 bits of tag */
-#define CNXK_ETHDEV_SPI_TAG_MASK 0xFFFFFUL
-
-#define CNXK_NIX_PFC_CHAN_COUNT 16
-
-#define CNXK_TM_MARK_VLAN_DEI BIT_ULL(0)
-#define CNXK_TM_MARK_IP_DSCP  BIT_ULL(1)
-#define CNXK_TM_MARK_IP_ECN   BIT_ULL(2)
-
-#define CNXK_TM_MARK_MASK                                                      \
-	(CNXK_TM_MARK_VLAN_DEI | CNXK_TM_MARK_IP_DSCP | CNXK_TM_MARK_IP_ECN)
-
-#define CNXK_TX_MARK_FMT_MASK (0xFFFFFFFFFFFFull)
 
 struct cnxk_fc_cfg {
 	enum rte_eth_fc_mode mode;
@@ -171,15 +129,6 @@ struct cnxk_eth_qconf {
 	uint16_t nb_desc;
 	uint8_t valid;
 };
-
-struct cnxk_timesync_info {
-	uint8_t rx_ready;
-	uint64_t rx_tstamp;
-	uint64_t rx_tstamp_dynflag;
-	int tstamp_dynfield_offset;
-	rte_iova_t tx_tstamp_iova;
-	uint64_t *tx_tstamp;
-} __plt_cache_aligned;
 
 struct cnxk_meter_node {
 #define MAX_PRV_MTR_NODES 10
@@ -219,6 +168,7 @@ struct policy_actions {
 		uint16_t queue;
 		uint32_t mtr_id;
 		struct action_rss *rss_desc;
+		bool skip_red;
 	};
 };
 
@@ -363,9 +313,9 @@ struct cnxk_eth_dev {
 	uint16_t flags;
 	uint8_t ptype_disable;
 	bool scalar_ena;
+	bool tx_compl_ena;
 	bool tx_mark;
 	bool ptp_en;
-	bool rx_mark_update; /* Enable/Disable mark update to mbuf */
 
 	/* Pointer back to rte */
 	struct rte_eth_dev *eth_dev;
@@ -416,6 +366,9 @@ struct cnxk_eth_dev {
 	struct cnxk_mtr_profiles mtr_profiles;
 	struct cnxk_mtr_policy mtr_policy;
 	struct cnxk_mtr mtr;
+
+	/* Congestion Management */
+	struct rte_eth_cman_config cman_cfg;
 
 	/* Rx burst for cleanup(Only Primary) */
 	eth_rx_burst_t rx_pkt_burst_no_offload;
@@ -538,6 +491,7 @@ int cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 			    const struct rte_eth_rxconf *rx_conf,
 			    struct rte_mempool *mp);
 int cnxk_nix_tx_queue_start(struct rte_eth_dev *eth_dev, uint16_t qid);
+void cnxk_nix_tx_queue_release(struct rte_eth_dev *eth_dev, uint16_t qid);
 int cnxk_nix_tx_queue_stop(struct rte_eth_dev *eth_dev, uint16_t qid);
 int cnxk_nix_dev_start(struct rte_eth_dev *eth_dev);
 int cnxk_nix_timesync_enable(struct rte_eth_dev *eth_dev);
@@ -558,7 +512,7 @@ int cnxk_nix_read_clock(struct rte_eth_dev *eth_dev, uint64_t *clock);
 uint64_t cnxk_nix_rxq_mbuf_setup(struct cnxk_eth_dev *dev);
 int cnxk_nix_tm_ops_get(struct rte_eth_dev *eth_dev, void *ops);
 int cnxk_nix_tm_set_queue_rate_limit(struct rte_eth_dev *eth_dev,
-				     uint16_t queue_idx, uint16_t tx_rate);
+				     uint16_t queue_idx, uint32_t tx_rate);
 int cnxk_nix_tm_mark_vlan_dei(struct rte_eth_dev *eth_dev, int mark_green,
 			      int mark_yellow, int mark_red,
 			      struct rte_tm_error *error);
@@ -593,6 +547,7 @@ void cnxk_eth_dev_link_status_cb(struct roc_nix *nix,
 				 struct roc_nix_link_info *link);
 void cnxk_eth_dev_link_status_get_cb(struct roc_nix *nix,
 				     struct roc_nix_link_info *link);
+void cnxk_eth_dev_q_err_cb(struct roc_nix *nix, void *data);
 int cnxk_nix_link_update(struct rte_eth_dev *eth_dev, int wait_to_complete);
 int cnxk_nix_queue_stats_mapping(struct rte_eth_dev *dev, uint16_t queue_id,
 				 uint8_t stat_idx, uint8_t is_rx);
@@ -639,6 +594,8 @@ int cnxk_eth_outb_sa_idx_get(struct cnxk_eth_dev *dev, uint32_t *idx_p,
 int cnxk_eth_outb_sa_idx_put(struct cnxk_eth_dev *dev, uint32_t idx);
 int cnxk_nix_lookup_mem_sa_base_set(struct cnxk_eth_dev *dev);
 int cnxk_nix_lookup_mem_sa_base_clear(struct cnxk_eth_dev *dev);
+int cnxk_nix_lookup_mem_metapool_set(struct cnxk_eth_dev *dev);
+int cnxk_nix_lookup_mem_metapool_clear(struct cnxk_eth_dev *dev);
 __rte_internal
 int cnxk_nix_inb_mode_set(struct cnxk_eth_dev *dev, bool use_inl_dev);
 struct cnxk_eth_sec_sess *cnxk_eth_sec_sess_get_by_spi(struct cnxk_eth_dev *dev,
@@ -646,8 +603,17 @@ struct cnxk_eth_sec_sess *cnxk_eth_sec_sess_get_by_spi(struct cnxk_eth_dev *dev,
 struct cnxk_eth_sec_sess *
 cnxk_eth_sec_sess_get_by_sess(struct cnxk_eth_dev *dev,
 			      struct rte_security_session *sess);
-int cnxk_nix_inl_meta_pool_cb(uint64_t *aura_handle, uint32_t buf_sz, uint32_t nb_bufs,
-			      bool destroy);
+int cnxk_nix_inl_meta_pool_cb(uint64_t *aura_handle, uintptr_t *mpool, uint32_t buf_sz,
+			      uint32_t nb_bufs, bool destroy, const char *mempool_name);
+
+/* Congestion Management */
+int cnxk_nix_cman_info_get(struct rte_eth_dev *dev, struct rte_eth_cman_info *info);
+
+int cnxk_nix_cman_config_init(struct rte_eth_dev *dev, struct rte_eth_cman_config *config);
+
+int cnxk_nix_cman_config_set(struct rte_eth_dev *dev, const struct rte_eth_cman_config *config);
+
+int cnxk_nix_cman_config_get(struct rte_eth_dev *dev, struct rte_eth_cman_config *config);
 
 /* Other private functions */
 int nix_recalc_mtu(struct rte_eth_dev *eth_dev);
@@ -676,90 +642,5 @@ int nix_priority_flow_ctrl_rq_conf(struct rte_eth_dev *eth_dev, uint16_t qid,
 				   uint8_t tx_pause, uint8_t tc);
 int nix_priority_flow_ctrl_sq_conf(struct rte_eth_dev *eth_dev, uint16_t qid,
 				   uint8_t rx_pause, uint8_t tc);
-
-/* Inlines */
-static __rte_always_inline uint64_t
-cnxk_pktmbuf_detach(struct rte_mbuf *m)
-{
-	struct rte_mempool *mp = m->pool;
-	uint32_t mbuf_size, buf_len;
-	struct rte_mbuf *md;
-	uint16_t priv_size;
-	uint16_t refcount;
-
-	/* Update refcount of direct mbuf */
-	md = rte_mbuf_from_indirect(m);
-	refcount = rte_mbuf_refcnt_update(md, -1);
-
-	priv_size = rte_pktmbuf_priv_size(mp);
-	mbuf_size = (uint32_t)(sizeof(struct rte_mbuf) + priv_size);
-	buf_len = rte_pktmbuf_data_room_size(mp);
-
-	m->priv_size = priv_size;
-	m->buf_addr = (char *)m + mbuf_size;
-	m->buf_iova = rte_mempool_virt2iova(m) + mbuf_size;
-	m->buf_len = (uint16_t)buf_len;
-	rte_pktmbuf_reset_headroom(m);
-	m->data_len = 0;
-	m->ol_flags = 0;
-	m->next = NULL;
-	m->nb_segs = 1;
-
-	/* Now indirect mbuf is safe to free */
-	rte_pktmbuf_free(m);
-
-	if (refcount == 0) {
-		rte_mbuf_refcnt_set(md, 1);
-		md->data_len = 0;
-		md->ol_flags = 0;
-		md->next = NULL;
-		md->nb_segs = 1;
-		return 0;
-	} else {
-		return 1;
-	}
-}
-
-static __rte_always_inline uint64_t
-cnxk_nix_prefree_seg(struct rte_mbuf *m)
-{
-	if (likely(rte_mbuf_refcnt_read(m) == 1)) {
-		if (!RTE_MBUF_DIRECT(m))
-			return cnxk_pktmbuf_detach(m);
-
-		m->next = NULL;
-		m->nb_segs = 1;
-		return 0;
-	} else if (rte_mbuf_refcnt_update(m, -1) == 0) {
-		if (!RTE_MBUF_DIRECT(m))
-			return cnxk_pktmbuf_detach(m);
-
-		rte_mbuf_refcnt_set(m, 1);
-		m->next = NULL;
-		m->nb_segs = 1;
-		return 0;
-	}
-
-	/* Mbuf is having refcount more than 1 so need not to be freed */
-	return 1;
-}
-
-static inline rte_mbuf_timestamp_t *
-cnxk_nix_timestamp_dynfield(struct rte_mbuf *mbuf,
-			    struct cnxk_timesync_info *info)
-{
-	return RTE_MBUF_DYNFIELD(mbuf, info->tstamp_dynfield_offset,
-				 rte_mbuf_timestamp_t *);
-}
-
-static __rte_always_inline uintptr_t
-cnxk_nix_sa_base_get(uint16_t port, const void *lookup_mem)
-{
-	uintptr_t sa_base_tbl;
-
-	sa_base_tbl = (uintptr_t)lookup_mem;
-	sa_base_tbl += PTYPE_ARRAY_SZ + ERR_ARRAY_SZ;
-	return *((const uintptr_t *)sa_base_tbl + port);
-}
 
 #endif /* __CNXK_ETHDEV_H__ */

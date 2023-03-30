@@ -297,6 +297,12 @@ The following is an overview of some key Vhost API functions:
   Clear in-flight packets which are submitted to async channel in vhost async data
   path. Completed packets are returned to applications through ``pkts``.
 
+* ``rte_vhost_vring_call_nonblock(int vid, uint16_t vring_idx)``
+
+  Notify the guest that used descriptors have been added to the vring. This function
+  will return -EAGAIN when vq's access lock is held by other thread, user should try
+  again later.
+
 * ``rte_vhost_vring_stats_get_names(int vid, uint16_t queue_id, struct rte_vhost_stat_name *names, unsigned int size)``
 
   This function returns the names of the queue statistics. It requires
@@ -322,6 +328,11 @@ The following is an overview of some key Vhost API functions:
 
   Get device type of vDPA device, such as VDPA_DEVICE_TYPE_NET,
   VDPA_DEVICE_TYPE_BLK.
+
+* ``rte_vhost_async_dma_unconfigure(dma_id, vchan_id)``
+
+  Clean DMA vChannel finished to use. After this function is called,
+  the specified DMA vChannel should no longer be used by the Vhost library.
 
 Vhost-user Implementations
 --------------------------

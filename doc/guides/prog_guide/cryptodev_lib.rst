@@ -98,14 +98,10 @@ The rte_cryptodev_configure API is used to configure a Crypto device.
 The ``rte_cryptodev_config`` structure is used to pass the configuration
 parameters for socket selection and number of queue pairs.
 
-.. code-block:: c
-
-    struct rte_cryptodev_config {
-        int socket_id;
-        /**< Socket to allocate resources on */
-        uint16_t nb_queue_pairs;
-        /**< Number of queue pairs to configure on device */
-    };
+.. literalinclude:: ../../../lib/cryptodev/rte_cryptodev.h
+   :language: c
+   :start-after: Structure rte_cryptodev_config 8<
+   :end-before: >8 End of structure rte_cryptodev_config.
 
 
 Configuration of Queue Pairs
@@ -121,17 +117,15 @@ Each queue pairs resources may be allocated on a specified socket.
                 const struct rte_cryptodev_qp_conf *qp_conf,
                 int socket_id)
 
-   struct rte_cryptodev_qp_conf {
-        uint32_t nb_descriptors; /**< Number of descriptors per queue pair */
-        struct rte_mempool *mp_session;
-        /**< The mempool for creating session in sessionless mode */
-        struct rte_mempool *mp_session_private;
-        /**< The mempool for creating sess private data in sessionless mode */
-    };
+
+.. literalinclude:: ../../../lib/cryptodev/rte_cryptodev.h
+   :language: c
+   :start-after: Structure rte_cryptodev_qp_conf 8<
+   :end-before: >8 End of structure rte_cryptodev_qp_conf.
 
 
-The fields ``mp_session`` and ``mp_session_private`` are used for creating
-temporary session to process the crypto operations in the session-less mode.
+The field ``mp_session`` is used for creating temporary session to process
+the crypto operations in the session-less mode.
 They can be the same other different mempools. Please note not all Cryptodev
 PMDs supports session-less mode.
 
@@ -273,23 +267,10 @@ This allows the user to query a specific Crypto PMD and get all the device
 features and capabilities. The ``rte_cryptodev_info`` structure contains all the
 relevant information for the device.
 
-.. code-block:: c
-
-    struct rte_cryptodev_info {
-        const char *driver_name;
-        uint8_t driver_id;
-        struct rte_device *device;
-
-        uint64_t feature_flags;
-
-        const struct rte_cryptodev_capabilities *capabilities;
-
-        unsigned max_nb_queue_pairs;
-
-        struct {
-            unsigned max_nb_sessions;
-        } sym;
-    };
+.. literalinclude:: ../../../lib/cryptodev/rte_cryptodev.h
+   :language: c
+   :start-after: Structure rte_cryptodev_info 8<
+   :end-before: >8 End of structure rte_cryptodev_info.
 
 
 Operation Processing
@@ -501,37 +482,29 @@ a flow. Crypto sessions cache this immutable data in a optimal way for the
 underlying PMD and this allows further acceleration of the offload of
 Crypto workloads.
 
-.. figure:: img/cryptodev_sym_sess.*
-
 The Crypto device framework provides APIs to create session mempool and allocate
 and initialize sessions for crypto devices, where sessions are mempool objects.
 The application has to use ``rte_cryptodev_sym_session_pool_create()`` to
-create the session header mempool that creates a mempool with proper element
-size automatically and stores necessary information for safely accessing the
-session in the mempool's private data field.
-
-To create a mempool for storing session private data, the application has two
-options. The first is to create another mempool with elt size equal to or
-bigger than the maximum session private data size of all crypto devices that
-will share the same session header. The creation of the mempool shall use the
-traditional ``rte_mempool_create()`` with the correct ``elt_size``. The other
-option is to change the ``elt_size`` parameter in
-``rte_cryptodev_sym_session_pool_create()`` to the correct value. The first
-option is more complex to implement but may result in better memory usage as
-a session header normally takes smaller memory footprint as the session private
-data.
+create the session mempool header and the private data with the size specified
+by the user through the ``elt_size`` parameter in the function.
+The session private data is for the driver to initialize and access
+during crypto operations, hence the ``elt_size`` should be big enough
+for all drivers that will share this mempool.
+To obtain the proper session private data size of a crypto device,
+the user can call ``rte_cryptodev_sym_get_private_session_size()`` function.
+In case of heterogeneous crypto devices which will share the same session mempool,
+the maximum session private data size of them should be passed.
 
 Once the session mempools have been created, ``rte_cryptodev_sym_session_create()``
-is used to allocate an uninitialized session from the given mempool.
-The session then must be initialized using ``rte_cryptodev_sym_session_init()``
-for each of the required crypto devices. A symmetric transform chain
-is used to specify the operation and its parameters. See the section below for
-details on transforms.
+is used to allocate and initialize the session from the given mempool.
+The created session can ONLY be used by the crypto devices sharing the same driver ID
+as the device ID passed into the function as the parameter.
+In addition, a symmetric transform chain is used to specify the operation and its parameters.
+See the section below for details on transforms.
 
-When a session is no longer used, user must call ``rte_cryptodev_sym_session_clear()``
-for each of the crypto devices that are using the session, to free all driver
-private session data. Once this is done, session should be freed using
-``rte_cryptodev_sym_session_free`` which returns them to their mempool.
+When a session is no longer used, user must call ``rte_cryptodev_sym_session_free()``
+to uninitialize the session data and return the session
+back to the mempool it belongs.
 
 
 Transforms and Transform Chaining
@@ -550,22 +523,10 @@ Currently there are three transforms types cipher, authentication and AEAD.
 Also it is important to note that the order in which the
 transforms are passed indicates the order of the chaining.
 
-.. code-block:: c
-
-    struct rte_crypto_sym_xform {
-        struct rte_crypto_sym_xform *next;
-        /**< next xform in chain */
-        enum rte_crypto_sym_xform_type type;
-        /**< xform type */
-        union {
-            struct rte_crypto_auth_xform auth;
-            /**< Authentication / hash xform */
-            struct rte_crypto_cipher_xform cipher;
-            /**< Cipher xform */
-            struct rte_crypto_aead_xform aead;
-            /**< AEAD xform */
-        };
-    };
+.. literalinclude:: ../../../lib/cryptodev/rte_crypto_sym.h
+   :language: c
+   :start-after: Structure rte_crypto_sym_xform 8<
+   :end-before: >8 End of structure rte_crypto_sym_xform.
 
 The API does not place a limit on the number of transforms that can be chained
 together but this will be limited by the underlying Crypto device poll mode
@@ -588,61 +549,11 @@ authentication/ cipher/ AEAD parameters required depending on the type of operat
 specified in the session or the transform
 chain.
 
-.. code-block:: c
+.. literalinclude:: ../../../lib/cryptodev/rte_crypto_sym.h
+   :language: c
+   :start-after: Structure rte_crypto_sym_op 8<
+   :end-before: >8 End of structure rte_crypto_sym_op.
 
-    struct rte_crypto_sym_op {
-        struct rte_mbuf *m_src;
-        struct rte_mbuf *m_dst;
-
-        union {
-            struct rte_cryptodev_sym_session *session;
-            /**< Handle for the initialised session context */
-            struct rte_crypto_sym_xform *xform;
-            /**< Session-less API Crypto operation parameters */
-        };
-
-        union {
-            struct {
-                struct {
-                    uint32_t offset;
-                    uint32_t length;
-                } data; /**< Data offsets and length for AEAD */
-
-                struct {
-                    uint8_t *data;
-                    rte_iova_t phys_addr;
-                } digest; /**< Digest parameters */
-
-                struct {
-                    uint8_t *data;
-                    rte_iova_t phys_addr;
-                } aad;
-                /**< Additional authentication parameters */
-            } aead;
-
-            struct {
-                struct {
-                    struct {
-                        uint32_t offset;
-                        uint32_t length;
-                    } data; /**< Data offsets and length for ciphering */
-                } cipher;
-
-                struct {
-                    struct {
-                        uint32_t offset;
-                        uint32_t length;
-                    } data;
-                    /**< Data offsets and length for authentication */
-
-                    struct {
-                        uint8_t *data;
-                        rte_iova_t phys_addr;
-                    } digest; /**< Digest parameters */
-                } auth;
-            };
-        };
-    };
 
 Synchronous mode
 ----------------
@@ -943,14 +854,10 @@ using one of the crypto PMDs available in DPDK.
 
     /* Create crypto session and initialize it for the crypto device. */
     struct rte_cryptodev_sym_session *session;
-    session = rte_cryptodev_sym_session_create(session_pool);
+    session = rte_cryptodev_sym_session_create(cdev_id, &cipher_xform,
+                    session_pool);
     if (session == NULL)
         rte_exit(EXIT_FAILURE, "Session could not be created\n");
-
-    if (rte_cryptodev_sym_session_init(cdev_id, session,
-                    &cipher_xform, session_priv_pool) < 0)
-        rte_exit(EXIT_FAILURE, "Session could not be initialized "
-                    "for the crypto device\n");
 
     /* Get a burst of crypto operations. */
     struct rte_crypto_op *crypto_ops[BURST_SIZE];

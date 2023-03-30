@@ -1065,6 +1065,9 @@ iavf_dev_stop(struct rte_eth_dev *dev)
 
 	PMD_INIT_FUNC_TRACE();
 
+	if (vf->vf_reset)
+		return 0;
+
 	if (adapter->closed)
 		return -1;
 
@@ -1125,6 +1128,7 @@ iavf_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 		RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM |
 		RTE_ETH_RX_OFFLOAD_SCATTER |
 		RTE_ETH_RX_OFFLOAD_VLAN_FILTER |
+		RTE_ETH_RX_OFFLOAD_VLAN_EXTEND |
 		RTE_ETH_RX_OFFLOAD_RSS_HASH;
 
 	dev_info->tx_offload_capa =
@@ -1178,6 +1182,8 @@ iavf_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 		.nb_min = IAVF_MIN_RING_DESC,
 		.nb_align = IAVF_ALIGN_RING_DESC,
 	};
+
+	dev_info->err_handle_mode = RTE_ETH_ERROR_HANDLE_MODE_PASSIVE;
 
 	return 0;
 }
@@ -2631,6 +2637,9 @@ iavf_dev_init(struct rte_eth_dev *eth_dev)
 	rte_ether_addr_copy((struct rte_ether_addr *)hw->mac.addr,
 			&eth_dev->data->mac_addrs[0]);
 
+	if (iavf_dev_event_handler_init())
+		goto init_vf_err;
+
 	if (vf->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_WB_ON_ITR) {
 		/* register callback func to eal lib */
 		rte_intr_callback_register(pci_dev->intr_handle,
@@ -2784,6 +2793,8 @@ iavf_dev_uninit(struct rte_eth_dev *dev)
 		return -EPERM;
 
 	iavf_dev_close(dev);
+
+	iavf_dev_event_handler_fini();
 
 	return 0;
 }

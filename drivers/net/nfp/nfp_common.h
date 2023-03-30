@@ -14,6 +14,8 @@
 #ifndef _NFP_COMMON_H_
 #define _NFP_COMMON_H_
 
+#include "nfp_ctrl.h"
+
 #define NFP_NET_PMD_VERSION "0.1"
 #define PCI_VENDOR_ID_NETRONOME         0x19ee
 #define PCI_VENDOR_ID_CORIGINE          0x1da8
@@ -109,9 +111,16 @@ struct nfp_net_adapter;
 
 /* Maximum supported NFP frame size (MTU + layer 2 headers) */
 #define NFP_FRAME_SIZE_MAX	10048
+#define DEFAULT_FLBUF_SIZE        9216
 
 #include <linux/types.h>
 #include <rte_io.h>
+
+/* Firmware application ID's */
+enum nfp_app_fw_id {
+	NFP_APP_FW_CORE_NIC               = 0x1,
+	NFP_APP_FW_FLOWER_NIC             = 0x3,
+};
 
 /* nfp_qcp_ptr - Read or Write Pointer of a queue */
 enum nfp_qcp_ptr {
@@ -119,12 +128,22 @@ enum nfp_qcp_ptr {
 	NFP_QCP_WRITE_PTR
 };
 
+enum nfp_net_meta_format {
+	NFP_NET_METAFORMAT_SINGLE,
+	NFP_NET_METAFORMAT_CHAINED,
+};
+
 struct nfp_pf_dev {
 	/* Backpointer to associated pci device */
 	struct rte_pci_device *pci_dev;
 
-	/* Array of physical ports belonging to this PF */
-	struct nfp_net_hw *ports[NFP_MAX_PHYPORTS];
+	enum nfp_app_fw_id app_fw_id;
+
+	/* Pointer to the app running on the PF */
+	void *app_fw_priv;
+
+	/* The eth table reported by firmware */
+	struct nfp_eth_table *nfp_eth_table;
 
 	/* Current values for control */
 	uint32_t ctrl;
@@ -153,14 +172,28 @@ struct nfp_pf_dev {
 	struct nfp_cpp_area *msix_area;
 
 	uint8_t *hw_queues;
-	uint8_t total_phyports;
-	bool	multiport;
 
 	union eth_table_entry *eth_table;
 
 	struct nfp_hwinfo *hwinfo;
 	struct nfp_rtsym_table *sym_tbl;
-	uint32_t nfp_cpp_service_id;
+
+	/* service id of cpp bridge service */
+	uint32_t cpp_bridge_id;
+};
+
+struct nfp_app_fw_nic {
+	/* Backpointer to the PF device */
+	struct nfp_pf_dev *pf_dev;
+
+	/*
+	 * Array of physical ports belonging to the this CoreNIC app
+	 * This is really a list of vNIC's. One for each physical port
+	 */
+	struct nfp_net_hw *ports[NFP_MAX_PHYPORTS];
+
+	bool multiport;
+	uint8_t total_phyports;
 };
 
 struct nfp_net_hw {
@@ -176,6 +209,7 @@ struct nfp_net_hw {
 	uint32_t max_mtu;
 	uint32_t mtu;
 	uint32_t rx_offset;
+	enum nfp_net_meta_format meta_format;
 
 	/* Current values for control */
 	uint32_t ctrl;
@@ -186,6 +220,9 @@ struct nfp_net_hw {
 
 	int stride_rx;
 	int stride_tx;
+
+	uint16_t vxlan_ports[NFP_NET_N_VXLAN_PORTS];
+	uint8_t vxlan_usecnt[NFP_NET_N_VXLAN_PORTS];
 
 	uint8_t *qcp_cfg;
 	rte_spinlock_t reconfig_lock;
@@ -218,11 +255,8 @@ struct nfp_net_hw {
 	uint8_t idx;
 	/* Internal port number as seen from NFP */
 	uint8_t nfp_idx;
-	bool	is_phyport;
 
 	union eth_table_entry *eth_table;
-
-	uint32_t nfp_cpp_service_id;
 };
 
 struct nfp_net_adapter {
@@ -247,6 +281,11 @@ static inline uint32_t nn_readl(volatile const void *addr)
 static inline void nn_writel(uint32_t val, volatile void *addr)
 {
 	rte_write32(val, addr);
+}
+
+static inline uint16_t nn_readw(volatile const void *addr)
+{
+	return rte_read16(addr);
 }
 
 static inline void nn_writew(uint16_t val, volatile void *addr)
@@ -285,6 +324,18 @@ static inline void
 nn_cfg_writeb(struct nfp_net_hw *hw, int off, uint8_t val)
 {
 	nn_writeb(val, hw->ctrl_bar + off);
+}
+
+static inline uint16_t
+nn_cfg_readw(struct nfp_net_hw *hw, int off)
+{
+	return rte_le_to_cpu_16(nn_readw(hw->ctrl_bar + off));
+}
+
+static inline void
+nn_cfg_writew(struct nfp_net_hw *hw, int off, uint16_t val)
+{
+	nn_writew(rte_cpu_to_le_16(val), hw->ctrl_bar + off);
 }
 
 static inline uint32_t
@@ -377,6 +428,7 @@ nfp_pci_queue(struct rte_pci_device *pdev, uint16_t queue)
 /* Prototypes for common NFP functions */
 int nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t ctrl, uint32_t update);
 int nfp_net_configure(struct rte_eth_dev *dev);
+void nfp_net_log_device_information(const struct nfp_net_hw *hw);
 void nfp_net_enable_queues(struct rte_eth_dev *dev);
 void nfp_net_disable_queues(struct rte_eth_dev *dev);
 void nfp_net_params_setup(struct nfp_net_hw *hw);
@@ -419,12 +471,27 @@ void nfp_net_stop_rx_queue(struct rte_eth_dev *dev);
 void nfp_net_close_rx_queue(struct rte_eth_dev *dev);
 void nfp_net_stop_tx_queue(struct rte_eth_dev *dev);
 void nfp_net_close_tx_queue(struct rte_eth_dev *dev);
+int nfp_net_set_vxlan_port(struct nfp_net_hw *hw, size_t idx, uint16_t port);
+int nfp_net_rx_desc_limits(struct nfp_net_hw *hw,
+		uint16_t *min_rx_desc,
+		uint16_t *max_rx_desc);
+int nfp_net_tx_desc_limits(struct nfp_net_hw *hw,
+		uint16_t *min_tx_desc,
+		uint16_t *max_tx_desc);
+int nfp_net_check_dma_mask(struct nfp_net_hw *hw, char *name);
+void nfp_net_init_metadata_format(struct nfp_net_hw *hw);
 
 #define NFP_NET_DEV_PRIVATE_TO_HW(adapter)\
 	(&((struct nfp_net_adapter *)adapter)->hw)
 
 #define NFP_NET_DEV_PRIVATE_TO_PF(dev_priv)\
 	(((struct nfp_net_hw *)dev_priv)->pf_dev)
+
+#define NFP_PRIV_TO_APP_FW_NIC(app_fw_priv)\
+	((struct nfp_app_fw_nic *)app_fw_priv)
+
+#define NFP_PRIV_TO_APP_FW_FLOWER(app_fw_priv)\
+	((struct nfp_app_fw_flower *)app_fw_priv)
 
 #endif /* _NFP_COMMON_H_ */
 /*

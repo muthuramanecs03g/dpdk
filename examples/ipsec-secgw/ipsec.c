@@ -6,6 +6,7 @@
 #include <netinet/ip.h>
 
 #include <rte_branch_prediction.h>
+#include <rte_event_crypto_adapter.h>
 #include <rte_log.h>
 #include <rte_crypto.h>
 #include <rte_security.h>
@@ -52,18 +53,201 @@ set_ipsec_conf(struct ipsec_sa *sa, struct rte_security_ipsec_xform *ipsec)
 	ipsec->replay_win_sz = app_sa_prm.window_size;
 	ipsec->options.esn = app_sa_prm.enable_esn;
 	ipsec->options.udp_encap = sa->udp_encap;
+	if (IS_HW_REASSEMBLY_EN(sa->flags))
+		ipsec->options.ip_reassembly_en = 1;
+}
+
+static inline int
+verify_crypto_xform(const struct rte_cryptodev_capabilities *capabilities,
+		struct rte_crypto_sym_xform *crypto_xform)
+{
+	const struct rte_cryptodev_capabilities *crypto_cap;
+	int j = 0;
+
+	while ((crypto_cap = &capabilities[j++])->op != RTE_CRYPTO_OP_TYPE_UNDEFINED) {
+		if (crypto_cap->op == RTE_CRYPTO_OP_TYPE_SYMMETRIC &&
+				crypto_cap->sym.xform_type == crypto_xform->type) {
+			if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_AEAD &&
+					crypto_cap->sym.aead.algo == crypto_xform->aead.algo) {
+				if (rte_cryptodev_sym_capability_check_aead(&crypto_cap->sym,
+						crypto_xform->aead.key.length,
+						crypto_xform->aead.digest_length,
+						crypto_xform->aead.aad_length,
+						crypto_xform->aead.iv.length) == 0)
+					return 0;
+			}
+			if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_CIPHER &&
+					crypto_cap->sym.cipher.algo == crypto_xform->cipher.algo) {
+				if (rte_cryptodev_sym_capability_check_cipher(&crypto_cap->sym,
+						crypto_xform->cipher.key.length,
+						crypto_xform->cipher.iv.length) == 0)
+					return 0;
+			}
+			if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_AUTH &&
+					crypto_cap->sym.auth.algo == crypto_xform->auth.algo) {
+				if (rte_cryptodev_sym_capability_check_auth(&crypto_cap->sym,
+						crypto_xform->auth.key.length,
+						crypto_xform->auth.digest_length,
+						crypto_xform->auth.iv.length) == 0)
+					return 0;
+			}
+		}
+	}
+
+	return -ENOTSUP;
+}
+
+static inline int
+verify_crypto_capabilities(const struct rte_cryptodev_capabilities *capabilities,
+		struct rte_crypto_sym_xform *crypto_xform)
+{
+	if (crypto_xform->next != NULL)
+		return (verify_crypto_xform(capabilities, crypto_xform) ||
+		    verify_crypto_xform(capabilities, crypto_xform->next));
+	else
+		return verify_crypto_xform(capabilities, crypto_xform);
+}
+
+static inline int
+verify_ipsec_capabilities(struct rte_security_ipsec_xform *ipsec_xform,
+		const struct rte_security_capability *sec_cap)
+{
+	/* Verify security capabilities */
+
+	if (ipsec_xform->options.esn == 1 && sec_cap->ipsec.options.esn == 0) {
+		RTE_LOG(INFO, USER1, "ESN is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.udp_encap == 1 &&
+	    sec_cap->ipsec.options.udp_encap == 0) {
+		RTE_LOG(INFO, USER1, "UDP encapsulation is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.udp_ports_verify == 1 &&
+	    sec_cap->ipsec.options.udp_ports_verify == 0) {
+		RTE_LOG(DEBUG, USER1,
+			"UDP encapsulation ports verification is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.copy_dscp == 1 &&
+	    sec_cap->ipsec.options.copy_dscp == 0) {
+		RTE_LOG(DEBUG, USER1, "Copy DSCP is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.copy_flabel == 1 &&
+	    sec_cap->ipsec.options.copy_flabel == 0) {
+		RTE_LOG(DEBUG, USER1, "Copy Flow Label is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.copy_df == 1 &&
+	    sec_cap->ipsec.options.copy_df == 0) {
+		RTE_LOG(DEBUG, USER1, "Copy DP bit is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.dec_ttl == 1 &&
+	    sec_cap->ipsec.options.dec_ttl == 0) {
+		RTE_LOG(DEBUG, USER1, "Decrement TTL is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.ecn == 1 && sec_cap->ipsec.options.ecn == 0) {
+		RTE_LOG(DEBUG, USER1, "ECN is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.stats == 1 &&
+	    sec_cap->ipsec.options.stats == 0) {
+		RTE_LOG(DEBUG, USER1, "Stats is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if ((ipsec_xform->direction == RTE_SECURITY_IPSEC_SA_DIR_EGRESS) &&
+	    (ipsec_xform->options.iv_gen_disable == 1) &&
+	    (sec_cap->ipsec.options.iv_gen_disable != 1)) {
+		RTE_LOG(DEBUG, USER1, "Application provided IV is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if ((ipsec_xform->direction == RTE_SECURITY_IPSEC_SA_DIR_INGRESS) &&
+	    (ipsec_xform->options.tunnel_hdr_verify >
+	    sec_cap->ipsec.options.tunnel_hdr_verify)) {
+		RTE_LOG(DEBUG, USER1, "Tunnel header verify is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.ip_csum_enable == 1 &&
+	    sec_cap->ipsec.options.ip_csum_enable == 0) {
+		RTE_LOG(DEBUG, USER1, "Inner IP checksum is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->options.l4_csum_enable == 1 &&
+	    sec_cap->ipsec.options.l4_csum_enable == 0) {
+		RTE_LOG(DEBUG, USER1, "Inner L4 checksum is not supported\n");
+		return -ENOTSUP;
+	}
+
+	if (ipsec_xform->direction == RTE_SECURITY_IPSEC_SA_DIR_INGRESS) {
+		if (ipsec_xform->replay_win_sz > sec_cap->ipsec.replay_win_sz_max) {
+			RTE_LOG(DEBUG, USER1, "Replay window size is not supported\n");
+			return -ENOTSUP;
+		}
+	}
+
+	return 0;
+}
+
+
+static inline int
+verify_security_capabilities(struct rte_security_ctx *ctx,
+		struct rte_security_session_conf *sess_conf,
+		uint32_t *ol_flags)
+{
+	struct rte_security_capability_idx sec_cap_idx;
+	const struct rte_security_capability *sec_cap;
+
+	sec_cap_idx.action = sess_conf->action_type;
+	sec_cap_idx.protocol = sess_conf->protocol;
+	sec_cap_idx.ipsec.proto = sess_conf->ipsec.proto;
+	sec_cap_idx.ipsec.mode = sess_conf->ipsec.mode;
+	sec_cap_idx.ipsec.direction = sess_conf->ipsec.direction;
+
+	sec_cap = rte_security_capability_get(ctx, &sec_cap_idx);
+	if (sec_cap == NULL)
+		return -ENOTSUP;
+
+	if (verify_crypto_capabilities(sec_cap->crypto_capabilities,
+				sess_conf->crypto_xform))
+		return -ENOTSUP;
+
+	if (verify_ipsec_capabilities(&sess_conf->ipsec, sec_cap))
+		return -ENOTSUP;
+
+	if (ol_flags != NULL)
+		*ol_flags = sec_cap->ol_flags;
+
+	return 0;
 }
 
 int
 create_lookaside_session(struct ipsec_ctx *ipsec_ctx_lcore[],
-	struct socket_ctx *skt_ctx, struct ipsec_sa *sa,
-	struct rte_ipsec_session *ips)
+	struct socket_ctx *skt_ctx, const struct eventmode_conf *em_conf,
+	struct ipsec_sa *sa, struct rte_ipsec_session *ips)
 {
 	uint16_t cdev_id = RTE_CRYPTO_MAX_DEVS;
+	enum rte_crypto_op_sess_type sess_type;
 	struct rte_cryptodev_info cdev_info;
+	enum rte_crypto_op_type op_type;
 	unsigned long cdev_id_qp = 0;
-	struct cdev_key key = { 0 };
 	struct ipsec_ctx *ipsec_ctx;
+	struct cdev_key key = { 0 };
+	void *sess = NULL;
 	uint32_t lcore_id;
 	int32_t ret = 0;
 
@@ -150,37 +334,73 @@ create_lookaside_session(struct ipsec_ctx *ipsec_ctx_lcore[],
 			/* Set IPsec parameters in conf */
 			set_ipsec_conf(sa, &(sess_conf.ipsec));
 
+			if (verify_security_capabilities(ctx, &sess_conf, NULL)) {
+				RTE_LOG(ERR, IPSEC,
+					"Requested security session config not supported\n");
+				return -1;
+			}
+
 			ips->security.ses = rte_security_session_create(ctx,
-					&sess_conf, skt_ctx->session_pool,
-					skt_ctx->session_priv_pool);
+					&sess_conf, skt_ctx->session_pool);
 			if (ips->security.ses == NULL) {
 				RTE_LOG(ERR, IPSEC,
 				"SEC Session init failed: err: %d\n", ret);
 				return -1;
 			}
 			ips->security.ctx = ctx;
+
+			sess = ips->security.ses;
+			op_type = RTE_CRYPTO_OP_TYPE_SYMMETRIC;
+			sess_type = RTE_CRYPTO_OP_SECURITY_SESSION;
 		} else {
 			RTE_LOG(ERR, IPSEC, "Inline not supported\n");
 			return -1;
 		}
 	} else {
-		if (ips->type == RTE_SECURITY_ACTION_TYPE_CPU_CRYPTO) {
-			struct rte_cryptodev_info info;
+		struct rte_cryptodev_info info;
 
-			rte_cryptodev_info_get(cdev_id, &info);
+		rte_cryptodev_info_get(cdev_id, &info);
+
+		if (ips->type == RTE_SECURITY_ACTION_TYPE_CPU_CRYPTO) {
 			if (!(info.feature_flags &
 				RTE_CRYPTODEV_FF_SYM_CPU_CRYPTO))
 				return -ENOTSUP;
 
 		}
+
+		if (verify_crypto_capabilities(info.capabilities, sa->xforms)) {
+			RTE_LOG(ERR, IPSEC,
+				"Requested crypto session config not supported\n");
+			return -1;
+		}
+
 		ips->crypto.dev_id = cdev_id;
-		ips->crypto.ses = rte_cryptodev_sym_session_create(
-				skt_ctx->session_pool);
-		rte_cryptodev_sym_session_init(cdev_id,
-				ips->crypto.ses, sa->xforms,
-				skt_ctx->session_priv_pool);
+		ips->crypto.ses = rte_cryptodev_sym_session_create(cdev_id,
+				sa->xforms, skt_ctx->session_pool);
 
 		rte_cryptodev_info_get(cdev_id, &cdev_info);
+	}
+
+	/* Setup meta data required by event crypto adapter */
+	if (em_conf->enable_event_crypto_adapter && sess != NULL) {
+		union rte_event_crypto_metadata m_data;
+		const struct eventdev_params *eventdev_conf;
+
+		eventdev_conf = &(em_conf->eventdev_config[0]);
+		memset(&m_data, 0, sizeof(m_data));
+
+		/* Fill in response information */
+		m_data.response_info.sched_type = em_conf->ext_params.sched_type;
+		m_data.response_info.op = RTE_EVENT_OP_NEW;
+		m_data.response_info.queue_id = eventdev_conf->ev_cpt_queue_id;
+
+		/* Fill in request information */
+		m_data.request_info.cdev_id = cdev_id;
+		m_data.request_info.queue_pair_id = 0;
+
+		/* Attach meta info to session */
+		rte_cryptodev_session_event_mdata_set(cdev_id, sess, op_type,
+				sess_type, &m_data, sizeof(m_data));
 	}
 
 	return 0;
@@ -268,7 +488,6 @@ create_inline_session(struct socket_ctx *skt_ctx, struct ipsec_sa *sa,
 
 	if (ips->type == RTE_SECURITY_ACTION_TYPE_INLINE_CRYPTO) {
 		struct rte_flow_error err;
-		const struct rte_security_capability *sec_cap;
 		int ret = 0;
 
 		sec_ctx = (struct rte_security_ctx *)
@@ -280,36 +499,21 @@ create_inline_session(struct socket_ctx *skt_ctx, struct ipsec_sa *sa,
 			return -1;
 		}
 
+		if (verify_security_capabilities(sec_ctx, &sess_conf,
+					&ips->security.ol_flags)) {
+			RTE_LOG(ERR, IPSEC,
+				"Requested security session config not supported\n");
+			return -1;
+		}
+
 		ips->security.ses = rte_security_session_create(sec_ctx,
-				&sess_conf, skt_ctx->session_pool,
-				skt_ctx->session_priv_pool);
+				&sess_conf, skt_ctx->session_pool);
 		if (ips->security.ses == NULL) {
 			RTE_LOG(ERR, IPSEC,
 				"SEC Session init failed: err: %d\n", ret);
 			return -1;
 		}
 
-		sec_cap = rte_security_capabilities_get(sec_ctx);
-
-		/* iterate until ESP tunnel*/
-		while (sec_cap->action != RTE_SECURITY_ACTION_TYPE_NONE) {
-			if (sec_cap->action == ips->type &&
-			    sec_cap->protocol ==
-				RTE_SECURITY_PROTOCOL_IPSEC &&
-			    sec_cap->ipsec.mode ==
-				RTE_SECURITY_IPSEC_SA_MODE_TUNNEL &&
-			    sec_cap->ipsec.direction == sa->direction)
-				break;
-			sec_cap++;
-		}
-
-		if (sec_cap->action == RTE_SECURITY_ACTION_TYPE_NONE) {
-			RTE_LOG(ERR, IPSEC,
-				"No suitable security capability found\n");
-			return -1;
-		}
-
-		ips->security.ol_flags = sec_cap->ol_flags;
 		ips->security.ctx = sec_ctx;
 		sa->pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
 
@@ -453,8 +657,6 @@ flow_create_failure:
 			return -1;
 		}
 	} else if (ips->type ==	RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL) {
-		const struct rte_security_capability *sec_cap;
-
 		sec_ctx = (struct rte_security_ctx *)
 				rte_eth_dev_get_sec_ctx(sa->portid);
 
@@ -480,42 +682,21 @@ flow_create_failure:
 
 		sess_conf.userdata = (void *) sa;
 
+		if (verify_security_capabilities(sec_ctx, &sess_conf,
+					&ips->security.ol_flags)) {
+			RTE_LOG(ERR, IPSEC,
+				"Requested security session config not supported\n");
+			return -1;
+		}
+
 		ips->security.ses = rte_security_session_create(sec_ctx,
-					&sess_conf, skt_ctx->session_pool,
-					skt_ctx->session_priv_pool);
+					&sess_conf, skt_ctx->session_pool);
 		if (ips->security.ses == NULL) {
 			RTE_LOG(ERR, IPSEC,
 				"SEC Session init failed: err: %d\n", ret);
 			return -1;
 		}
 
-		sec_cap = rte_security_capabilities_get(sec_ctx);
-		if (sec_cap == NULL) {
-			RTE_LOG(ERR, IPSEC,
-				"No capabilities registered\n");
-			return -1;
-		}
-
-		/* iterate until ESP tunnel*/
-		while (sec_cap->action !=
-				RTE_SECURITY_ACTION_TYPE_NONE) {
-			if (sec_cap->action == ips->type &&
-			    sec_cap->protocol ==
-				RTE_SECURITY_PROTOCOL_IPSEC &&
-			    sec_cap->ipsec.mode ==
-				sess_conf.ipsec.mode &&
-			    sec_cap->ipsec.direction == sa->direction)
-				break;
-			sec_cap++;
-		}
-
-		if (sec_cap->action == RTE_SECURITY_ACTION_TYPE_NONE) {
-			RTE_LOG(ERR, IPSEC,
-				"No suitable security capability found\n");
-			return -1;
-		}
-
-		ips->security.ol_flags = sec_cap->ol_flags;
 		ips->security.ctx = sec_ctx;
 	}
 

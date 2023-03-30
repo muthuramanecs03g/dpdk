@@ -32,38 +32,39 @@ cn9k_ipsec_outb_sa_create(struct cnxk_cpt_qp *qp,
 	uint8_t egrp;
 	int ret;
 
-	sess = get_sec_session_private_data(sec_sess);
+	sess = (struct cn9k_sec_session *)sec_sess;
 	sa = &sess->sa;
+
+	/* Initialize lookaside IPsec private data */
 
 	memset(sa, 0, sizeof(struct cn9k_ipsec_sa));
 
-	/* Initialize lookaside IPsec private data */
-	sa->dir = RTE_SECURITY_IPSEC_SA_DIR_EGRESS;
+	sess->is_outbound = 1;
 
 	if (ipsec->esn.value)
-		sa->esn = ipsec->esn.value - 1;
+		sess->esn = ipsec->esn.value - 1;
 
-	ret = cnxk_ipsec_outb_rlens_get(&sa->rlens, ipsec, crypto_xform);
+	ret = cnxk_ipsec_outb_rlens_get(&sess->rlens, ipsec, crypto_xform);
 	if (ret)
 		return ret;
 
-	sa->custom_hdr_len =
+	sess->custom_hdr_len =
 		sizeof(struct roc_ie_on_outb_hdr) - ROC_IE_ON_MAX_IV_LEN;
 
 #ifdef LA_IPSEC_DEBUG
 	/* Use IV from application in debug mode */
 	if (ipsec->options.iv_gen_disable == 1) {
-		sa->custom_hdr_len = sizeof(struct roc_ie_on_outb_hdr);
+		sess->custom_hdr_len = sizeof(struct roc_ie_on_outb_hdr);
 
 		if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_AEAD) {
-			sa->cipher_iv_off = crypto_xform->aead.iv.offset;
-			sa->cipher_iv_len = crypto_xform->aead.iv.length;
+			sess->cipher_iv_off = crypto_xform->aead.iv.offset;
+			sess->cipher_iv_len = crypto_xform->aead.iv.length;
 		} else if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_CIPHER) {
-			sa->cipher_iv_off = crypto_xform->cipher.iv.offset;
-			sa->cipher_iv_len = crypto_xform->cipher.iv.length;
+			sess->cipher_iv_off = crypto_xform->cipher.iv.offset;
+			sess->cipher_iv_len = crypto_xform->cipher.iv.length;
 		} else {
-			sa->cipher_iv_off = crypto_xform->auth.iv.offset;
-			sa->cipher_iv_len = crypto_xform->auth.iv.length;
+			sess->cipher_iv_off = crypto_xform->auth.iv.offset;
+			sess->cipher_iv_len = crypto_xform->auth.iv.length;
 		}
 	}
 #else
@@ -80,14 +81,9 @@ cn9k_ipsec_outb_sa_create(struct cnxk_cpt_qp *qp,
 
 	ctx_len = ret;
 	egrp = roc_cpt->eng_grp[CPT_ENG_TYPE_IE];
-	ret = roc_on_cpt_ctx_write(&qp->lf, rte_mempool_virt2iova(&sa->out_sa),
-				   false, ctx_len, egrp);
-
-	if (ret)
-		return ret;
 
 	w4.u64 = 0;
-	w4.s.opcode_major = ROC_IE_ON_MAJOR_OP_PROCESS_OUTBOUND_IPSEC;
+	w4.s.opcode_major = ROC_IE_ON_MAJOR_OP_PROCESS_OUTBOUND_IPSEC | ROC_IE_ON_INPLACE_BIT;
 	w4.s.opcode_minor = ctx_len >> 3;
 
 	param1.u16 = 0;
@@ -108,9 +104,9 @@ cn9k_ipsec_outb_sa_create(struct cnxk_cpt_qp *qp,
 
 	w7.u64 = 0;
 	w7.s.egrp = egrp;
-	w7.s.cptr = rte_mempool_virt2iova(&sa->out_sa);
+	w7.s.cptr = (uintptr_t)&sess->sa;
 
-	inst_tmpl = &sa->inst;
+	inst_tmpl = &sess->inst;
 	inst_tmpl->w4 = w4.u64;
 	inst_tmpl->w7 = w7.u64;
 
@@ -134,31 +130,30 @@ cn9k_ipsec_inb_sa_create(struct cnxk_cpt_qp *qp,
 	uint8_t egrp;
 	int ret = 0;
 
-	sess = get_sec_session_private_data(sec_sess);
+	sess = (struct cn9k_sec_session *)sec_sess;
 	sa = &sess->sa;
 
 	memset(sa, 0, sizeof(struct cn9k_ipsec_sa));
 
-	sa->dir = RTE_SECURITY_IPSEC_SA_DIR_INGRESS;
-	sa->replay_win_sz = ipsec->replay_win_sz;
+	sess->is_outbound = 0;
+	sess->replay_win_sz = ipsec->replay_win_sz;
 
-	if (sa->replay_win_sz) {
-		if (sa->replay_win_sz > CNXK_ON_AR_WIN_SIZE_MAX) {
-			plt_err("Replay window size:%u is not supported",
-				sa->replay_win_sz);
+	if (sess->replay_win_sz) {
+		if (sess->replay_win_sz > CNXK_ON_AR_WIN_SIZE_MAX) {
+			plt_err("Replay window size:%u is not supported", sess->replay_win_sz);
 			return -ENOTSUP;
 		}
 
 		/* Set window bottom to 1, base and top to size of window */
-		sa->ar.winb = 1;
-		sa->ar.wint = sa->replay_win_sz;
-		sa->ar.base = sa->replay_win_sz;
+		sess->ar.winb = 1;
+		sess->ar.wint = sess->replay_win_sz;
+		sess->ar.base = sess->replay_win_sz;
 
-		sa->seq_lo = ipsec->esn.low;
-		sa->seq_hi = ipsec->esn.hi;
+		sess->seq_lo = ipsec->esn.low;
+		sess->seq_hi = ipsec->esn.hi;
 
-		sa->in_sa.common_sa.seq_t.tl = sa->seq_lo;
-		sa->in_sa.common_sa.seq_t.th = sa->seq_hi;
+		sess->sa.in_sa.common_sa.seq_t.tl = sess->seq_lo;
+		sess->sa.in_sa.common_sa.seq_t.th = sess->seq_hi;
 	}
 
 	ret = cnxk_on_ipsec_inb_sa_create(ipsec, crypto_xform, &sa->in_sa);
@@ -166,17 +161,13 @@ cn9k_ipsec_inb_sa_create(struct cnxk_cpt_qp *qp,
 		return ret;
 
 	if (sa->in_sa.common_sa.ctl.esn_en)
-		sa->esn_en = 1;
+		sess->esn_en = 1;
 
 	ctx_len = ret;
 	egrp = roc_cpt->eng_grp[CPT_ENG_TYPE_IE];
-	ret = roc_on_cpt_ctx_write(&qp->lf, rte_mempool_virt2iova(&sa->in_sa),
-				   true, ctx_len, egrp);
-	if (ret)
-		return ret;
 
 	w4.u64 = 0;
-	w4.s.opcode_major = ROC_IE_ON_MAJOR_OP_PROCESS_INBOUND_IPSEC;
+	w4.s.opcode_major = ROC_IE_ON_MAJOR_OP_PROCESS_INBOUND_IPSEC | ROC_IE_ON_INPLACE_BIT;
 	w4.s.opcode_minor = ctx_len >> 3;
 
 	param2.u16 = 0;
@@ -184,9 +175,9 @@ cn9k_ipsec_inb_sa_create(struct cnxk_cpt_qp *qp,
 	w4.s.param2 = param2.u16;
 
 	w7.s.egrp = egrp;
-	w7.s.cptr = rte_mempool_virt2iova(&sa->in_sa);
+	w7.s.cptr = (uintptr_t)&sess->sa;
 
-	inst_tmpl = &sa->inst;
+	inst_tmpl = &sess->inst;
 	inst_tmpl->w4 = w4.u64;
 	inst_tmpl->w7 = w7.u64;
 
@@ -213,50 +204,8 @@ cn9k_ipsec_xform_verify(struct rte_security_ipsec_xform *ipsec,
 				plt_err("Transport mode AES-256-GCM is not supported");
 				return -ENOTSUP;
 			}
-		} else {
-			struct rte_crypto_cipher_xform *cipher;
-			struct rte_crypto_auth_xform *auth;
-
-			if (crypto->type == RTE_CRYPTO_SYM_XFORM_CIPHER) {
-				cipher = &crypto->cipher;
-				auth = &crypto->next->auth;
-			} else {
-				cipher = &crypto->next->cipher;
-				auth = &crypto->auth;
-			}
-
-			if ((cipher->algo == RTE_CRYPTO_CIPHER_AES_CBC) &&
-			    (auth->algo == RTE_CRYPTO_AUTH_SHA256_HMAC)) {
-				plt_err("Transport mode AES-CBC SHA2 HMAC 256 is not supported");
-				return -ENOTSUP;
-			}
-
-			if ((cipher->algo == RTE_CRYPTO_CIPHER_AES_CBC) &&
-			    (auth->algo == RTE_CRYPTO_AUTH_SHA384_HMAC)) {
-				plt_err("Transport mode AES-CBC SHA2 HMAC 384 is not supported");
-				return -ENOTSUP;
-			}
-
-			if ((cipher->algo == RTE_CRYPTO_CIPHER_AES_CBC) &&
-			    (auth->algo == RTE_CRYPTO_AUTH_SHA512_HMAC)) {
-				plt_err("Transport mode AES-CBC SHA2 HMAC 512 is not supported");
-				return -ENOTSUP;
-			}
-
-			if ((cipher->algo == RTE_CRYPTO_CIPHER_AES_CBC) &&
-			    (auth->algo == RTE_CRYPTO_AUTH_AES_XCBC_MAC)) {
-				plt_err("Transport mode AES-CBC AES-XCBC is not supported");
-				return -ENOTSUP;
-			}
-
-			if ((cipher->algo == RTE_CRYPTO_CIPHER_3DES_CBC) &&
-			    (auth->algo == RTE_CRYPTO_AUTH_AES_XCBC_MAC)) {
-				plt_err("Transport mode 3DES-CBC AES-XCBC is not supported");
-				return -ENOTSUP;
-			}
 		}
 	}
-
 	return 0;
 }
 
@@ -295,40 +244,20 @@ cn9k_ipsec_session_create(void *dev,
 
 static int
 cn9k_sec_session_create(void *device, struct rte_security_session_conf *conf,
-			struct rte_security_session *sess,
-			struct rte_mempool *mempool)
+			struct rte_security_session *sess)
 {
-	struct cn9k_sec_session *priv;
-	int ret;
+	struct cn9k_sec_session *priv = SECURITY_GET_SESS_PRIV(sess);
 
 	if (conf->action_type != RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL)
 		return -EINVAL;
 
-	if (rte_mempool_get(mempool, (void **)&priv)) {
-		plt_err("Could not allocate security session private data");
-		return -ENOMEM;
-	}
-
 	memset(priv, 0, sizeof(*priv));
 
-	set_sec_session_private_data(sess, priv);
+	if (conf->protocol != RTE_SECURITY_PROTOCOL_IPSEC)
+		return -ENOTSUP;
 
-	if (conf->protocol != RTE_SECURITY_PROTOCOL_IPSEC) {
-		ret = -ENOTSUP;
-		goto mempool_put;
-	}
-
-	ret = cn9k_ipsec_session_create(device, &conf->ipsec,
+	return cn9k_ipsec_session_create(device, &conf->ipsec,
 					conf->crypto_xform, sess);
-	if (ret)
-		goto mempool_put;
-
-	return 0;
-
-mempool_put:
-	rte_mempool_put(mempool, priv);
-	set_sec_session_private_data(sess, NULL);
-	return ret;
 }
 
 static int
@@ -337,11 +266,10 @@ cn9k_sec_session_destroy(void *device __rte_unused,
 {
 	struct roc_ie_on_outb_sa *out_sa;
 	struct cn9k_sec_session *priv;
-	struct rte_mempool *sess_mp;
 	struct roc_ie_on_sa_ctl *ctl;
 	struct cn9k_ipsec_sa *sa;
 
-	priv = get_sec_session_private_data(sess);
+	priv = SECURITY_GET_SESS_PRIV(sess);
 	if (priv == NULL)
 		return 0;
 
@@ -353,12 +281,7 @@ cn9k_sec_session_destroy(void *device __rte_unused,
 
 	rte_io_wmb();
 
-	sess_mp = rte_mempool_from_obj(priv);
-
 	memset(priv, 0, sizeof(*priv));
-
-	set_sec_session_private_data(sess, NULL);
-	rte_mempool_put(sess_mp, priv);
 
 	return 0;
 }

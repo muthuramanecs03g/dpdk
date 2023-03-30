@@ -19,7 +19,10 @@
 
 #include <eventdev_pmd_pci.h>
 
-#include "roc_api.h"
+#include "cnxk_eventdev_dp.h"
+
+#include "roc_platform.h"
+#include "roc_sso.h"
 
 #include "cnxk_tim_evdev.h"
 
@@ -28,32 +31,11 @@
 #define CNXK_SSO_FORCE_BP  "force_rx_bp"
 #define CN9K_SSO_SINGLE_WS "single_ws"
 #define CN10K_SSO_GW_MODE  "gw_mode"
+#define CN10K_SSO_STASH	   "stash"
 
 #define NSEC2USEC(__ns)		((__ns) / 1E3)
 #define USEC2NSEC(__us)		((__us)*1E3)
 #define NSEC2TICK(__ns, __freq) (((__ns) * (__freq)) / 1E9)
-
-#define CNXK_SSO_MAX_HWGRP     (RTE_EVENT_MAX_QUEUES_PER_DEV + 1)
-#define CNXK_SSO_FC_NAME       "cnxk_evdev_xaq_fc"
-#define CNXK_SSO_MZ_NAME       "cnxk_evdev_mz"
-#define CNXK_SSO_XAQ_CACHE_CNT (0x7)
-#define CNXK_SSO_XAQ_SLACK     (8)
-#define CNXK_SSO_WQE_SG_PTR    (9)
-#define CNXK_SSO_WQE_LAYR_PTR  (5)
-#define CNXK_SSO_PRIORITY_CNT  (0x8)
-#define CNXK_SSO_WEIGHT_MAX    (0x3f)
-#define CNXK_SSO_WEIGHT_MIN    (0x3)
-#define CNXK_SSO_WEIGHT_CNT    (CNXK_SSO_WEIGHT_MAX - CNXK_SSO_WEIGHT_MIN + 1)
-#define CNXK_SSO_AFFINITY_CNT  (0x10)
-
-#define CNXK_TT_FROM_TAG(x)	    (((x) >> 32) & SSO_TT_EMPTY)
-#define CNXK_TT_FROM_EVENT(x)	    (((x) >> 38) & SSO_TT_EMPTY)
-#define CNXK_EVENT_TYPE_FROM_TAG(x) (((x) >> 28) & 0xf)
-#define CNXK_SUB_EVENT_FROM_TAG(x)  (((x) >> 20) & 0xff)
-#define CNXK_CLR_SUB_EVENT(x)	    (~(0xffull << 20) & x)
-#define CNXK_GRP_FROM_TAG(x)	    (((x) >> 36) & 0x3ff)
-#define CNXK_SWTAG_PEND(x)	    (BIT_ULL(62) & x)
-#define CNXK_TAG_IS_HEAD(x)	    (BIT_ULL(35) & x)
 
 #define CN9K_SSOW_GET_BASE_ADDR(_GW) ((_GW)-SSOW_LF_GWS_OP_GET_WORK0)
 
@@ -89,6 +71,12 @@ struct cnxk_sso_qos {
 	uint16_t iaq_prcnt;
 };
 
+struct cnxk_sso_stash {
+	uint16_t queue;
+	uint16_t stash_offset;
+	uint16_t stash_length;
+};
+
 struct cnxk_sso_evdev {
 	struct roc_sso sso;
 	uint8_t max_event_queues;
@@ -122,35 +110,17 @@ struct cnxk_sso_evdev {
 	struct cnxk_timesync_info *tstamp[RTE_MAX_ETHPORTS];
 	/* Dev args */
 	uint32_t xae_cnt;
-	uint8_t qos_queue_cnt;
+	uint16_t qos_queue_cnt;
 	struct cnxk_sso_qos *qos_parse_data;
 	uint8_t force_ena_bp;
 	/* CN9K */
 	uint8_t dual_ws;
 	/* CN10K */
 	uint8_t gw_mode;
+	uint16_t stash_cnt;
+	struct cnxk_sso_stash *stash_parse_data;
 	/* Crypto adapter */
 	uint8_t is_ca_internal_port;
-} __rte_cache_aligned;
-
-struct cn10k_sso_hws {
-	uint64_t base;
-	uint64_t gw_rdata;
-	void *lookup_mem;
-	uint32_t gw_wdata;
-	uint8_t swtag_req;
-	uint8_t hws_id;
-	/* PTP timestamp */
-	struct cnxk_timesync_info **tstamp;
-	uint64_t meta_aura;
-	/* Add Work Fastpath data */
-	uint64_t xaq_lmt __rte_cache_aligned;
-	uint64_t *fc_mem;
-	uintptr_t grp_base;
-	/* Tx Fastpath data */
-	uintptr_t lmt_base __rte_cache_aligned;
-	uint64_t lso_tun_fmt;
-	uint8_t tx_adptr_data[];
 } __rte_cache_aligned;
 
 /* Event port a.k.a GWS */
@@ -271,14 +241,14 @@ int cnxk_sso_xstats_get_names(const struct rte_eventdev *event_dev,
 			      enum rte_event_dev_xstats_mode mode,
 			      uint8_t queue_port_id,
 			      struct rte_event_dev_xstats_name *xstats_names,
-			      unsigned int *ids, unsigned int size);
+			      uint64_t *ids, unsigned int size);
 int cnxk_sso_xstats_get(const struct rte_eventdev *event_dev,
 			enum rte_event_dev_xstats_mode mode,
-			uint8_t queue_port_id, const unsigned int ids[],
+			uint8_t queue_port_id, const uint64_t ids[],
 			uint64_t values[], unsigned int n);
 int cnxk_sso_xstats_reset(struct rte_eventdev *event_dev,
 			  enum rte_event_dev_xstats_mode mode,
-			  int16_t queue_port_id, const uint32_t ids[],
+			  int16_t queue_port_id, const uint64_t ids[],
 			  uint32_t n);
 
 /* CN9K */

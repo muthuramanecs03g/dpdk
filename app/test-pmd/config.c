@@ -612,6 +612,8 @@ device_infos_display_speeds(uint32_t speed_capa)
 		printf(" 100 Gbps  ");
 	if (speed_capa & RTE_ETH_LINK_SPEED_200G)
 		printf(" 200 Gbps  ");
+	if (speed_capa & RTE_ETH_LINK_SPEED_400G)
+		printf(" 400 Gbps  ");
 }
 
 void
@@ -921,6 +923,28 @@ port_infos_display(portid_t port_id)
 			printf("Switch Rx domain: %u\n",
 			       dev_info.switch_info.rx_domain);
 	}
+	printf("Device error handling mode: ");
+	switch (dev_info.err_handle_mode) {
+	case RTE_ETH_ERROR_HANDLE_MODE_NONE:
+		printf("none\n");
+		break;
+	case RTE_ETH_ERROR_HANDLE_MODE_PASSIVE:
+		printf("passive\n");
+		break;
+	case RTE_ETH_ERROR_HANDLE_MODE_PROACTIVE:
+		printf("proactive\n");
+		break;
+	default:
+		printf("unknown\n");
+		break;
+	}
+	printf("Device private info:\n");
+	ret = rte_eth_dev_priv_dump(port_id, stdout);
+	if (ret == -ENOTSUP)
+		printf("  none\n");
+	else if (ret < 0)
+		fprintf(stderr, "  Failed to dump private info with error (%d): %s\n",
+			ret, strerror(-ret));
 }
 
 void
@@ -1494,6 +1518,21 @@ rss_config_display(struct rte_flow_action_rss *rss_conf)
 		return;
 	}
 
+	printf(" RSS key:\n");
+	if (rss_conf->key_len == 0) {
+		printf("  none");
+	} else {
+		printf("  key_len: %u\n", rss_conf->key_len);
+		printf("  key: ");
+		if (rss_conf->key == NULL) {
+			printf("none");
+		} else {
+			for (i = 0; i < rss_conf->key_len; i++)
+				printf("%02X", rss_conf->key[i]);
+		}
+	}
+	printf("\n");
+
 	printf(" types:\n");
 	if (rss_conf->types == 0) {
 		printf("  none\n");
@@ -1772,7 +1811,6 @@ port_action_handle_destroy(portid_t port_id,
 {
 	struct rte_port *port;
 	struct port_indirect_action **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 
 	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
@@ -1807,7 +1845,6 @@ port_action_handle_destroy(portid_t port_id,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
 	}
 	return ret;
 }
@@ -1871,6 +1908,7 @@ port_action_handle_update(portid_t port_id, uint32_t id,
 	if (!pia)
 		return -EINVAL;
 	switch (pia->type) {
+	case RTE_FLOW_ACTION_TYPE_AGE:
 	case RTE_FLOW_ACTION_TYPE_CONNTRACK:
 		update = action->conf;
 		break;
@@ -1887,9 +1925,13 @@ port_action_handle_update(portid_t port_id, uint32_t id,
 }
 
 static void
-port_action_handle_query_dump(uint32_t type, union port_action_query *query)
+port_action_handle_query_dump(portid_t port_id,
+			      const struct port_indirect_action *pia,
+			      union port_action_query *query)
 {
-	switch (type) {
+	if (!pia || !query)
+		return;
+	switch (pia->type) {
 	case RTE_FLOW_ACTION_TYPE_AGE:
 		printf("Indirect AGE action:\n"
 		       " aged: %u\n"
@@ -1953,12 +1995,38 @@ port_action_handle_query_dump(uint32_t type, union port_action_query *query)
 		       query->ct.reply_dir.max_win,
 		       query->ct.reply_dir.max_ack);
 		break;
+	case RTE_FLOW_ACTION_TYPE_QUOTA:
+		printf("Indirect QUOTA action %u\n"
+		       " unused quota: %" PRId64 "\n",
+		       pia->id, query->quota.quota);
+		break;
 	default:
-		fprintf(stderr,
-			"Indirect action (type: %d) doesn't support query\n",
-			type);
+		printf("port-%u: indirect action %u (type: %d) doesn't support query\n",
+		       pia->type, pia->id, port_id);
 		break;
 	}
+
+}
+
+void
+port_action_handle_query_update(portid_t port_id, uint32_t id,
+				enum rte_flow_query_update_mode qu_mode,
+				const struct rte_flow_action *action)
+{
+	int ret;
+	struct rte_flow_error error;
+	struct port_indirect_action *pia;
+	union port_action_query query;
+
+	pia = action_get_by_id(port_id, id);
+	if (!pia || !pia->handle)
+		return;
+	ret = rte_flow_action_handle_query_update(port_id, pia->handle, action,
+						  &query, qu_mode, &error);
+	if (ret)
+		port_flow_complain(&error);
+	else
+		port_action_handle_query_dump(port_id, pia, &query);
 
 }
 
@@ -1975,6 +2043,7 @@ port_action_handle_query(portid_t port_id, uint32_t id)
 	switch (pia->type) {
 	case RTE_FLOW_ACTION_TYPE_AGE:
 	case RTE_FLOW_ACTION_TYPE_COUNT:
+	case RTE_FLOW_ACTION_TYPE_QUOTA:
 		break;
 	default:
 		fprintf(stderr,
@@ -1987,7 +2056,7 @@ port_action_handle_query(portid_t port_id, uint32_t id)
 	memset(&query, 0, sizeof(query));
 	if (rte_flow_action_handle_query(port_id, pia->handle, &query, &error))
 		return port_flow_complain(&error);
-	port_action_handle_query_dump(pia->type, &query);
+	port_action_handle_query_dump(port_id, pia, &query);
 	return 0;
 }
 
@@ -2125,6 +2194,29 @@ port_meter_policy_add(portid_t port_id, uint32_t policy_id,
 	return ret;
 }
 
+struct rte_flow_meter_profile *
+port_meter_profile_get_by_id(portid_t port_id, uint32_t id)
+{
+	struct rte_mtr_error error;
+	struct rte_flow_meter_profile *profile;
+
+	profile = rte_mtr_meter_profile_get(port_id, id, &error);
+	if (!profile)
+		print_mtr_err_msg(&error);
+	return profile;
+}
+struct rte_flow_meter_policy *
+port_meter_policy_get_by_id(portid_t port_id, uint32_t id)
+{
+	struct rte_mtr_error error;
+	struct rte_flow_meter_policy *policy;
+
+	policy = rte_mtr_meter_policy_get(port_id, id, &error);
+	if (!policy)
+		print_mtr_err_msg(&error);
+	return policy;
+}
+
 /** Validate flow rule. */
 int
 port_flow_validate(portid_t port_id,
@@ -2212,7 +2304,6 @@ port_flow_pattern_template_destroy(portid_t port_id, uint32_t n,
 {
 	struct rte_port *port;
 	struct port_template **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 
 	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
@@ -2249,7 +2340,42 @@ port_flow_pattern_template_destroy(portid_t port_id, uint32_t n,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
+	}
+	return ret;
+}
+
+/** Flush pattern template */
+int
+port_flow_pattern_template_flush(portid_t port_id)
+{
+	struct rte_port *port;
+	struct port_template **tmp;
+	int ret = 0;
+
+	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
+	    port_id == (portid_t)RTE_PORT_ALL)
+		return -EINVAL;
+	port = &ports[port_id];
+	tmp = &port->pattern_templ_list;
+	while (*tmp) {
+		struct rte_flow_error error;
+		struct port_template *pit = *tmp;
+
+		/*
+		 * Poisoning to make sure PMDs update it in case
+		 * of error.
+		 */
+		memset(&error, 0x33, sizeof(error));
+		if (pit->template.pattern_template &&
+		    rte_flow_pattern_template_destroy(port_id,
+			pit->template.pattern_template, &error)) {
+			printf("Pattern template #%u not destroyed\n", pit->id);
+			ret = port_flow_complain(&error);
+			tmp = &pit->next;
+		} else {
+			*tmp = pit->next;
+			free(pit);
+		}
 	}
 	return ret;
 }
@@ -2293,7 +2419,6 @@ port_flow_actions_template_destroy(portid_t port_id, uint32_t n,
 {
 	struct rte_port *port;
 	struct port_template **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 
 	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
@@ -2329,7 +2454,43 @@ port_flow_actions_template_destroy(portid_t port_id, uint32_t n,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
+	}
+	return ret;
+}
+
+/** Flush actions template */
+int
+port_flow_actions_template_flush(portid_t port_id)
+{
+	struct rte_port *port;
+	struct port_template **tmp;
+	int ret = 0;
+
+	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
+	    port_id == (portid_t)RTE_PORT_ALL)
+		return -EINVAL;
+	port = &ports[port_id];
+	tmp = &port->actions_templ_list;
+	while (*tmp) {
+		struct rte_flow_error error;
+		struct port_template *pat = *tmp;
+
+		/*
+		 * Poisoning to make sure PMDs update it in case
+		 * of error.
+		 */
+		memset(&error, 0x33, sizeof(error));
+
+		if (pat->template.actions_template &&
+		    rte_flow_actions_template_destroy(port_id,
+			pat->template.actions_template, &error)) {
+			ret = port_flow_complain(&error);
+			printf("Actions template #%u not destroyed\n", pat->id);
+			tmp = &pat->next;
+		} else {
+			*tmp = pat->next;
+			free(pat);
+		}
 	}
 	return ret;
 }
@@ -2409,6 +2570,8 @@ port_flow_template_table_create(portid_t port_id, uint32_t id,
 	}
 	pt->nb_pattern_templates = nb_pattern_templates;
 	pt->nb_actions_templates = nb_actions_templates;
+	rte_memcpy(&pt->flow_attr, &table_attr->flow_attr,
+		   sizeof(struct rte_flow_attr));
 	printf("Template table #%u created\n", pt->id);
 	return 0;
 }
@@ -2420,7 +2583,6 @@ port_flow_template_table_destroy(portid_t port_id,
 {
 	struct rte_port *port;
 	struct port_table **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 
 	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
@@ -2457,7 +2619,44 @@ port_flow_template_table_destroy(portid_t port_id,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
+	}
+	return ret;
+}
+
+/** Flush table */
+int
+port_flow_template_table_flush(portid_t port_id)
+{
+	struct rte_port *port;
+	struct port_table **tmp;
+	int ret = 0;
+
+	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
+	    port_id == (portid_t)RTE_PORT_ALL)
+		return -EINVAL;
+	port = &ports[port_id];
+	tmp = &port->table_list;
+	while (*tmp) {
+		struct rte_flow_error error;
+		struct port_table *pt = *tmp;
+
+		/*
+		 * Poisoning to make sure PMDs update it in case
+		 * of error.
+		 */
+		memset(&error, 0x33, sizeof(error));
+
+		if (pt->table &&
+		    rte_flow_template_table_destroy(port_id,
+						   pt->table,
+						   &error)) {
+			ret = port_flow_complain(&error);
+			printf("Template table #%u not destroyed\n", pt->id);
+			tmp = &pt->next;
+		} else {
+			*tmp = pt->next;
+			free(pt);
+		}
 	}
 	return ret;
 }
@@ -2465,7 +2664,7 @@ port_flow_template_table_destroy(portid_t port_id,
 /** Enqueue create flow rule operation. */
 int
 port_queue_flow_create(portid_t port_id, queueid_t queue_id,
-		       bool postpone, uint32_t table_id,
+		       bool postpone, uint32_t table_id, uint32_t rule_idx,
 		       uint32_t pattern_idx, uint32_t actions_idx,
 		       const struct rte_flow_item *pattern,
 		       const struct rte_flow_action *actions)
@@ -2530,7 +2729,7 @@ port_queue_flow_create(portid_t port_id, queueid_t queue_id,
 	}
 	job->type = QUEUE_JOB_TYPE_FLOW_CREATE;
 
-	pf = port_flow_new(NULL, pattern, actions, &error);
+	pf = port_flow_new(&pt->flow_attr, pattern, actions, &error);
 	if (!pf) {
 		free(job);
 		return port_flow_complain(&error);
@@ -2541,8 +2740,12 @@ port_queue_flow_create(portid_t port_id, queueid_t queue_id,
 	}
 	/* Poisoning to make sure PMDs update it in case of error. */
 	memset(&error, 0x11, sizeof(error));
-	flow = rte_flow_async_create(port_id, queue_id, &op_attr, pt->table,
-		pattern, pattern_idx, actions, actions_idx, job, &error);
+	if (rule_idx == UINT32_MAX)
+		flow = rte_flow_async_create(port_id, queue_id, &op_attr, pt->table,
+			pattern, pattern_idx, actions, actions_idx, job, &error);
+	else
+		flow = rte_flow_async_create_by_index(port_id, queue_id, &op_attr, pt->table,
+			rule_idx, actions, actions_idx, job, &error);
 	if (!flow) {
 		uint32_t flow_id = pf->id;
 		port_queue_flow_destroy(port_id, queue_id, true, 1, &flow_id);
@@ -2567,7 +2770,6 @@ port_queue_flow_destroy(portid_t port_id, queueid_t queue_id,
 	struct rte_flow_op_attr op_attr = { .postpone = postpone };
 	struct rte_port *port;
 	struct port_flow **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 	struct queue_job *job;
 
@@ -2616,7 +2818,6 @@ port_queue_flow_destroy(portid_t port_id, queueid_t queue_id,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
 	}
 	return ret;
 }
@@ -2684,7 +2885,6 @@ port_queue_action_handle_destroy(portid_t port_id,
 	const struct rte_flow_op_attr attr = { .postpone = postpone};
 	struct rte_port *port;
 	struct port_indirect_action **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 	struct queue_job *job;
 
@@ -2721,9 +2921,9 @@ port_queue_action_handle_destroy(portid_t port_id,
 			job->type = QUEUE_JOB_TYPE_ACTION_DESTROY;
 			job->pia = pia;
 
-			if (pia->handle &&
-			    rte_flow_async_action_handle_destroy(port_id,
+			if (rte_flow_async_action_handle_destroy(port_id,
 				queue_id, &attr, pia->handle, job, &error)) {
+				free(job);
 				ret = port_flow_complain(&error);
 				continue;
 			}
@@ -2734,7 +2934,6 @@ port_queue_action_handle_destroy(portid_t port_id,
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
 	}
 	return ret;
 }
@@ -2750,6 +2949,9 @@ port_queue_action_handle_update(portid_t port_id,
 	struct rte_flow_error error;
 	struct rte_flow_action_handle *action_handle;
 	struct queue_job *job;
+	struct port_indirect_action *pia;
+	struct rte_flow_update_meter_mark mtr_update;
+	const void *update;
 
 	action_handle = port_action_handle_get_by_id(port_id, id);
 	if (!action_handle)
@@ -2768,13 +2970,74 @@ port_queue_action_handle_update(portid_t port_id,
 	}
 	job->type = QUEUE_JOB_TYPE_ACTION_UPDATE;
 
+	pia = action_get_by_id(port_id, id);
+	if (!pia) {
+		free(job);
+		return -EINVAL;
+	}
+
+	switch (pia->type) {
+	case RTE_FLOW_ACTION_TYPE_AGE:
+		update = action->conf;
+		break;
+	case RTE_FLOW_ACTION_TYPE_METER_MARK:
+		rte_memcpy(&mtr_update.meter_mark, action->conf,
+			sizeof(struct rte_flow_action_meter_mark));
+		mtr_update.profile_valid = 1;
+		mtr_update.policy_valid = 1;
+		mtr_update.color_mode_valid = 1;
+		mtr_update.init_color_valid = 1;
+		mtr_update.state_valid = 1;
+		update = &mtr_update;
+		break;
+	default:
+		update = action;
+		break;
+	}
+
 	if (rte_flow_async_action_handle_update(port_id, queue_id, &attr,
-				    action_handle, action, job, &error)) {
+				    action_handle, update, job, &error)) {
 		free(job);
 		return port_flow_complain(&error);
 	}
 	printf("Indirect action #%u update queued\n", id);
 	return 0;
+}
+
+void
+port_queue_action_handle_query_update(portid_t port_id,
+				      uint32_t queue_id, bool postpone,
+				      uint32_t id,
+				      enum rte_flow_query_update_mode qu_mode,
+				      const struct rte_flow_action *action)
+{
+	int ret;
+	struct rte_flow_error error;
+	struct port_indirect_action *pia = action_get_by_id(port_id, id);
+	const struct rte_flow_op_attr attr = { .postpone = postpone};
+	struct queue_job *job;
+
+	if (!pia || !pia->handle)
+		return;
+	job = calloc(1, sizeof(*job));
+	if (!job)
+		return;
+	job->type = QUEUE_JOB_TYPE_ACTION_QUERY;
+	job->pia = pia;
+
+	ret = rte_flow_async_action_handle_query_update(port_id, queue_id,
+							&attr, pia->handle,
+							action,
+							&job->query,
+							qu_mode, job,
+							&error);
+	if (ret) {
+		port_flow_complain(&error);
+		free(job);
+	} else {
+		printf("port-%u: indirect action #%u update-and-query queued\n",
+		       port_id, id);
+	}
 }
 
 /** Enqueue indirect action query operation. */
@@ -2846,6 +3109,162 @@ port_queue_flow_push(portid_t port_id, queueid_t queue_id)
 }
 
 /** Pull queue operation results from the queue. */
+static int
+port_queue_aged_flow_destroy(portid_t port_id, queueid_t queue_id,
+			     const uint32_t *rule, int nb_flows)
+{
+	struct rte_port *port = &ports[port_id];
+	struct rte_flow_op_result *res;
+	struct rte_flow_error error;
+	uint32_t n = nb_flows;
+	int ret = 0;
+	int i;
+
+	res = calloc(port->queue_sz, sizeof(struct rte_flow_op_result));
+	if (!res) {
+		printf("Failed to allocate memory for pulled results\n");
+		return -ENOMEM;
+	}
+
+	memset(&error, 0x66, sizeof(error));
+	while (nb_flows > 0) {
+		int success = 0;
+
+		if (n > port->queue_sz)
+			n = port->queue_sz;
+		ret = port_queue_flow_destroy(port_id, queue_id, true, n, rule);
+		if (ret < 0) {
+			free(res);
+			return ret;
+		}
+		ret = rte_flow_push(port_id, queue_id, &error);
+		if (ret < 0) {
+			printf("Failed to push operations in the queue: %s\n",
+			       strerror(-ret));
+			free(res);
+			return ret;
+		}
+		while (success < nb_flows) {
+			ret = rte_flow_pull(port_id, queue_id, res,
+					    port->queue_sz, &error);
+			if (ret < 0) {
+				printf("Failed to pull a operation results: %s\n",
+				       strerror(-ret));
+				free(res);
+				return ret;
+			}
+
+			for (i = 0; i < ret; i++) {
+				if (res[i].status == RTE_FLOW_OP_SUCCESS)
+					success++;
+			}
+		}
+		rule += n;
+		nb_flows -= n;
+		n = nb_flows;
+	}
+
+	free(res);
+	return ret;
+}
+
+/** List simply and destroy all aged flows per queue. */
+void
+port_queue_flow_aged(portid_t port_id, uint32_t queue_id, uint8_t destroy)
+{
+	void **contexts;
+	int nb_context, total = 0, idx;
+	uint32_t *rules = NULL;
+	struct rte_port *port;
+	struct rte_flow_error error;
+	enum age_action_context_type *type;
+	union {
+		struct port_flow *pf;
+		struct port_indirect_action *pia;
+	} ctx;
+
+	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
+	    port_id == (portid_t)RTE_PORT_ALL)
+		return;
+	port = &ports[port_id];
+	if (queue_id >= port->queue_nb) {
+		printf("Error: queue #%u is invalid\n", queue_id);
+		return;
+	}
+	total = rte_flow_get_q_aged_flows(port_id, queue_id, NULL, 0, &error);
+	if (total < 0) {
+		port_flow_complain(&error);
+		return;
+	}
+	printf("Port %u queue %u total aged flows: %d\n",
+	       port_id, queue_id, total);
+	if (total == 0)
+		return;
+	contexts = calloc(total, sizeof(void *));
+	if (contexts == NULL) {
+		printf("Cannot allocate contexts for aged flow\n");
+		return;
+	}
+	printf("%-20s\tID\tGroup\tPrio\tAttr\n", "Type");
+	nb_context = rte_flow_get_q_aged_flows(port_id, queue_id, contexts,
+					       total, &error);
+	if (nb_context > total) {
+		printf("Port %u queue %u get aged flows count(%d) > total(%d)\n",
+		       port_id, queue_id, nb_context, total);
+		free(contexts);
+		return;
+	}
+	if (destroy) {
+		rules = malloc(sizeof(uint32_t) * nb_context);
+		if (rules == NULL)
+			printf("Cannot allocate memory for destroy aged flow\n");
+	}
+	total = 0;
+	for (idx = 0; idx < nb_context; idx++) {
+		if (!contexts[idx]) {
+			printf("Error: get Null context in port %u queue %u\n",
+			       port_id, queue_id);
+			continue;
+		}
+		type = (enum age_action_context_type *)contexts[idx];
+		switch (*type) {
+		case ACTION_AGE_CONTEXT_TYPE_FLOW:
+			ctx.pf = container_of(type, struct port_flow, age_type);
+			printf("%-20s\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32
+								 "\t%c%c%c\t\n",
+			       "Flow",
+			       ctx.pf->id,
+			       ctx.pf->rule.attr->group,
+			       ctx.pf->rule.attr->priority,
+			       ctx.pf->rule.attr->ingress ? 'i' : '-',
+			       ctx.pf->rule.attr->egress ? 'e' : '-',
+			       ctx.pf->rule.attr->transfer ? 't' : '-');
+			if (rules != NULL) {
+				rules[total] = ctx.pf->id;
+				total++;
+			}
+			break;
+		case ACTION_AGE_CONTEXT_TYPE_INDIRECT_ACTION:
+			ctx.pia = container_of(type,
+					       struct port_indirect_action,
+					       age_type);
+			printf("%-20s\t%" PRIu32 "\n", "Indirect action",
+			       ctx.pia->id);
+			break;
+		default:
+			printf("Error: invalid context type %u\n", port_id);
+			break;
+		}
+	}
+	if (rules != NULL) {
+		port_queue_aged_flow_destroy(port_id, queue_id, rules, total);
+		free(rules);
+	}
+	printf("\n%d flows destroyed\n", total);
+	free(contexts);
+}
+
+/** Pull queue operation results from the queue. */
 int
 port_queue_flow_pull(portid_t port_id, queueid_t queue_id)
 {
@@ -2891,7 +3310,8 @@ port_queue_flow_pull(portid_t port_id, queueid_t queue_id)
 		else if (job->type == QUEUE_JOB_TYPE_ACTION_DESTROY)
 			free(job->pia);
 		else if (job->type == QUEUE_JOB_TYPE_ACTION_QUERY)
-			port_action_handle_query_dump(job->pia->type, &job->query);
+			port_action_handle_query_dump(port_id, job->pia,
+						      &job->query);
 		free(job);
 	}
 	printf("Queue #%u pulled %u operations (%u failed, %u succeeded)\n",
@@ -2968,7 +3388,6 @@ port_flow_destroy(portid_t port_id, uint32_t n, const uint32_t *rule)
 {
 	struct rte_port *port;
 	struct port_flow **tmp;
-	uint32_t c = 0;
 	int ret = 0;
 
 	if (port_id_is_invalid(port_id, ENABLED_WARN) ||
@@ -3001,7 +3420,6 @@ port_flow_destroy(portid_t port_id, uint32_t n, const uint32_t *rule)
 		}
 		if (i == n)
 			tmp = &(*tmp)->next;
-		++c;
 	}
 	return ret;
 }
@@ -4844,6 +5262,120 @@ show_rx_pkt_segments(void)
 	}
 }
 
+static const char *get_ptype_str(uint32_t ptype)
+{
+	const char *str;
+
+	switch (ptype) {
+	case RTE_PTYPE_L2_ETHER:
+		str = "eth";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN:
+		str = "ipv4";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN:
+		str = "ipv6";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_TCP:
+		str = "ipv4-tcp";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP:
+		str = "ipv4-udp";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_SCTP:
+		str = "ipv4-sctp";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_TCP:
+		str = "ipv6-tcp";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_UDP:
+		str = "ipv6-udp";
+		break;
+	case RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_SCTP:
+		str = "ipv6-sctp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT:
+		str = "grenat";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER:
+		str = "inner-eth";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER
+			| RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN:
+		str = "inner-ipv4";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER
+			| RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN:
+		str = "inner-ipv6";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_TCP:
+		str = "inner-ipv4-tcp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_UDP:
+		str = "inner-ipv4-udp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_SCTP:
+		str = "inner-ipv4-sctp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_TCP:
+		str = "inner-ipv6-tcp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_UDP:
+		str = "inner-ipv6-udp";
+		break;
+	case RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+			RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_SCTP:
+		str = "inner-ipv6-sctp";
+		break;
+	default:
+		str = "unsupported";
+	}
+
+	return str;
+}
+
+void
+show_rx_pkt_hdrs(void)
+{
+	uint32_t i, n;
+
+	n = rx_pkt_nb_segs;
+	printf("Number of segments: %u\n", n);
+	if (n) {
+		printf("Packet segs: ");
+		for (i = 0; i < n - 1; i++)
+			printf("%s, ", get_ptype_str(rx_pkt_hdr_protos[i]));
+		printf("payload\n");
+	}
+}
+
+void
+set_rx_pkt_hdrs(unsigned int *seg_hdrs, unsigned int nb_segs)
+{
+	unsigned int i;
+
+	if (nb_segs + 1 > MAX_SEGS_BUFFER_SPLIT) {
+		printf("nb segments per RX packets=%u > "
+		       "MAX_SEGS_BUFFER_SPLIT - ignored\n", nb_segs + 1);
+		return;
+	}
+
+	memset(rx_pkt_hdr_protos, 0, sizeof(rx_pkt_hdr_protos));
+
+	for (i = 0; i < nb_segs; i++)
+		rx_pkt_hdr_protos[i] = (uint32_t)seg_hdrs[i];
+	/*
+	 * We calculate the number of hdrs, but payload is not included,
+	 * so rx_pkt_nb_segs would increase 1.
+	 */
+	rx_pkt_nb_segs = nb_segs + 1;
+}
+
 void
 set_rx_pkt_segments(unsigned int *seg_lengths, unsigned int nb_segs)
 {
@@ -5818,7 +6350,7 @@ set_vf_traffic(portid_t port_id, uint8_t is_rx, uint16_t vf, uint8_t on)
 }
 
 int
-set_queue_rate_limit(portid_t port_id, uint16_t queue_idx, uint16_t rate)
+set_queue_rate_limit(portid_t port_id, uint16_t queue_idx, uint32_t rate)
 {
 	int diag;
 	struct rte_eth_link link;
@@ -5846,7 +6378,7 @@ set_queue_rate_limit(portid_t port_id, uint16_t queue_idx, uint16_t rate)
 }
 
 int
-set_vf_rate_limit(portid_t port_id, uint16_t vf, uint16_t rate, uint64_t q_msk)
+set_vf_rate_limit(portid_t port_id, uint16_t vf, uint32_t rate, uint64_t q_msk)
 {
 	int diag = -ENOTSUP;
 

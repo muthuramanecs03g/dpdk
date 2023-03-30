@@ -157,7 +157,6 @@ struct event_crypto_adapter_test_params {
 	struct rte_mempool *op_mpool;
 	struct rte_mempool *asym_op_mpool;
 	struct rte_mempool *session_mpool;
-	struct rte_mempool *session_priv_mpool;
 	struct rte_mempool *asym_sess_mpool;
 	struct rte_cryptodev_config *config;
 	uint8_t crypto_event_port_id;
@@ -274,16 +273,121 @@ test_crypto_adapter_stats(void)
 }
 
 static int
+test_crypto_adapter_params(void)
+{
+	int err;
+	struct rte_event_crypto_adapter_runtime_params in_params;
+	struct rte_event_crypto_adapter_runtime_params out_params;
+	uint32_t cap;
+	struct rte_event_crypto_adapter_queue_conf queue_conf = {
+		.ev = response_info,
+	};
+
+	err = rte_event_crypto_adapter_caps_get(evdev, TEST_CDEV_ID, &cap);
+	TEST_ASSERT_SUCCESS(err, "Failed to get adapter capabilities\n");
+
+	if (cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_QP_EV_BIND) {
+		err = rte_event_crypto_adapter_queue_pair_add(TEST_ADAPTER_ID,
+				TEST_CDEV_ID, TEST_CDEV_QP_ID, &queue_conf);
+	} else
+		err = rte_event_crypto_adapter_queue_pair_add(TEST_ADAPTER_ID,
+					TEST_CDEV_ID, TEST_CDEV_QP_ID, NULL);
+
+	TEST_ASSERT_SUCCESS(err, "Failed to add queue pair\n");
+
+	err = rte_event_crypto_adapter_runtime_params_init(&in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	err = rte_event_crypto_adapter_runtime_params_init(&out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	/* Case 1: Get the default value of mbufs processed by adapter */
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	/* Case 2: Set max_nb = 32 (=BATCH_SEIZE) */
+	in_params.max_nb = 32;
+
+	err = rte_event_crypto_adapter_runtime_params_set(TEST_ADAPTER_ID,
+							  &in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	TEST_ASSERT(in_params.max_nb == out_params.max_nb, "Expected %u got %u",
+		    in_params.max_nb, out_params.max_nb);
+
+	/* Case 3: Set max_nb = 192 */
+	in_params.max_nb = 192;
+
+	err = rte_event_crypto_adapter_runtime_params_set(TEST_ADAPTER_ID,
+							  &in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	TEST_ASSERT(in_params.max_nb == out_params.max_nb, "Expected %u got %u",
+		    in_params.max_nb, out_params.max_nb);
+
+	/* Case 4: Set max_nb = 256 */
+	in_params.max_nb = 256;
+
+	err = rte_event_crypto_adapter_runtime_params_set(TEST_ADAPTER_ID,
+							  &in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	TEST_ASSERT(in_params.max_nb == out_params.max_nb, "Expected %u got %u",
+		    in_params.max_nb, out_params.max_nb);
+
+	/* Case 5: Set max_nb = 30(<BATCH_SIZE) */
+	in_params.max_nb = 30;
+
+	err = rte_event_crypto_adapter_runtime_params_set(TEST_ADAPTER_ID,
+							  &in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	TEST_ASSERT(in_params.max_nb == out_params.max_nb, "Expected %u got %u",
+		    in_params.max_nb, out_params.max_nb);
+
+	/* Case 6: Set max_nb = 512 */
+	in_params.max_nb = 512;
+
+	err = rte_event_crypto_adapter_runtime_params_set(TEST_ADAPTER_ID,
+							  &in_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
+	err = rte_event_crypto_adapter_runtime_params_get(TEST_ADAPTER_ID,
+							  &out_params);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+	TEST_ASSERT(in_params.max_nb == out_params.max_nb, "Expected %u got %u",
+		    in_params.max_nb, out_params.max_nb);
+
+	err = rte_event_crypto_adapter_queue_pair_del(TEST_ADAPTER_ID,
+					TEST_CDEV_ID, TEST_CDEV_QP_ID);
+	TEST_ASSERT_SUCCESS(err, "Failed to delete add queue pair\n");
+
+	return TEST_SUCCESS;
+}
+
+static int
 test_op_forward_mode(uint8_t session_less)
 {
 	struct rte_crypto_sym_xform cipher_xform;
-	struct rte_cryptodev_sym_session *sess;
 	union rte_event_crypto_metadata m_data;
 	struct rte_crypto_sym_op *sym_op;
 	struct rte_crypto_op *op;
 	struct rte_mbuf *m;
 	struct rte_event ev;
 	uint32_t cap;
+	void *sess;
 	int ret;
 
 	memset(&m_data, 0, sizeof(m_data));
@@ -307,14 +411,9 @@ test_op_forward_mode(uint8_t session_less)
 	sym_op = op->sym;
 
 	if (!session_less) {
-		sess = rte_cryptodev_sym_session_create(
-				params.session_mpool);
+		sess = rte_cryptodev_sym_session_create(TEST_CDEV_ID,
+				&cipher_xform, params.session_mpool);
 		TEST_ASSERT_NOT_NULL(sess, "Session creation failed\n");
-
-		/* Create Crypto session*/
-		ret = rte_cryptodev_sym_session_init(TEST_CDEV_ID, sess,
-				&cipher_xform, params.session_priv_mpool);
-		TEST_ASSERT_SUCCESS(ret, "Failed to init session\n");
 
 		ret = rte_event_crypto_adapter_caps_get(evdev, TEST_CDEV_ID,
 							&cap);
@@ -655,12 +754,12 @@ static int
 test_op_new_mode(uint8_t session_less)
 {
 	struct rte_crypto_sym_xform cipher_xform;
-	struct rte_cryptodev_sym_session *sess;
 	union rte_event_crypto_metadata m_data;
 	struct rte_crypto_sym_op *sym_op;
 	struct rte_crypto_op *op;
 	struct rte_mbuf *m;
 	uint32_t cap;
+	void *sess;
 	int ret;
 
 	memset(&m_data, 0, sizeof(m_data));
@@ -683,8 +782,8 @@ test_op_new_mode(uint8_t session_less)
 	sym_op = op->sym;
 
 	if (!session_less) {
-		sess = rte_cryptodev_sym_session_create(
-				params.session_mpool);
+		sess = rte_cryptodev_sym_session_create(TEST_CDEV_ID,
+				&cipher_xform, params.session_mpool);
 		TEST_ASSERT_NOT_NULL(sess, "Session creation failed\n");
 
 		ret = rte_event_crypto_adapter_caps_get(evdev, TEST_CDEV_ID,
@@ -699,9 +798,6 @@ test_op_new_mode(uint8_t session_less)
 					RTE_CRYPTO_OP_WITH_SESSION,
 					&m_data, sizeof(m_data));
 		}
-		ret = rte_cryptodev_sym_session_init(TEST_CDEV_ID, sess,
-				&cipher_xform, params.session_priv_mpool);
-		TEST_ASSERT_SUCCESS(ret, "Failed to init session\n");
 
 		rte_crypto_op_attach_sym_session(op, sess);
 	} else {
@@ -994,20 +1090,10 @@ configure_cryptodev(void)
 
 	params.session_mpool = rte_cryptodev_sym_session_pool_create(
 			"CRYPTO_ADAPTER_SESSION_MP",
-			MAX_NB_SESSIONS, 0, 0,
+			MAX_NB_SESSIONS, session_size, 0,
 			sizeof(union rte_event_crypto_metadata),
 			SOCKET_ID_ANY);
 	TEST_ASSERT_NOT_NULL(params.session_mpool,
-			"session mempool allocation failed\n");
-
-	params.session_priv_mpool = rte_mempool_create(
-				"CRYPTO_AD_SESS_MP_PRIV",
-				MAX_NB_SESSIONS,
-				session_size,
-				0, 0, NULL, NULL, NULL,
-				NULL, SOCKET_ID_ANY,
-				0);
-	TEST_ASSERT_NOT_NULL(params.session_priv_mpool,
 			"session mempool allocation failed\n");
 
 	rte_cryptodev_info_get(TEST_CDEV_ID, &info);
@@ -1048,7 +1134,6 @@ configure_cryptodev(void)
 
 	qp_conf.nb_descriptors = DEFAULT_NUM_OPS_INFLIGHT;
 	qp_conf.mp_session = params.session_mpool;
-	qp_conf.mp_session_private = params.session_priv_mpool;
 
 	TEST_ASSERT_SUCCESS(rte_cryptodev_queue_pair_setup(
 			TEST_CDEV_ID, TEST_CDEV_QP_ID, &qp_conf,
@@ -1418,11 +1503,6 @@ crypto_teardown(void)
 		rte_mempool_free(params.session_mpool);
 		params.session_mpool = NULL;
 	}
-	if (params.session_priv_mpool != NULL) {
-		rte_mempool_avail_count(params.session_priv_mpool);
-		rte_mempool_free(params.session_priv_mpool);
-		params.session_priv_mpool = NULL;
-	}
 
 	/* Free asym session mempool */
 	if (params.asym_sess_mpool != NULL) {
@@ -1478,6 +1558,10 @@ static struct unit_test_suite functional_testsuite = {
 		TEST_CASE_ST(test_crypto_adapter_create,
 				test_crypto_adapter_free,
 				test_crypto_adapter_stats),
+
+		TEST_CASE_ST(test_crypto_adapter_create,
+				test_crypto_adapter_free,
+				test_crypto_adapter_params),
 
 		TEST_CASE_ST(test_crypto_adapter_conf_op_forward_mode,
 				test_crypto_adapter_stop,

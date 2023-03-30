@@ -8,6 +8,10 @@
 
 #define NB_CRYPTODEV_DESCRIPTORS 1024
 #define DATA_SIZE		512
+#define IV_OFFSET (sizeof(struct rte_crypto_op) + \
+		   sizeof(struct rte_crypto_sym_op) + \
+		   sizeof(union rte_event_crypto_metadata))
+
 struct modex_test_data {
 	enum rte_crypto_asym_xform_type xform_type;
 	struct {
@@ -364,22 +368,32 @@ crypto_adapter_enq_op_new(struct prod_data *p)
 	const uint32_t nb_flows = t->nb_flows;
 	const uint64_t nb_pkts = t->nb_pkts;
 	struct rte_mempool *pool = t->pool;
+	uint16_t data_length, data_offset;
 	struct evt_options *opt = t->opt;
 	uint16_t qp_id = p->ca.cdev_qp_id;
 	uint8_t cdev_id = p->ca.cdev_id;
 	uint64_t alloc_failures = 0;
 	uint32_t flow_counter = 0;
 	struct rte_crypto_op *op;
+	uint16_t len, offset;
 	struct rte_mbuf *m;
 	uint64_t count = 0;
-	uint16_t len;
 
 	if (opt->verbose_level > 1)
 		printf("%s(): lcore %d queue %d cdev_id %u cdev_qp_id %u\n",
 		       __func__, rte_lcore_id(), p->queue_id, p->ca.cdev_id,
 		       p->ca.cdev_qp_id);
 
-	len = opt->mbuf_sz ? opt->mbuf_sz : RTE_ETHER_MIN_LEN;
+	offset = sizeof(struct perf_elt);
+	len = RTE_MAX(RTE_ETHER_MIN_LEN + offset, opt->mbuf_sz);
+
+	if (opt->crypto_cipher_bit_mode) {
+		data_offset = offset << 3;
+		data_length = (len - offset) << 3;
+	} else {
+		data_offset = offset;
+		data_length = len - offset;
+	}
 
 	while (count < nb_pkts && t->done == false) {
 		if (opt->crypto_op_type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
@@ -402,19 +416,26 @@ crypto_adapter_enq_op_new(struct prod_data *p)
 			rte_pktmbuf_append(m, len);
 			sym_op = op->sym;
 			sym_op->m_src = m;
-			sym_op->cipher.data.offset = 0;
-			sym_op->cipher.data.length = len;
+
+			sym_op->cipher.data.offset = data_offset;
+			sym_op->cipher.data.length = data_length;
+
 			rte_crypto_op_attach_sym_session(
 				op, p->ca.crypto_sess[flow_counter++ % nb_flows]);
 		} else {
 			struct rte_crypto_asym_op *asym_op;
-			uint8_t *result = rte_zmalloc(NULL,
-					modex_test_case.result_len, 0);
+			uint8_t *result;
+
+			if (rte_mempool_get(pool, (void **)&result)) {
+				alloc_failures++;
+				continue;
+			}
 
 			op = rte_crypto_op_alloc(t->ca_op_pool,
 					 RTE_CRYPTO_OP_TYPE_ASYMMETRIC);
 			if (unlikely(op == NULL)) {
 				alloc_failures++;
+				rte_mempool_put(pool, result);
 				continue;
 			}
 
@@ -451,10 +472,10 @@ crypto_adapter_enq_op_fwd(struct prod_data *p)
 	uint64_t alloc_failures = 0;
 	uint32_t flow_counter = 0;
 	struct rte_crypto_op *op;
+	uint16_t len, offset;
 	struct rte_event ev;
 	struct rte_mbuf *m;
 	uint64_t count = 0;
-	uint16_t len;
 
 	if (opt->verbose_level > 1)
 		printf("%s(): lcore %d port %d queue %d cdev_id %u cdev_qp_id %u\n",
@@ -466,7 +487,9 @@ crypto_adapter_enq_op_fwd(struct prod_data *p)
 	ev.queue_id = p->queue_id;
 	ev.sched_type = RTE_SCHED_TYPE_ATOMIC;
 	ev.event_type = RTE_EVENT_TYPE_CPU;
-	len = opt->mbuf_sz ? opt->mbuf_sz : RTE_ETHER_MIN_LEN;
+
+	offset = sizeof(struct perf_elt);
+	len = RTE_MAX(RTE_ETHER_MIN_LEN + offset, opt->mbuf_sz);
 
 	while (count < nb_pkts && t->done == false) {
 		if (opt->crypto_op_type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
@@ -489,19 +512,24 @@ crypto_adapter_enq_op_fwd(struct prod_data *p)
 			rte_pktmbuf_append(m, len);
 			sym_op = op->sym;
 			sym_op->m_src = m;
-			sym_op->cipher.data.offset = 0;
-			sym_op->cipher.data.length = len;
+			sym_op->cipher.data.offset = offset;
+			sym_op->cipher.data.length = len - offset;
 			rte_crypto_op_attach_sym_session(
 				op, p->ca.crypto_sess[flow_counter++ % nb_flows]);
 		} else {
 			struct rte_crypto_asym_op *asym_op;
-			uint8_t *result = rte_zmalloc(NULL,
-					modex_test_case.result_len, 0);
+			uint8_t *result;
+
+			if (rte_mempool_get(pool, (void **)&result)) {
+				alloc_failures++;
+				continue;
+			}
 
 			op = rte_crypto_op_alloc(t->ca_op_pool,
 					 RTE_CRYPTO_OP_TYPE_ASYMMETRIC);
 			if (unlikely(op == NULL)) {
 				alloc_failures++;
+				rte_mempool_put(pool, result);
 				continue;
 			}
 
@@ -541,6 +569,233 @@ perf_event_crypto_producer(void *arg)
 	return 0;
 }
 
+static void
+crypto_adapter_enq_op_new_burst(struct prod_data *p)
+{
+	const struct test_perf *t = p->t;
+	const struct evt_options *opt = t->opt;
+
+	struct rte_mbuf *m, *pkts_burst[MAX_PROD_ENQ_BURST_SIZE];
+	struct rte_crypto_op *ops_burst[MAX_PROD_ENQ_BURST_SIZE];
+	const uint32_t burst_size = opt->prod_enq_burst_sz;
+	uint8_t *result[MAX_PROD_ENQ_BURST_SIZE];
+	const uint32_t nb_flows = t->nb_flows;
+	const uint64_t nb_pkts = t->nb_pkts;
+	uint16_t len, enq, nb_alloc, offset;
+	struct rte_mempool *pool = t->pool;
+	uint16_t qp_id = p->ca.cdev_qp_id;
+	uint8_t cdev_id = p->ca.cdev_id;
+	uint64_t alloc_failures = 0;
+	uint32_t flow_counter = 0;
+	uint64_t count = 0;
+	uint32_t  i;
+
+	if (opt->verbose_level > 1)
+		printf("%s(): lcore %d queue %d cdev_id %u cdev_qp_id %u\n",
+		       __func__, rte_lcore_id(), p->queue_id, p->ca.cdev_id,
+		       p->ca.cdev_qp_id);
+
+	offset = sizeof(struct perf_elt);
+	len = RTE_MAX(RTE_ETHER_MIN_LEN + offset, opt->mbuf_sz);
+
+	while (count < nb_pkts && t->done == false) {
+		if (opt->crypto_op_type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
+			struct rte_crypto_sym_op *sym_op;
+			int ret;
+
+			nb_alloc = rte_crypto_op_bulk_alloc(t->ca_op_pool,
+					RTE_CRYPTO_OP_TYPE_SYMMETRIC, ops_burst, burst_size);
+			if (unlikely(nb_alloc != burst_size)) {
+				alloc_failures++;
+				continue;
+			}
+
+			ret = rte_pktmbuf_alloc_bulk(pool, pkts_burst, burst_size);
+			if (unlikely(ret != 0)) {
+				alloc_failures++;
+				rte_mempool_put_bulk(t->ca_op_pool, (void **)ops_burst, burst_size);
+				continue;
+			}
+
+			for (i = 0; i < burst_size; i++) {
+				m = pkts_burst[i];
+				rte_pktmbuf_append(m, len);
+				sym_op = ops_burst[i]->sym;
+				sym_op->m_src = m;
+				sym_op->cipher.data.offset = offset;
+				sym_op->cipher.data.length = len - offset;
+				rte_crypto_op_attach_sym_session(ops_burst[i],
+						p->ca.crypto_sess[flow_counter++ % nb_flows]);
+			}
+		} else {
+			struct rte_crypto_asym_op *asym_op;
+
+			nb_alloc = rte_crypto_op_bulk_alloc(t->ca_op_pool,
+					RTE_CRYPTO_OP_TYPE_ASYMMETRIC, ops_burst, burst_size);
+			if (unlikely(nb_alloc != burst_size)) {
+				alloc_failures++;
+				continue;
+			}
+
+			if (rte_mempool_get_bulk(pool, (void **)result, burst_size)) {
+				alloc_failures++;
+				rte_mempool_put_bulk(t->ca_op_pool, (void **)ops_burst, burst_size);
+				continue;
+			}
+
+			for (i = 0; i < burst_size; i++) {
+				asym_op = ops_burst[i]->asym;
+				asym_op->modex.base.data = modex_test_case.base.data;
+				asym_op->modex.base.length = modex_test_case.base.len;
+				asym_op->modex.result.data = result[i];
+				asym_op->modex.result.length = modex_test_case.result_len;
+				rte_crypto_op_attach_asym_session(ops_burst[i],
+						p->ca.crypto_sess[flow_counter++ % nb_flows]);
+			}
+		}
+
+		enq = 0;
+		while (!t->done) {
+			enq += rte_cryptodev_enqueue_burst(cdev_id, qp_id, ops_burst + enq,
+					burst_size - enq);
+			if (enq == burst_size)
+				break;
+		}
+
+		count += burst_size;
+	}
+
+	if (opt->verbose_level > 1 && alloc_failures)
+		printf("%s(): lcore %d allocation failures: %"PRIu64"\n",
+		       __func__, rte_lcore_id(), alloc_failures);
+}
+
+static void
+crypto_adapter_enq_op_fwd_burst(struct prod_data *p)
+{
+	const struct test_perf *t = p->t;
+	const struct evt_options *opt = t->opt;
+
+	struct rte_mbuf *m, *pkts_burst[MAX_PROD_ENQ_BURST_SIZE];
+	struct rte_crypto_op *ops_burst[MAX_PROD_ENQ_BURST_SIZE];
+	const uint32_t burst_size = opt->prod_enq_burst_sz;
+	struct rte_event ev[MAX_PROD_ENQ_BURST_SIZE];
+	uint8_t *result[MAX_PROD_ENQ_BURST_SIZE];
+	const uint32_t nb_flows = t->nb_flows;
+	const uint64_t nb_pkts = t->nb_pkts;
+	uint16_t len, enq, nb_alloc, offset;
+	struct rte_mempool *pool = t->pool;
+	const uint8_t dev_id = p->dev_id;
+	const uint8_t port = p->port_id;
+	uint64_t alloc_failures = 0;
+	uint32_t flow_counter = 0;
+	uint64_t count = 0;
+	uint32_t  i;
+
+	if (opt->verbose_level > 1)
+		printf("%s(): lcore %d port %d queue %d cdev_id %u cdev_qp_id %u\n",
+		       __func__, rte_lcore_id(), port, p->queue_id,
+		       p->ca.cdev_id, p->ca.cdev_qp_id);
+
+	offset = sizeof(struct perf_elt);
+	len = RTE_MAX(RTE_ETHER_MIN_LEN + offset, opt->mbuf_sz);
+
+	for (i = 0; i < burst_size; i++) {
+		ev[i].event = 0;
+		ev[i].op = RTE_EVENT_OP_NEW;
+		ev[i].queue_id = p->queue_id;
+		ev[i].sched_type = RTE_SCHED_TYPE_ATOMIC;
+		ev[i].event_type = RTE_EVENT_TYPE_CPU;
+	}
+
+	while (count < nb_pkts && t->done == false) {
+		if (opt->crypto_op_type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
+			struct rte_crypto_sym_op *sym_op;
+			int ret;
+
+			nb_alloc = rte_crypto_op_bulk_alloc(t->ca_op_pool,
+					RTE_CRYPTO_OP_TYPE_SYMMETRIC, ops_burst, burst_size);
+			if (unlikely(nb_alloc != burst_size)) {
+				alloc_failures++;
+				continue;
+			}
+
+			ret = rte_pktmbuf_alloc_bulk(pool, pkts_burst, burst_size);
+			if (unlikely(ret != 0)) {
+				alloc_failures++;
+				rte_mempool_put_bulk(t->ca_op_pool, (void **)ops_burst, burst_size);
+				continue;
+			}
+
+			for (i = 0; i < burst_size; i++) {
+				m = pkts_burst[i];
+				rte_pktmbuf_append(m, len);
+				sym_op = ops_burst[i]->sym;
+				sym_op->m_src = m;
+				sym_op->cipher.data.offset = offset;
+				sym_op->cipher.data.length = len - offset;
+				rte_crypto_op_attach_sym_session(ops_burst[i],
+						p->ca.crypto_sess[flow_counter++ % nb_flows]);
+				ev[i].event_ptr = ops_burst[i];
+			}
+		} else {
+			struct rte_crypto_asym_op *asym_op;
+
+			nb_alloc = rte_crypto_op_bulk_alloc(t->ca_op_pool,
+					RTE_CRYPTO_OP_TYPE_ASYMMETRIC, ops_burst, burst_size);
+			if (unlikely(nb_alloc != burst_size)) {
+				alloc_failures++;
+				continue;
+			}
+
+			if (rte_mempool_get_bulk(pool, (void **)result, burst_size)) {
+				alloc_failures++;
+				rte_mempool_put_bulk(t->ca_op_pool, (void **)ops_burst, burst_size);
+				continue;
+			}
+
+			for (i = 0; i < burst_size; i++) {
+				asym_op = ops_burst[i]->asym;
+				asym_op->modex.base.data = modex_test_case.base.data;
+				asym_op->modex.base.length = modex_test_case.base.len;
+				asym_op->modex.result.data = result[i];
+				asym_op->modex.result.length = modex_test_case.result_len;
+				rte_crypto_op_attach_asym_session(ops_burst[i],
+						p->ca.crypto_sess[flow_counter++ % nb_flows]);
+				ev[i].event_ptr = ops_burst[i];
+			}
+		}
+
+		enq = 0;
+		while (!t->done) {
+			enq += rte_event_crypto_adapter_enqueue(dev_id, port, ev + enq,
+					burst_size - enq);
+			if (enq == burst_size)
+				break;
+		}
+
+		count += burst_size;
+	}
+
+	if (opt->verbose_level > 1 && alloc_failures)
+		printf("%s(): lcore %d allocation failures: %"PRIu64"\n",
+		       __func__, rte_lcore_id(), alloc_failures);
+}
+
+static inline int
+perf_event_crypto_producer_burst(void *arg)
+{
+	struct prod_data *p = arg;
+	struct evt_options *opt = p->t->opt;
+
+	if (opt->crypto_adptr_mode == RTE_EVENT_CRYPTO_ADAPTER_OP_NEW)
+		crypto_adapter_enq_op_new_burst(p);
+	else
+		crypto_adapter_enq_op_fwd_burst(p);
+
+	return 0;
+}
+
 static int
 perf_producer_wrapper(void *arg)
 {
@@ -567,8 +822,12 @@ perf_producer_wrapper(void *arg)
 	else if (t->opt->prod_type == EVT_PROD_TYPE_EVENT_TIMER_ADPTR &&
 			t->opt->timdev_use_burst)
 		return perf_event_timer_producer_burst(arg);
-	else if (t->opt->prod_type == EVT_PROD_TYPE_EVENT_CRYPTO_ADPTR)
-		return perf_event_crypto_producer(arg);
+	else if (t->opt->prod_type == EVT_PROD_TYPE_EVENT_CRYPTO_ADPTR) {
+		if (t->opt->prod_enq_burst_sz > 1)
+			return perf_event_crypto_producer_burst(arg);
+		else
+			return perf_event_crypto_producer(arg);
+	}
 	return 0;
 }
 
@@ -814,9 +1073,12 @@ perf_event_timer_adapter_setup(struct test_perf *t)
 static int
 perf_event_crypto_adapter_setup(struct test_perf *t, struct prod_data *p)
 {
+	struct rte_event_crypto_adapter_queue_conf conf;
 	struct evt_options *opt = t->opt;
 	uint32_t cap;
 	int ret;
+
+	memset(&conf, 0, sizeof(conf));
 
 	ret = rte_event_crypto_adapter_caps_get(p->dev_id, p->ca.cdev_id, &cap);
 	if (ret) {
@@ -836,42 +1098,105 @@ perf_event_crypto_adapter_setup(struct test_perf *t, struct prod_data *p)
 		return -ENOTSUP;
 	}
 
-	if (cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_QP_EV_BIND) {
-		struct rte_event_crypto_adapter_queue_conf conf;
+	if (opt->ena_vector) {
+		struct rte_event_crypto_adapter_vector_limits limits;
 
-		memset(&conf, 0, sizeof(conf));
+		if (!(cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_EVENT_VECTOR)) {
+			evt_err("Crypto adapter doesn't support event vector");
+			return -EINVAL;
+		}
+
+		ret = rte_event_crypto_adapter_vector_limits_get(p->dev_id, p->ca.cdev_id, &limits);
+		if (ret) {
+			evt_err("Failed to get crypto adapter's vector limits");
+			return ret;
+		}
+
+		if (opt->vector_size < limits.min_sz || opt->vector_size > limits.max_sz) {
+			evt_err("Vector size [%d] not within limits max[%d] min[%d]",
+				opt->vector_size, limits.max_sz, limits.min_sz);
+			return -EINVAL;
+		}
+
+		if (limits.log2_sz && !rte_is_power_of_2(opt->vector_size)) {
+			evt_err("Vector size [%d] not power of 2", opt->vector_size);
+			return -EINVAL;
+		}
+
+		if (opt->vector_tmo_nsec > limits.max_timeout_ns ||
+			opt->vector_tmo_nsec < limits.min_timeout_ns) {
+			evt_err("Vector timeout [%" PRIu64 "] not within limits "
+				"max[%" PRIu64 "] min[%" PRIu64 "]",
+				opt->vector_tmo_nsec, limits.max_timeout_ns, limits.min_timeout_ns);
+			return -EINVAL;
+		}
+
+		conf.vector_mp = t->ca_vector_pool;
+		conf.vector_sz = opt->vector_size;
+		conf.vector_timeout_ns = opt->vector_tmo_nsec;
+		conf.flags |= RTE_EVENT_CRYPTO_ADAPTER_EVENT_VECTOR;
+	}
+
+	if (cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_QP_EV_BIND) {
 		conf.ev.sched_type = RTE_SCHED_TYPE_ATOMIC;
 		conf.ev.queue_id = p->queue_id;
-		ret = rte_event_crypto_adapter_queue_pair_add(
-			TEST_PERF_CA_ID, p->ca.cdev_id, p->ca.cdev_qp_id, &conf);
-	} else {
-		ret = rte_event_crypto_adapter_queue_pair_add(
-			TEST_PERF_CA_ID, p->ca.cdev_id, p->ca.cdev_qp_id, NULL);
 	}
+
+	ret = rte_event_crypto_adapter_queue_pair_add(
+		TEST_PERF_CA_ID, p->ca.cdev_id, p->ca.cdev_qp_id, &conf);
 
 	return ret;
 }
 
-static struct rte_cryptodev_sym_session *
+static void *
 cryptodev_sym_sess_create(struct prod_data *p, struct test_perf *t)
 {
+	const struct rte_cryptodev_symmetric_capability *cap;
+	struct rte_cryptodev_sym_capability_idx cap_idx;
+	enum rte_crypto_cipher_algorithm cipher_algo;
 	struct rte_crypto_sym_xform cipher_xform;
-	struct rte_cryptodev_sym_session *sess;
+	struct evt_options *opt = t->opt;
+	uint16_t key_size;
+	uint16_t iv_size;
+	void *sess;
 
-	cipher_xform.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
-	cipher_xform.cipher.algo = RTE_CRYPTO_CIPHER_NULL;
-	cipher_xform.cipher.op = RTE_CRYPTO_CIPHER_OP_ENCRYPT;
-	cipher_xform.next = NULL;
+	cipher_algo = opt->crypto_cipher_alg;
+	key_size = opt->crypto_cipher_key_sz;
+	iv_size = opt->crypto_cipher_iv_sz;
 
-	sess = rte_cryptodev_sym_session_create(t->ca_sess_pool);
-	if (sess == NULL) {
-		evt_err("Failed to create sym session");
+	/* Check if device supports the algorithm */
+	cap_idx.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
+	cap_idx.algo.cipher = cipher_algo;
+
+	cap = rte_cryptodev_sym_capability_get(p->ca.cdev_id, &cap_idx);
+	if (cap == NULL) {
+		evt_err("Device doesn't support cipher algorithm [%s]. Test Skipped\n",
+			rte_cryptodev_get_cipher_algo_string(cipher_algo));
 		return NULL;
 	}
 
-	if (rte_cryptodev_sym_session_init(p->ca.cdev_id, sess, &cipher_xform,
-					   t->ca_sess_priv_pool)) {
-		evt_err("Failed to init session");
+	/* Check if device supports key size and IV size */
+	if (rte_cryptodev_sym_capability_check_cipher(cap, key_size,
+			iv_size) < 0) {
+		evt_err("Device doesn't support cipher configuration:\n"
+			"cipher algo [%s], key sz [%d], iv sz [%d]. Test Skipped\n",
+			rte_cryptodev_get_cipher_algo_string(cipher_algo), key_size, iv_size);
+		return NULL;
+	}
+
+	cipher_xform.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
+	cipher_xform.cipher.algo = cipher_algo;
+	cipher_xform.cipher.key.data = opt->crypto_cipher_key;
+	cipher_xform.cipher.key.length = key_size;
+	cipher_xform.cipher.iv.length = iv_size;
+	cipher_xform.cipher.iv.offset = IV_OFFSET;
+	cipher_xform.cipher.op = RTE_CRYPTO_CIPHER_OP_ENCRYPT;
+	cipher_xform.next = NULL;
+
+	sess = rte_cryptodev_sym_session_create(p->ca.cdev_id, &cipher_xform,
+			t->ca_sess_pool);
+	if (sess == NULL) {
+		evt_err("Failed to create sym session");
 		return NULL;
 	}
 
@@ -1003,6 +1328,10 @@ perf_event_dev_port_setup(struct evt_test *test, struct evt_options *opt,
 				RTE_CACHE_LINE_SIZE, opt->socket_id);
 			p->t = t;
 
+			ret = perf_event_crypto_adapter_setup(t, p);
+			if (ret)
+				return ret;
+
 			m_data.request_info.cdev_id = p->ca.cdev_id;
 			m_data.request_info.queue_pair_id = p->ca.cdev_qp_id;
 			m_data.response_info.sched_type = RTE_SCHED_TYPE_ATOMIC;
@@ -1012,18 +1341,20 @@ perf_event_dev_port_setup(struct evt_test *test, struct evt_options *opt,
 				m_data.response_info.flow_id = flow_id;
 				if (opt->crypto_op_type ==
 						RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
-					struct rte_cryptodev_sym_session *sess;
+					void *sess;
 
 					sess = cryptodev_sym_sess_create(p, t);
 					if (sess == NULL)
 						return -ENOMEM;
 
-					rte_cryptodev_session_event_mdata_set(
+					ret = rte_cryptodev_session_event_mdata_set(
 						cdev_id,
 						sess,
 						RTE_CRYPTO_OP_TYPE_SYMMETRIC,
 						RTE_CRYPTO_OP_WITH_SESSION,
 						&m_data, sizeof(m_data));
+					if (ret)
+						return ret;
 					p->ca.crypto_sess[flow_id] = sess;
 				} else {
 					void *sess;
@@ -1031,12 +1362,14 @@ perf_event_dev_port_setup(struct evt_test *test, struct evt_options *opt,
 					sess = cryptodev_asym_sess_create(p, t);
 					if (sess == NULL)
 						return -ENOMEM;
-					rte_cryptodev_session_event_mdata_set(
+					ret = rte_cryptodev_session_event_mdata_set(
 						cdev_id,
 						sess,
 						RTE_CRYPTO_OP_TYPE_ASYMMETRIC,
 						RTE_CRYPTO_OP_WITH_SESSION,
 						&m_data, sizeof(m_data));
+					if (ret)
+						return ret;
 					p->ca.crypto_sess[flow_id] = sess;
 				}
 			}
@@ -1050,10 +1383,6 @@ perf_event_dev_port_setup(struct evt_test *test, struct evt_options *opt,
 				evt_err("failed to setup port %d", port);
 				return ret;
 			}
-
-			ret = perf_event_crypto_adapter_setup(t, p);
-			if (ret)
-				return ret;
 
 			qp_id++;
 			prod++;
@@ -1243,7 +1572,6 @@ perf_ethdev_setup(struct evt_test *test, struct evt_options *opt)
 	struct rte_eth_conf port_conf = {
 		.rxmode = {
 			.mq_mode = RTE_ETH_MQ_RX_RSS,
-			.split_hdr_size = 0,
 		},
 		.rx_adv_conf = {
 			.rss_conf = {
@@ -1364,7 +1692,7 @@ perf_cryptodev_setup(struct evt_test *test, struct evt_options *opt)
 
 	t->ca_op_pool = rte_crypto_op_pool_create(
 		"crypto_op_pool", opt->crypto_op_type, opt->pool_sz,
-		128, sizeof(union rte_event_crypto_metadata),
+		128, sizeof(union rte_event_crypto_metadata) + EVT_CRYPTO_MAX_IV_SIZE,
 		rte_socket_id());
 	if (t->ca_op_pool == NULL) {
 		evt_err("Failed to create crypto op pool");
@@ -1381,15 +1709,6 @@ perf_cryptodev_setup(struct evt_test *test, struct evt_options *opt)
 		goto err;
 	}
 
-	t->ca_sess_pool = rte_cryptodev_sym_session_pool_create(
-		"ca_sess_pool", nb_sessions, 0, 0,
-		sizeof(union rte_event_crypto_metadata), SOCKET_ID_ANY);
-	if (t->ca_sess_pool == NULL) {
-		evt_err("Failed to create sym session pool");
-		ret = -ENOMEM;
-		goto err;
-	}
-
 	max_session_size = 0;
 	for (cdev_id = 0; cdev_id < cdev_count; cdev_id++) {
 		unsigned int session_size;
@@ -1400,14 +1719,26 @@ perf_cryptodev_setup(struct evt_test *test, struct evt_options *opt)
 			max_session_size = session_size;
 	}
 
-	max_session_size += sizeof(union rte_event_crypto_metadata);
-	t->ca_sess_priv_pool = rte_mempool_create(
-		"ca_sess_priv_pool", nb_sessions, max_session_size, 0, 0, NULL,
-		NULL, NULL, NULL, SOCKET_ID_ANY, 0);
-	if (t->ca_sess_priv_pool == NULL) {
-		evt_err("failed to create sym session private pool");
+	t->ca_sess_pool = rte_cryptodev_sym_session_pool_create(
+		"ca_sess_pool", nb_sessions, max_session_size, 0,
+		sizeof(union rte_event_crypto_metadata), SOCKET_ID_ANY);
+	if (t->ca_sess_pool == NULL) {
+		evt_err("Failed to create sym session pool");
 		ret = -ENOMEM;
 		goto err;
+	}
+
+	if (opt->ena_vector) {
+		unsigned int nb_elem = (opt->pool_sz / opt->vector_size) * 2;
+		nb_elem = RTE_MAX(512U, nb_elem);
+		nb_elem += evt_nr_active_lcores(opt->wlcores) * 32;
+		t->ca_vector_pool = rte_event_vector_pool_create("vector_pool", nb_elem, 32,
+				opt->vector_size, opt->socket_id);
+		if (t->ca_vector_pool == NULL) {
+			evt_err("Failed to create event vector pool");
+			ret = -ENOMEM;
+			goto err;
+		}
 	}
 
 	/*
@@ -1445,7 +1776,6 @@ perf_cryptodev_setup(struct evt_test *test, struct evt_options *opt)
 
 		qp_conf.nb_descriptors = NB_CRYPTODEV_DESCRIPTORS;
 		qp_conf.mp_session = t->ca_sess_pool;
-		qp_conf.mp_session_private = t->ca_sess_priv_pool;
 
 		for (qp_id = 0; qp_id < conf.nb_queue_pairs; qp_id++) {
 			ret = rte_cryptodev_queue_pair_setup(
@@ -1466,8 +1796,8 @@ err:
 
 	rte_mempool_free(t->ca_op_pool);
 	rte_mempool_free(t->ca_sess_pool);
-	rte_mempool_free(t->ca_sess_priv_pool);
 	rte_mempool_free(t->ca_asym_sess_pool);
+	rte_mempool_free(t->ca_vector_pool);
 
 	return ret;
 }
@@ -1483,7 +1813,7 @@ perf_cryptodev_destroy(struct evt_test *test, struct evt_options *opt)
 		return;
 
 	for (port = t->nb_workers; port < perf_nb_event_ports(opt); port++) {
-		struct rte_cryptodev_sym_session *sess;
+		void *sess;
 		struct prod_data *p = &t->prod[port];
 		uint32_t flow_id;
 		uint8_t cdev_id;
@@ -1491,8 +1821,7 @@ perf_cryptodev_destroy(struct evt_test *test, struct evt_options *opt)
 		for (flow_id = 0; flow_id < t->nb_flows; flow_id++) {
 			sess = p->ca.crypto_sess[flow_id];
 			cdev_id = p->ca.cdev_id;
-			rte_cryptodev_sym_session_clear(cdev_id, sess);
-			rte_cryptodev_sym_session_free(sess);
+			rte_cryptodev_sym_session_free(cdev_id, sess);
 		}
 
 		rte_event_crypto_adapter_queue_pair_del(
@@ -1508,8 +1837,8 @@ perf_cryptodev_destroy(struct evt_test *test, struct evt_options *opt)
 
 	rte_mempool_free(t->ca_op_pool);
 	rte_mempool_free(t->ca_sess_pool);
-	rte_mempool_free(t->ca_sess_priv_pool);
 	rte_mempool_free(t->ca_asym_sess_pool);
+	rte_mempool_free(t->ca_vector_pool);
 }
 
 int
@@ -1525,6 +1854,16 @@ perf_mempool_setup(struct evt_test *test, struct evt_options *opt)
 				512, /* cache size*/
 				0, NULL, NULL,
 				perf_elt_init, /* obj constructor */
+				NULL, opt->socket_id, 0); /* flags */
+	} else if (opt->prod_type == EVT_PROD_TYPE_EVENT_CRYPTO_ADPTR &&
+			opt->crypto_op_type == RTE_CRYPTO_OP_TYPE_ASYMMETRIC)  {
+		t->pool = rte_mempool_create(test->name, /* mempool name */
+				opt->pool_sz, /* number of elements*/
+				sizeof(struct perf_elt) + modex_test_case.result_len,
+				/* element size*/
+				512, /* cache size*/
+				0, NULL, NULL,
+				NULL, /* obj constructor */
 				NULL, opt->socket_id, 0); /* flags */
 	} else {
 		t->pool = rte_pktmbuf_pool_create(test->name, /* mempool name */

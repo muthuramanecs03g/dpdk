@@ -25,6 +25,7 @@
 #include <rte_common.h>
 #include <rte_devargs.h>
 #include <rte_vfio.h>
+#include <rte_tailq.h>
 
 #include "private.h"
 
@@ -113,8 +114,9 @@ pci_common_set(struct rte_pci_device *dev)
 		/* Otherwise, it uses the internal, canonical form. */
 		dev->device.name = dev->name;
 
-	if (asprintf(&dev->bus_info, "vendor_id=%"PRIx16", device_id=%"PRIx16,
-			dev->id.vendor_id, dev->id.device_id) != -1)
+	if (dev->bus_info != NULL ||
+			asprintf(&dev->bus_info, "vendor_id=%"PRIx16", device_id=%"PRIx16,
+				dev->id.vendor_id, dev->id.device_id) != -1)
 		dev->device.bus_info = dev->bus_info;
 }
 
@@ -235,12 +237,8 @@ rte_pci_probe_one_driver(struct rte_pci_driver *dr,
 		return 1;
 	}
 
-	if (dev->device.numa_node < 0) {
-		if (rte_socket_count() > 1)
-			RTE_LOG(INFO, EAL, "Device %s is not NUMA-aware, defaulting socket to 0\n",
-					dev->name);
-		dev->device.numa_node = 0;
-	}
+	if (dev->device.numa_node < 0 && rte_socket_count() > 1)
+		RTE_LOG(INFO, EAL, "Device %s is not NUMA-aware\n", dev->name);
 
 	already_probed = rte_dev_is_probed(&dev->device);
 	if (already_probed && !(dr->drv_flags & RTE_PCI_DRV_PROBE_AGAIN)) {
@@ -437,6 +435,40 @@ pci_probe(void)
 	}
 
 	return (probed && probed == failed) ? -1 : 0;
+}
+
+static int
+pci_cleanup(void)
+{
+	struct rte_pci_device *dev, *tmp_dev;
+	int error = 0;
+
+	RTE_TAILQ_FOREACH_SAFE(dev, &rte_pci_bus.device_list, next, tmp_dev) {
+		struct rte_pci_driver *drv = dev->driver;
+		int ret = 0;
+
+		if (drv == NULL || drv->remove == NULL)
+			goto free;
+
+		ret = drv->remove(dev);
+		if (ret < 0) {
+			rte_errno = errno;
+			error = -1;
+		}
+		dev->driver = NULL;
+		dev->device.driver = NULL;
+
+free:
+		/* free interrupt handles */
+		rte_intr_instance_free(dev->intr_handle);
+		dev->intr_handle = NULL;
+		rte_intr_instance_free(dev->vfio_req_intr_handle);
+		dev->vfio_req_intr_handle = NULL;
+
+		pci_free(dev);
+	}
+
+	return error;
 }
 
 /* dump one device */
@@ -856,6 +888,7 @@ struct rte_pci_bus rte_pci_bus = {
 	.bus = {
 		.scan = rte_pci_scan,
 		.probe = pci_probe,
+		.cleanup = pci_cleanup,
 		.find_device = pci_find_device,
 		.plug = pci_plug,
 		.unplug = pci_unplug,

@@ -43,8 +43,8 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_ETHPORTS
 #define MAX_RX_QUEUE_PER_PORT 128
@@ -56,8 +56,8 @@
 #define NB_SOCKETS 8
 
 /* Static global variables used within this file. */
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /**< Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
@@ -75,6 +75,12 @@ xmm_t val_eth[RTE_MAX_ETHPORTS];
 
 /* Mask of enabled ports */
 static uint32_t enabled_port_mask;
+
+/* Pcap trace */
+static char pcap_filename[RTE_GRAPH_PCAP_FILE_SZ];
+static uint64_t packet_to_capture;
+static int pcap_trace_enable;
+
 
 struct lcore_rx_queue {
 	uint16_t port_id;
@@ -112,7 +118,6 @@ static uint16_t nb_lcore_params = RTE_DIM(lcore_params_array_default);
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = RTE_ETH_MQ_RX_RSS,
-		.split_hdr_size = 0,
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
@@ -262,7 +267,8 @@ print_usage(const char *prgname)
 		" [--eth-dest=X,MM:MM:MM:MM:MM:MM]"
 		" [--max-pkt-len PKTLEN]"
 		" [--no-numa]"
-		" [--per-port-pool]\n\n"
+		" [--per-port-pool]"
+		" [--num-pkt-cap]\n\n"
 
 		"  -p PORTMASK: Hexadecimal bitmask of ports to configure\n"
 		"  -P : Enable promiscuous mode\n"
@@ -271,8 +277,28 @@ print_usage(const char *prgname)
 		"port X\n"
 		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
 		"  --no-numa: Disable numa awareness\n"
-		"  --per-port-pool: Use separate buffer pool per port\n\n",
+		"  --per-port-pool: Use separate buffer pool per port\n"
+		"  --pcap-enable: Enables pcap capture\n"
+		"  --pcap-num-cap NUMPKT: Number of packets to capture\n"
+		"  --pcap-file-name NAME: Pcap file name\n\n",
 		prgname);
+}
+
+static uint64_t
+parse_num_pkt_cap(const char *num_pkt_cap)
+{
+	uint64_t num_pkt;
+	char *end = NULL;
+
+	/* Parse decimal string */
+	num_pkt = strtoull(num_pkt_cap, &end, 10);
+	if ((num_pkt_cap[0] == '\0') || (end == NULL) || (*end != '\0'))
+		return 0;
+
+	if (num_pkt == 0)
+		return 0;
+
+	return num_pkt;
 }
 
 static int
@@ -405,6 +431,9 @@ static const char short_options[] = "p:" /* portmask */
 #define CMD_LINE_OPT_NO_NUMA	   "no-numa"
 #define CMD_LINE_OPT_MAX_PKT_LEN   "max-pkt-len"
 #define CMD_LINE_OPT_PER_PORT_POOL "per-port-pool"
+#define CMD_LINE_OPT_PCAP_ENABLE   "pcap-enable"
+#define CMD_LINE_OPT_NUM_PKT_CAP   "pcap-num-cap"
+#define CMD_LINE_OPT_PCAP_FILENAME "pcap-file-name"
 enum {
 	/* Long options mapped to a short option */
 
@@ -417,6 +446,9 @@ enum {
 	CMD_LINE_OPT_NO_NUMA_NUM,
 	CMD_LINE_OPT_MAX_PKT_LEN_NUM,
 	CMD_LINE_OPT_PARSE_PER_PORT_POOL,
+	CMD_LINE_OPT_PARSE_PCAP_ENABLE,
+	CMD_LINE_OPT_PARSE_NUM_PKT_CAP,
+	CMD_LINE_OPT_PCAP_FILENAME_CAP,
 };
 
 static const struct option lgopts[] = {
@@ -425,6 +457,9 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_NO_NUMA, 0, 0, CMD_LINE_OPT_NO_NUMA_NUM},
 	{CMD_LINE_OPT_MAX_PKT_LEN, 1, 0, CMD_LINE_OPT_MAX_PKT_LEN_NUM},
 	{CMD_LINE_OPT_PER_PORT_POOL, 0, 0, CMD_LINE_OPT_PARSE_PER_PORT_POOL},
+	{CMD_LINE_OPT_PCAP_ENABLE, 0, 0, CMD_LINE_OPT_PARSE_PCAP_ENABLE},
+	{CMD_LINE_OPT_NUM_PKT_CAP, 1, 0, CMD_LINE_OPT_PARSE_NUM_PKT_CAP},
+	{CMD_LINE_OPT_PCAP_FILENAME, 1, 0, CMD_LINE_OPT_PCAP_FILENAME_CAP},
 	{NULL, 0, 0, 0},
 };
 
@@ -497,6 +532,23 @@ parse_args(int argc, char **argv)
 		case CMD_LINE_OPT_PARSE_PER_PORT_POOL:
 			printf("Per port buffer pool is enabled\n");
 			per_port_pool = 1;
+			break;
+
+		case CMD_LINE_OPT_PARSE_PCAP_ENABLE:
+			printf("Packet capture enabled\n");
+			pcap_trace_enable = 1;
+			break;
+
+		case CMD_LINE_OPT_PARSE_NUM_PKT_CAP:
+			packet_to_capture = parse_num_pkt_cap(optarg);
+			printf("Number of packets to capture: %"PRIu64"\n",
+			       packet_to_capture);
+			break;
+
+		case CMD_LINE_OPT_PCAP_FILENAME_CAP:
+			rte_strlcpy(pcap_filename, optarg,
+				    sizeof(pcap_filename));
+			printf("Pcap file name: %s\n", pcap_filename);
 			break;
 
 		default:
@@ -1027,6 +1079,11 @@ main(int argc, char **argv)
 
 	memset(&graph_conf, 0, sizeof(graph_conf));
 	graph_conf.node_patterns = node_patterns;
+
+	/* Pcap config */
+	graph_conf.pcap_enable = pcap_trace_enable;
+	graph_conf.num_pkt_to_capture = packet_to_capture;
+	graph_conf.pcap_filename = pcap_filename;
 
 	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
 		rte_graph_t graph_id;

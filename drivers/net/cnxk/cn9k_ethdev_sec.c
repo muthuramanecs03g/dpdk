@@ -497,9 +497,10 @@ cn9k_eth_sec_session_update(void *device,
 	plt_nix_dbg("Created outbound session with spi=%u, sa_idx=%u",
 		    eth_sec->spi, eth_sec->sa_idx);
 
-	/* Update fast path info in priv area.
+	/*
+	 * Update fast path info in priv area.
 	 */
-	set_sec_session_private_data(sess, (void *)sess_priv.u64);
+	sess->fast_mdata = sess_priv.u64;
 
 	return 0;
 exit:
@@ -512,15 +513,14 @@ exit:
 static int
 cn9k_eth_sec_session_create(void *device,
 			    struct rte_security_session_conf *conf,
-			    struct rte_security_session *sess,
-			    struct rte_mempool *mempool)
+			    struct rte_security_session *sess)
 {
+	struct cnxk_eth_sec_sess *eth_sec = SECURITY_GET_SESS_PRIV(sess);
 	struct rte_eth_dev *eth_dev = (struct rte_eth_dev *)device;
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	struct rte_security_ipsec_xform *ipsec;
 	struct cn9k_sec_sess_priv sess_priv;
 	struct rte_crypto_sym_xform *crypto;
-	struct cnxk_eth_sec_sess *eth_sec;
 	struct roc_nix *nix = &dev->nix;
 	rte_spinlock_t *lock;
 	char tbuf[128] = {0};
@@ -548,11 +548,6 @@ cn9k_eth_sec_session_create(void *device,
 		return -EEXIST;
 	}
 
-	if (rte_mempool_get(mempool, (void **)&eth_sec)) {
-		plt_err("Could not allocate security session private data");
-		return -ENOMEM;
-	}
-
 	lock = inbound ? &dev->inb.lock : &dev->outb.lock;
 	rte_spinlock_lock(lock);
 
@@ -561,6 +556,7 @@ cn9k_eth_sec_session_create(void *device,
 
 	if (!dev->outb.lf_base) {
 		plt_err("Could not allocate security session private data");
+		rte_spinlock_unlock(lock);
 		return -ENOMEM;
 	}
 
@@ -582,7 +578,7 @@ cn9k_eth_sec_session_create(void *device,
 			snprintf(tbuf, sizeof(tbuf),
 				 "Failed to create ingress sa");
 			rc = -EFAULT;
-			goto mempool_put;
+			goto err;
 		}
 
 		/* Check if SA is already in use */
@@ -591,7 +587,7 @@ cn9k_eth_sec_session_create(void *device,
 				 "Inbound SA with SPI %u already in use",
 				 ipsec->spi);
 			rc = -EBUSY;
-			goto mempool_put;
+			goto err;
 		}
 
 		memset(inb_sa, 0, sizeof(struct roc_ie_on_inb_sa));
@@ -601,18 +597,10 @@ cn9k_eth_sec_session_create(void *device,
 		if (rc < 0) {
 			snprintf(tbuf, sizeof(tbuf),
 				 "Failed to init inbound sa, rc=%d", rc);
-			goto mempool_put;
+			goto err;
 		}
 
 		ctx_len = rc;
-		rc = roc_nix_inl_ctx_write(&dev->nix, inb_sa, inb_sa, inbound,
-					   ctx_len);
-		if (rc) {
-			snprintf(tbuf, sizeof(tbuf),
-				 "Failed to create inbound sa, rc=%d", rc);
-			goto mempool_put;
-		}
-
 		inb_priv = roc_nix_inl_on_ipsec_inb_sa_sw_rsvd(inb_sa);
 		/* Back pointer to get eth_sec */
 		inb_priv->eth_sec = eth_sec;
@@ -624,7 +612,7 @@ cn9k_eth_sec_session_create(void *device,
 		if (inb_priv->replay_win_sz) {
 			rc = ar_window_init(inb_priv);
 			if (rc)
-				goto mempool_put;
+				goto err;
 		}
 
 		/* Prepare session priv */
@@ -654,7 +642,7 @@ cn9k_eth_sec_session_create(void *device,
 		/* Alloc an sa index */
 		rc = cnxk_eth_outb_sa_idx_get(dev, &sa_idx, 0);
 		if (rc)
-			goto mempool_put;
+			goto err;
 
 		outb_sa = roc_nix_inl_on_ipsec_outb_sa(sa_base, sa_idx);
 		outb_priv = roc_nix_inl_on_ipsec_outb_sa_sw_rsvd(outb_sa);
@@ -668,7 +656,7 @@ cn9k_eth_sec_session_create(void *device,
 			snprintf(tbuf, sizeof(tbuf),
 				 "Failed to init outbound sa, rc=%d", rc);
 			rc |= cnxk_eth_outb_sa_idx_put(dev, sa_idx);
-			goto mempool_put;
+			goto err;
 		}
 
 		ctx_len = rc;
@@ -678,7 +666,7 @@ cn9k_eth_sec_session_create(void *device,
 			snprintf(tbuf, sizeof(tbuf),
 				 "Failed to init outbound sa, rc=%d", rc);
 			rc |= cnxk_eth_outb_sa_idx_put(dev, sa_idx);
-			goto mempool_put;
+			goto err;
 		}
 
 		/* When IV is provided by the application,
@@ -731,12 +719,11 @@ cn9k_eth_sec_session_create(void *device,
 	/*
 	 * Update fast path info in priv area.
 	 */
-	set_sec_session_private_data(sess, (void *)sess_priv.u64);
+	sess->fast_mdata = sess_priv.u64;
 
 	return 0;
-mempool_put:
+err:
 	rte_spinlock_unlock(lock);
-	rte_mempool_put(mempool, eth_sec);
 	if (rc)
 		plt_err("%s", tbuf);
 	return rc;
@@ -750,7 +737,6 @@ cn9k_eth_sec_session_destroy(void *device, struct rte_security_session *sess)
 	struct cnxk_eth_sec_sess *eth_sec;
 	struct roc_ie_on_outb_sa *outb_sa;
 	struct roc_ie_on_inb_sa *inb_sa;
-	struct rte_mempool *mp;
 	rte_spinlock_t *lock;
 
 	eth_sec = cnxk_eth_sec_sess_get_by_sess(dev, sess);
@@ -787,10 +773,6 @@ cn9k_eth_sec_session_destroy(void *device, struct rte_security_session *sess)
 		    eth_sec->inb ? "inbound" : "outbound", eth_sec->spi,
 		    eth_sec->sa_idx);
 
-	/* Put eth_sec object back to pool */
-	mp = rte_mempool_from_obj(eth_sec);
-	set_sec_session_private_data(sess, NULL);
-	rte_mempool_put(mp, eth_sec);
 	return 0;
 }
 

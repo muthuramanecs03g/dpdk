@@ -35,6 +35,8 @@
 #define MAX_VECTOR_NS		1E9
 #define MIN_VECTOR_NS		1E5
 
+#define RXA_NB_RX_WORK_DEFAULT 128
+
 #define ETH_RX_ADAPTER_SERVICE_NAME_LEN	32
 #define ETH_RX_ADAPTER_MEM_NAME_LEN	32
 
@@ -1184,7 +1186,7 @@ rxa_intr_thread(void *arg)
 /* Dequeue <port, q> from interrupt ring and enqueue received
  * mbufs to eventdev
  */
-static inline void
+static inline bool
 rxa_intr_ring_dequeue(struct event_eth_rx_adapter *rx_adapter)
 {
 	uint32_t n;
@@ -1194,20 +1196,27 @@ rxa_intr_ring_dequeue(struct event_eth_rx_adapter *rx_adapter)
 	struct rte_event_eth_rx_adapter_stats *stats;
 	rte_spinlock_t *ring_lock;
 	uint8_t max_done = 0;
+	bool work = false;
 
 	if (rx_adapter->num_rx_intr == 0)
-		return;
+		return work;
 
 	if (rte_ring_count(rx_adapter->intr_ring) == 0
 		&& !rx_adapter->qd_valid)
-		return;
+		return work;
 
 	buf = &rx_adapter->event_enqueue_buffer;
 	stats = &rx_adapter->stats;
 	ring_lock = &rx_adapter->intr_ring_lock;
 
-	if (buf->count >= BATCH_SIZE)
-		rxa_flush_event_buffer(rx_adapter, buf, stats);
+	if (buf->count >= BATCH_SIZE) {
+		uint16_t n;
+
+		n = rxa_flush_event_buffer(rx_adapter, buf, stats);
+
+		if (likely(n > 0))
+			work = true;
+	}
 
 	while (rxa_pkt_buf_available(buf)) {
 		struct eth_device_info *dev_info;
@@ -1289,7 +1298,12 @@ rxa_intr_ring_dequeue(struct event_eth_rx_adapter *rx_adapter)
 	}
 
 done:
-	rx_adapter->stats.rx_intr_packets += nb_rx;
+	if (nb_rx > 0) {
+		rx_adapter->stats.rx_intr_packets += nb_rx;
+		work = true;
+	}
+
+	return work;
 }
 
 /*
@@ -1305,7 +1319,7 @@ done:
  * the hypervisor's switching layer where adjustments can be made to deal with
  * it.
  */
-static inline void
+static inline bool
 rxa_poll(struct event_eth_rx_adapter *rx_adapter)
 {
 	uint32_t num_queue;
@@ -1314,6 +1328,7 @@ rxa_poll(struct event_eth_rx_adapter *rx_adapter)
 	struct rte_event_eth_rx_adapter_stats *stats = NULL;
 	uint32_t wrr_pos;
 	uint32_t max_nb_rx;
+	bool work = false;
 
 	wrr_pos = rx_adapter->wrr_pos;
 	max_nb_rx = rx_adapter->max_nb_rx;
@@ -1329,14 +1344,20 @@ rxa_poll(struct event_eth_rx_adapter *rx_adapter)
 		/* Don't do a batch dequeue from the rx queue if there isn't
 		 * enough space in the enqueue buffer.
 		 */
-		if (buf->count >= BATCH_SIZE)
-			rxa_flush_event_buffer(rx_adapter, buf, stats);
+		if (buf->count >= BATCH_SIZE) {
+			uint16_t n;
+
+			n = rxa_flush_event_buffer(rx_adapter, buf, stats);
+
+			if (likely(n > 0))
+				work = true;
+		}
 		if (!rxa_pkt_buf_available(buf)) {
 			if (rx_adapter->use_queue_event_buf)
 				goto poll_next_entry;
 			else {
 				rx_adapter->wrr_pos = wrr_pos;
-				return;
+				break;
 			}
 		}
 
@@ -1352,6 +1373,11 @@ poll_next_entry:
 		if (++wrr_pos == rx_adapter->wrr_len)
 			wrr_pos = 0;
 	}
+
+	if (nb_rx > 0)
+		work = true;
+
+	return work;
 }
 
 static void
@@ -1384,12 +1410,14 @@ static int
 rxa_service_func(void *args)
 {
 	struct event_eth_rx_adapter *rx_adapter = args;
+	bool intr_work;
+	bool poll_work;
 
 	if (rte_spinlock_trylock(&rx_adapter->rx_lock) == 0)
-		return 0;
+		return -EAGAIN;
 	if (!rx_adapter->rxa_started) {
 		rte_spinlock_unlock(&rx_adapter->rx_lock);
-		return 0;
+		return -EAGAIN;
 	}
 
 	if (rx_adapter->ena_vector) {
@@ -1410,12 +1438,12 @@ rxa_service_func(void *args)
 		}
 	}
 
-	rxa_intr_ring_dequeue(rx_adapter);
-	rxa_poll(rx_adapter);
+	intr_work = rxa_intr_ring_dequeue(rx_adapter);
+	poll_work = rxa_poll(rx_adapter);
 
 	rte_spinlock_unlock(&rx_adapter->rx_lock);
 
-	return 0;
+	return intr_work || poll_work ? 0 : -EAGAIN;
 }
 
 static void *
@@ -1506,6 +1534,9 @@ rxa_default_conf_cb(uint8_t id, uint8_t dev_id,
 		rte_event_dev_stop(dev_id);
 	port_id = dev_conf.nb_event_ports;
 	dev_conf.nb_event_ports += 1;
+	if (port_conf->event_port_cfg & RTE_EVENT_PORT_CFG_SINGLE_LINK)
+		dev_conf.nb_single_link_event_port_queues += 1;
+
 	ret = rte_event_dev_configure(dev_id, &dev_conf);
 	if (ret) {
 		RTE_EDEV_LOG_ERR("failed to configure event dev %u\n",
@@ -1525,7 +1556,7 @@ rxa_default_conf_cb(uint8_t id, uint8_t dev_id,
 	}
 
 	conf->event_port_id = port_id;
-	conf->max_nb_rx = 128;
+	conf->max_nb_rx = RXA_NB_RX_WORK_DEFAULT;
 	if (started)
 		ret = rte_event_dev_start(dev_id);
 	rx_adapter->default_cb_arg = 1;
@@ -2512,6 +2543,9 @@ rte_event_eth_rx_adapter_create_with_params(uint8_t id, uint8_t dev_id,
 	if (ret)
 		rte_free(pc);
 
+	rte_eventdev_trace_eth_rx_adapter_create_with_params(id, dev_id,
+		port_config, rxa_params, ret);
+
 	return ret;
 }
 
@@ -2900,6 +2934,9 @@ rte_event_eth_rx_adapter_vector_limits_get(
 		ret = rxa_sw_vector_limits(limits);
 	}
 
+	rte_eventdev_trace_eth_rx_adapter_vector_limits_get(dev_id, eth_port_id,
+		limits->min_sz, limits->max_sz, limits->log2_sz,
+		limits->min_timeout_ns, limits->max_timeout_ns, ret);
 	return ret;
 }
 
@@ -2940,6 +2977,8 @@ rte_event_eth_rx_adapter_stats_get(uint8_t id,
 	struct rte_event_eth_rx_adapter_stats *q_stats;
 	uint32_t i, j;
 	int ret;
+
+	rte_eventdev_trace_eth_rx_adapter_stats_get(id, stats);
 
 	if (rxa_memzone_lookup())
 		return -ENOMEM;
@@ -3012,6 +3051,9 @@ rte_event_eth_rx_adapter_queue_stats_get(uint8_t id,
 	struct rte_event_eth_rx_adapter_stats *q_stats;
 	struct rte_eventdev *dev;
 
+	rte_eventdev_trace_eth_rx_adapter_queue_stats_get(id, eth_dev_id,
+							  rx_queue_id, stats);
+
 	if (rxa_memzone_lookup())
 		return -ENOMEM;
 
@@ -3069,6 +3111,8 @@ rte_event_eth_rx_adapter_stats_reset(uint8_t id)
 	struct eth_rx_queue_info *queue_info;
 	uint32_t i, j;
 
+	rte_eventdev_trace_eth_rx_adapter_stats_reset(id);
+
 	if (rxa_memzone_lookup())
 		return -ENOMEM;
 
@@ -3115,6 +3159,9 @@ rte_event_eth_rx_adapter_queue_stats_reset(uint8_t id,
 	struct eth_device_info *dev_info;
 	struct eth_rx_queue_info *queue_info;
 	struct rte_eventdev *dev;
+
+	rte_eventdev_trace_eth_rx_adapter_queue_stats_reset(id, eth_dev_id,
+							    rx_queue_id);
 
 	if (rxa_memzone_lookup())
 		return -ENOMEM;
@@ -3174,6 +3221,8 @@ rte_event_eth_rx_adapter_service_id_get(uint8_t id, uint32_t *service_id)
 	if (rx_adapter->service_inited)
 		*service_id = rx_adapter->service_id;
 
+	rte_eventdev_trace_eth_rx_adapter_service_id_get(id, *service_id);
+
 	return rx_adapter->service_inited ? 0 : -ESRCH;
 }
 
@@ -3194,6 +3243,8 @@ rte_event_eth_rx_adapter_event_port_get(uint8_t id, uint8_t *event_port_id)
 	if (rx_adapter->service_inited)
 		*event_port_id = rx_adapter->event_port_id;
 
+	rte_eventdev_trace_eth_rx_adapter_event_port_get(id, *event_port_id);
+
 	return rx_adapter->service_inited ? 0 : -ESRCH;
 }
 
@@ -3207,6 +3258,9 @@ rte_event_eth_rx_adapter_cb_register(uint8_t id,
 	struct eth_device_info *dev_info;
 	uint32_t cap;
 	int ret;
+
+	rte_eventdev_trace_eth_rx_adapter_cb_register(id, eth_dev_id, cb_fn,
+						      cb_arg);
 
 	RTE_EVENT_ETH_RX_ADAPTER_ID_VALID_OR_ERR_RET(id, -EINVAL);
 	RTE_ETH_VALID_PORTID_OR_ERR_RET(eth_dev_id, -EINVAL);
@@ -3254,6 +3308,9 @@ rte_event_eth_rx_adapter_queue_conf_get(uint8_t id,
 	struct eth_device_info *dev_info;
 	struct eth_rx_queue_info *queue_info;
 	int ret;
+
+	rte_eventdev_trace_eth_rx_adapter_queue_conf_get(id, eth_dev_id,
+							 rx_queue_id, queue_conf);
 
 	if (rxa_memzone_lookup())
 		return -ENOMEM;
@@ -3389,25 +3446,121 @@ rte_event_eth_rx_adapter_instance_get(uint16_t eth_dev_id,
 		if (!rte_event_eth_rx_adapter_caps_get(rx_adapter->eventdev_id,
 						      eth_dev_id,
 						      &caps)) {
-			if (caps & RTE_EVENT_ETH_RX_ADAPTER_CAP_INTERNAL_PORT) {
-				ret = rxa_dev_instance_get(rx_adapter) ?
-						rxa_dev_instance_get(rx_adapter)
-								(eth_dev_id,
-								 rx_queue_id,
-								 rxa_inst_id)
-							: -EINVAL;
-			}
+			if (caps & RTE_EVENT_ETH_RX_ADAPTER_CAP_INTERNAL_PORT &&
+			    rxa_dev_instance_get(rx_adapter))
+				ret = rxa_dev_instance_get(rx_adapter)(eth_dev_id, rx_queue_id,
+								       rxa_inst_id);
 		}
 
 		/* return if entry found */
-		if (ret == 0)
+		if (ret == 0) {
+			rte_eventdev_trace_eth_rx_adapter_instance_get(eth_dev_id, rx_queue_id,
+								       *rxa_inst_id);
 			return ret;
+		}
 	}
 
 	return -EINVAL;
 }
 
-#define RXA_ADD_DICT(stats, s) rte_tel_data_add_dict_u64(d, #s, stats.s)
+static int
+rxa_caps_check(struct event_eth_rx_adapter *rxa)
+{
+	uint16_t eth_dev_id;
+	uint32_t caps = 0;
+	int ret;
+
+	if (!rxa->nb_queues)
+		return -EINVAL;
+
+	/* The eth_dev used is always of same type.
+	 * Hence eth_dev_id is taken from first entry of poll array.
+	 */
+	eth_dev_id = rxa->eth_rx_poll[0].eth_dev_id;
+	ret = rte_event_eth_rx_adapter_caps_get(rxa->eventdev_id,
+						eth_dev_id,
+						&caps);
+	if (ret) {
+		RTE_EDEV_LOG_ERR("Failed to get adapter caps edev %" PRIu8
+			"eth port %" PRIu16, rxa->eventdev_id, eth_dev_id);
+		return ret;
+	}
+
+	if (caps & RTE_EVENT_ETH_RX_ADAPTER_CAP_INTERNAL_PORT)
+		return -ENOTSUP;
+
+	return 0;
+}
+
+int
+rte_event_eth_rx_adapter_runtime_params_init(
+		struct rte_event_eth_rx_adapter_runtime_params *params)
+{
+	if (params == NULL)
+		return -EINVAL;
+
+	memset(params, 0, sizeof(struct rte_event_eth_rx_adapter_runtime_params));
+	params->max_nb_rx = RXA_NB_RX_WORK_DEFAULT;
+
+	return 0;
+}
+
+int
+rte_event_eth_rx_adapter_runtime_params_set(uint8_t id,
+		struct rte_event_eth_rx_adapter_runtime_params *params)
+{
+	struct event_eth_rx_adapter *rxa;
+	int ret;
+
+	if (params == NULL)
+		return -EINVAL;
+
+	if (rxa_memzone_lookup())
+		return -ENOMEM;
+
+	rxa = rxa_id_to_adapter(id);
+	if (rxa == NULL)
+		return -EINVAL;
+
+	ret = rxa_caps_check(rxa);
+	if (ret)
+		return ret;
+
+	rte_spinlock_lock(&rxa->rx_lock);
+	rxa->max_nb_rx = params->max_nb_rx;
+	rte_spinlock_unlock(&rxa->rx_lock);
+
+	return 0;
+}
+
+int
+rte_event_eth_rx_adapter_runtime_params_get(uint8_t id,
+		struct rte_event_eth_rx_adapter_runtime_params *params)
+{
+	struct event_eth_rx_adapter *rxa;
+	int ret;
+
+	if (params == NULL)
+		return -EINVAL;
+
+	if (rxa_memzone_lookup())
+		return -ENOMEM;
+
+	rxa = rxa_id_to_adapter(id);
+	if (rxa == NULL)
+		return -EINVAL;
+
+	ret = rxa_caps_check(rxa);
+	if (ret)
+		return ret;
+
+	params->max_nb_rx = rxa->max_nb_rx;
+
+	return 0;
+}
+
+/* RX-adapter telemetry callbacks */
+#define RXA_ADD_DICT(stats, s) rte_tel_data_add_dict_uint(d, #s, stats.s)
 
 static int
 handle_rxa_stats(const char *cmd __rte_unused,
@@ -3432,7 +3585,7 @@ handle_rxa_stats(const char *cmd __rte_unused,
 	}
 
 	rte_tel_data_start_dict(d);
-	rte_tel_data_add_dict_u64(d, "rx_adapter_id", rx_adapter_id);
+	rte_tel_data_add_dict_uint(d, "rx_adapter_id", rx_adapter_id);
 	RXA_ADD_DICT(rx_adptr_stats, rx_packets);
 	RXA_ADD_DICT(rx_adptr_stats, rx_poll_count);
 	RXA_ADD_DICT(rx_adptr_stats, rx_dropped);
@@ -3526,9 +3679,9 @@ handle_rxa_get_queue_conf(const char *cmd __rte_unused,
 	}
 
 	rte_tel_data_start_dict(d);
-	rte_tel_data_add_dict_u64(d, "rx_adapter_id", rx_adapter_id);
-	rte_tel_data_add_dict_u64(d, "eth_dev_id", eth_dev_id);
-	rte_tel_data_add_dict_u64(d, "rx_queue_id", rx_queue_id);
+	rte_tel_data_add_dict_uint(d, "rx_adapter_id", rx_adapter_id);
+	rte_tel_data_add_dict_uint(d, "eth_dev_id", eth_dev_id);
+	rte_tel_data_add_dict_uint(d, "rx_queue_id", rx_queue_id);
 	RXA_ADD_DICT(queue_conf, rx_queue_flags);
 	RXA_ADD_DICT(queue_conf, servicing_weight);
 	RXA_ADD_DICT(queue_conf.ev, queue_id);
@@ -3598,9 +3751,9 @@ handle_rxa_get_queue_stats(const char *cmd __rte_unused,
 	}
 
 	rte_tel_data_start_dict(d);
-	rte_tel_data_add_dict_u64(d, "rx_adapter_id", rx_adapter_id);
-	rte_tel_data_add_dict_u64(d, "eth_dev_id", eth_dev_id);
-	rte_tel_data_add_dict_u64(d, "rx_queue_id", rx_queue_id);
+	rte_tel_data_add_dict_uint(d, "rx_adapter_id", rx_adapter_id);
+	rte_tel_data_add_dict_uint(d, "eth_dev_id", eth_dev_id);
+	rte_tel_data_add_dict_uint(d, "rx_queue_id", rx_queue_id);
 	RXA_ADD_DICT(q_stats, rx_event_buf_count);
 	RXA_ADD_DICT(q_stats, rx_event_buf_size);
 	RXA_ADD_DICT(q_stats, rx_poll_count);
@@ -3726,9 +3879,9 @@ handle_rxa_instance_get(const char *cmd __rte_unused,
 	}
 
 	rte_tel_data_start_dict(d);
-	rte_tel_data_add_dict_u64(d, "eth_dev_id", eth_dev_id);
-	rte_tel_data_add_dict_u64(d, "rx_queue_id", rx_queue_id);
-	rte_tel_data_add_dict_u64(d, "rxa_instance_id", instance_id);
+	rte_tel_data_add_dict_uint(d, "eth_dev_id", eth_dev_id);
+	rte_tel_data_add_dict_uint(d, "rx_queue_id", rx_queue_id);
+	rte_tel_data_add_dict_uint(d, "rxa_instance_id", instance_id);
 
 	return 0;
 

@@ -49,8 +49,9 @@ nix_inl_cq_sz_clamp_up(struct roc_nix *nix, struct rte_mempool *mp,
 	struct roc_nix_rq *inl_rq;
 	uint64_t limit;
 
+	/* For CN10KB and above, LBP needs minimum CQ size */
 	if (!roc_errata_cpt_hang_on_x2p_bp())
-		return nb_desc;
+		return RTE_MAX(nb_desc, (uint32_t)4096);
 
 	/* CQ should be able to hold all buffers in first pass RQ's aura
 	 * this RQ's aura.
@@ -274,6 +275,8 @@ nix_security_release(struct cnxk_eth_dev *dev)
 			plt_err("Failed to cleanup nix inline inb, rc=%d", rc);
 		ret |= rc;
 
+		cnxk_nix_lookup_mem_metapool_clear(dev);
+
 		if (dev->inb.sa_dptr) {
 			plt_free(dev->inb.sa_dptr);
 			dev->inb.sa_dptr = NULL;
@@ -362,7 +365,7 @@ nix_init_flow_ctrl_config(struct rte_eth_dev *eth_dev)
 	struct cnxk_fc_cfg *fc = &dev->fc_cfg;
 	int rc;
 
-	if (roc_nix_is_vf_or_sdp(&dev->nix))
+	if (roc_nix_is_vf_or_sdp(&dev->nix) && !roc_nix_is_lbk(&dev->nix))
 		return 0;
 
 	/* To avoid Link credit deadlock on Ax, disable Tx FC if it's enabled */
@@ -387,7 +390,11 @@ nix_update_flow_ctrl_config(struct rte_eth_dev *eth_dev)
 	struct cnxk_fc_cfg *fc = &dev->fc_cfg;
 	struct rte_eth_fc_conf fc_cfg = {0};
 
-	if (roc_nix_is_vf_or_sdp(&dev->nix) && !roc_nix_is_lbk(&dev->nix))
+	if (roc_nix_is_sdp(&dev->nix))
+		return 0;
+
+	/* Don't do anything if PFC is enabled */
+	if (dev->pfc_cfg.rx_pause_en || dev->pfc_cfg.tx_pause_en)
 		return 0;
 
 	fc_cfg.mode = fc->mode;
@@ -455,7 +462,9 @@ cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 {
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	const struct eth_dev_ops *dev_ops = eth_dev->dev_ops;
+	struct roc_nix *nix = &dev->nix;
 	struct cnxk_eth_txq_sp *txq_sp;
+	struct roc_nix_cq *cq;
 	struct roc_nix_sq *sq;
 	size_t txq_sz;
 	int rc;
@@ -478,7 +487,19 @@ cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	sq->qid = qid;
 	sq->nb_desc = nb_desc;
 	sq->max_sqe_sz = nix_sq_max_sqe_sz(dev);
-	sq->tc = ROC_NIX_PFC_CLASS_INVALID;
+
+	if (nix->tx_compl_ena) {
+		sq->cqid = sq->qid + dev->nb_rxq;
+		sq->cq_ena = 1;
+		cq = &dev->cqs[sq->cqid];
+		cq->qid = sq->cqid;
+		cq->nb_desc = nb_desc;
+		rc = roc_nix_cq_init(&dev->nix, cq);
+		if (rc) {
+			plt_err("Failed to init cq=%d, rc=%d", cq->qid, rc);
+			return rc;
+		}
+	}
 
 	rc = roc_nix_sq_init(&dev->nix, sq);
 	if (rc) {
@@ -513,7 +534,7 @@ cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	return 0;
 }
 
-static void
+void
 cnxk_nix_tx_queue_release(struct rte_eth_dev *eth_dev, uint16_t qid)
 {
 	void *txq = eth_dev->data->tx_queues[qid];
@@ -541,6 +562,58 @@ cnxk_nix_tx_queue_release(struct rte_eth_dev *eth_dev, uint16_t qid)
 	plt_free(txq_sp);
 }
 
+static int
+cnxk_nix_process_rx_conf(const struct rte_eth_rxconf *rx_conf,
+			 struct rte_mempool **lpb_pool,
+			 struct rte_mempool **spb_pool)
+{
+	struct rte_mempool *pool0;
+	struct rte_mempool *pool1;
+	struct rte_mempool **mp = rx_conf->rx_mempools;
+	const char *platform_ops;
+	struct rte_mempool_ops *ops;
+
+	if (*lpb_pool ||
+	    rx_conf->rx_nmempool != CNXK_NIX_NUM_POOLS_MAX) {
+		plt_err("invalid arguments");
+		return -EINVAL;
+	}
+
+	if (mp == NULL || mp[0] == NULL || mp[1] == NULL) {
+		plt_err("invalid memory pools\n");
+		return -EINVAL;
+	}
+
+	pool0 = mp[0];
+	pool1 = mp[1];
+
+	if (pool0->elt_size > pool1->elt_size) {
+		*lpb_pool = pool0;
+		*spb_pool = pool1;
+
+	} else {
+		*lpb_pool = pool1;
+		*spb_pool = pool0;
+	}
+
+	if ((*spb_pool)->pool_id == 0) {
+		plt_err("Invalid pool_id");
+		return -EINVAL;
+	}
+
+	platform_ops = rte_mbuf_platform_mempool_ops();
+	ops = rte_mempool_get_ops((*spb_pool)->ops_index);
+	if (strncmp(ops->name, platform_ops, RTE_MEMPOOL_OPS_NAMESIZE)) {
+		plt_err("mempool ops should be of cnxk_npa type");
+		return -EINVAL;
+	}
+
+	plt_info("spb_pool:%s lpb_pool:%s lpb_len:%u spb_len:%u\n", (*spb_pool)->name,
+		 (*lpb_pool)->name, (*lpb_pool)->elt_size, (*spb_pool)->elt_size);
+
+	return 0;
+}
+
 int
 cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 			uint32_t nb_desc, uint16_t fp_rx_q_sz,
@@ -557,6 +630,8 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	uint16_t first_skip;
 	int rc = -EINVAL;
 	size_t rxq_sz;
+	struct rte_mempool *lpb_pool = mp;
+	struct rte_mempool *spb_pool = NULL;
 
 	/* Sanity checks */
 	if (rx_conf->rx_deferred_start == 1) {
@@ -564,15 +639,21 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 		goto fail;
 	}
 
+	if (rx_conf->rx_nmempool > 0) {
+		rc = cnxk_nix_process_rx_conf(rx_conf, &lpb_pool, &spb_pool);
+		if (rc)
+			goto fail;
+	}
+
 	platform_ops = rte_mbuf_platform_mempool_ops();
 	/* This driver needs cnxk_npa mempool ops to work */
-	ops = rte_mempool_get_ops(mp->ops_index);
+	ops = rte_mempool_get_ops(lpb_pool->ops_index);
 	if (strncmp(ops->name, platform_ops, RTE_MEMPOOL_OPS_NAMESIZE)) {
 		plt_err("mempool ops should be of cnxk_npa type");
 		goto fail;
 	}
 
-	if (mp->pool_id == 0) {
+	if (lpb_pool->pool_id == 0) {
 		plt_err("Invalid pool_id");
 		goto fail;
 	}
@@ -589,13 +670,13 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	/* Its a no-op when inline device is not used */
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY ||
 	    dev->tx_offloads & RTE_ETH_TX_OFFLOAD_SECURITY)
-		roc_nix_inl_dev_xaq_realloc(mp->pool_id);
+		roc_nix_inl_dev_xaq_realloc(lpb_pool->pool_id);
 
 	/* Increase CQ size to Aura size to avoid CQ overflow and
 	 * then CPT buffer leak.
 	 */
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY)
-		nb_desc = nix_inl_cq_sz_clamp_up(nix, mp, nb_desc);
+		nb_desc = nix_inl_cq_sz_clamp_up(nix, lpb_pool, nb_desc);
 
 	/* Setup ROC CQ */
 	cq = &dev->cqs[qid];
@@ -611,23 +692,29 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	rq = &dev->rqs[qid];
 	rq->qid = qid;
 	rq->cqid = cq->qid;
-	rq->aura_handle = mp->pool_id;
+	rq->aura_handle = lpb_pool->pool_id;
 	rq->flow_tag_width = 32;
 	rq->sso_ena = false;
 
 	/* Calculate first mbuf skip */
 	first_skip = (sizeof(struct rte_mbuf));
 	first_skip += RTE_PKTMBUF_HEADROOM;
-	first_skip += rte_pktmbuf_priv_size(mp);
+	first_skip += rte_pktmbuf_priv_size(lpb_pool);
 	rq->first_skip = first_skip;
-	rq->later_skip = sizeof(struct rte_mbuf);
-	rq->lpb_size = mp->elt_size;
+	rq->later_skip = sizeof(struct rte_mbuf) + rte_pktmbuf_priv_size(lpb_pool);
+	rq->lpb_size = lpb_pool->elt_size;
 	if (roc_errata_nix_no_meta_aura())
 		rq->lpb_drop_ena = !(dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY);
 
 	/* Enable Inline IPSec on RQ, will not be used for Poll mode */
 	if (roc_nix_inl_inb_is_enabled(nix))
 		rq->ipsech_ena = true;
+
+	if (spb_pool) {
+		rq->spb_ena = 1;
+		rq->spb_aura_handle = spb_pool->pool_id;
+		rq->spb_size = spb_pool->elt_size;
+	}
 
 	rc = roc_nix_rq_init(&dev->nix, rq, !!eth_dev->data->dev_started);
 	if (rc) {
@@ -651,7 +738,7 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	/* Queue config should reflect global offloads */
 	rxq_sp->qconf.conf.rx.offloads = dev->rx_offloads;
 	rxq_sp->qconf.nb_desc = nb_desc;
-	rxq_sp->qconf.mp = mp;
+	rxq_sp->qconf.mp = lpb_pool;
 	rxq_sp->tc = 0;
 	rxq_sp->tx_pause = (dev->fc_cfg.mode == RTE_ETH_FC_FULL ||
 			    dev->fc_cfg.mode == RTE_ETH_FC_TX_PAUSE);
@@ -670,7 +757,7 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 			goto free_mem;
 	}
 
-	plt_nix_dbg("rq=%d pool=%s nb_desc=%d->%d", qid, mp->name, nb_desc,
+	plt_nix_dbg("rq=%d pool=%s nb_desc=%d->%d", qid, lpb_pool->name, nb_desc,
 		    cq->nb_desc);
 
 	/* Store start of fast path area */
@@ -816,6 +903,27 @@ cnxk_rss_ethdev_to_nix(struct cnxk_eth_dev *dev, uint64_t ethdev_rss,
 		flowkey_cfg |= FLOW_KEY_TYPE_GTPU;
 
 	return flowkey_cfg;
+}
+
+static int
+nix_rxchan_cfg_disable(struct cnxk_eth_dev *dev)
+{
+	struct roc_nix *nix = &dev->nix;
+	struct roc_nix_fc_cfg fc_cfg;
+	int rc;
+
+	if (!roc_nix_is_lbk(nix))
+		return 0;
+
+	memset(&fc_cfg, 0, sizeof(struct roc_nix_fc_cfg));
+	fc_cfg.type = ROC_NIX_FC_RXCHAN_CFG;
+	fc_cfg.rxchan_cfg.enable = false;
+	rc = roc_nix_fc_config_set(nix, &fc_cfg);
+	if (rc) {
+		plt_err("Failed to setup flow control, rc=%d(%s)", rc, roc_error_msg_get(rc));
+		return rc;
+	}
+	return 0;
 }
 
 static void
@@ -1136,6 +1244,7 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 			goto fail_configure;
 
 		roc_nix_tm_fini(nix);
+		nix_rxchan_cfg_disable(dev);
 		roc_nix_lf_free(nix);
 	}
 
@@ -1168,7 +1277,7 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 	if (roc_nix_is_lbk(nix))
 		nix->enable_loop = eth_dev->data->dev_conf.lpbk_mode;
 
-	nix->tx_compl_ena = 0;
+	nix->tx_compl_ena = dev->tx_compl_ena;
 
 	/* Alloc a nix lf */
 	rc = roc_nix_lf_alloc(nix, nb_rxq, nb_txq, rx_cfg);
@@ -1211,6 +1320,15 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 			goto free_nix_lf;
 		}
 		dev->sqs = qs;
+
+		if (nix->tx_compl_ena) {
+			qs = plt_zmalloc(sizeof(struct roc_nix_cq) * nb_txq, 0);
+			if (!qs) {
+				plt_err("Failed to alloc cqs");
+				goto free_nix_lf;
+			}
+			dev->cqs = qs;
+		}
 	}
 
 	/* Re-enable NIX LF error interrupts */
@@ -1365,6 +1483,7 @@ tm_fini:
 	roc_nix_tm_fini(nix);
 free_nix_lf:
 	nix_free_queue_mem(dev);
+	rc |= nix_rxchan_cfg_disable(dev);
 	rc |= roc_nix_lf_free(nix);
 fail_configure:
 	dev->configured = 0;
@@ -1678,7 +1797,21 @@ struct eth_dev_ops cnxk_eth_dev_ops = {
 	.tm_ops_get = cnxk_nix_tm_ops_get,
 	.mtr_ops_get = cnxk_nix_mtr_ops_get,
 	.eth_dev_priv_dump  = cnxk_nix_eth_dev_priv_dump,
+	.cman_info_get = cnxk_nix_cman_info_get,
+	.cman_config_init = cnxk_nix_cman_config_init,
+	.cman_config_set = cnxk_nix_cman_config_set,
+	.cman_config_get = cnxk_nix_cman_config_get,
 };
+
+void
+cnxk_eth_dev_q_err_cb(struct roc_nix *nix, void *data)
+{
+	struct cnxk_eth_dev *dev = (struct cnxk_eth_dev *)nix;
+	struct rte_eth_dev *eth_dev = dev->eth_dev;
+
+	/* Set the flag and execute application callbacks */
+	rte_eth_dev_callback_process(eth_dev, RTE_ETH_EVENT_INTR_RESET, data);
+}
 
 static int
 cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
@@ -1721,6 +1854,8 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	nix->pci_dev = pci_dev;
 	nix->hw_vlan_ins = true;
 	nix->port_id = eth_dev->data->port_id;
+	if (roc_feature_nix_has_own_meta_aura())
+		nix->local_meta_aura_ena = true;
 	rc = roc_nix_dev_init(nix);
 	if (rc) {
 		plt_err("Failed to initialize roc nix rc=%d", rc);
@@ -1733,6 +1868,9 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	/* Register up msg callbacks */
 	roc_nix_mac_link_info_get_cb_register(nix,
 					      cnxk_eth_dev_link_status_get_cb);
+
+	/* Register up msg callbacks */
+	roc_nix_q_err_cb_register(nix, cnxk_eth_dev_q_err_cb);
 
 	/* Register callback for inline meta pool create */
 	roc_nix_inl_meta_pool_cb_register(cnxk_nix_inl_meta_pool_cb);
@@ -1826,6 +1964,8 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 {
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	const struct eth_dev_ops *dev_ops = eth_dev->dev_ops;
+	struct cnxk_pfc_cfg *pfc_cfg = &dev->pfc_cfg;
+	struct cnxk_fc_cfg *fc_cfg = &dev->fc_cfg;
 	struct rte_eth_pfc_queue_conf pfc_conf;
 	struct roc_nix *nix = &dev->nix;
 	struct rte_eth_fc_conf fc_conf;
@@ -1849,21 +1989,27 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 	/* Restore 802.3 Flow control configuration */
 	memset(&pfc_conf, 0, sizeof(struct rte_eth_pfc_queue_conf));
 	memset(&fc_conf, 0, sizeof(struct rte_eth_fc_conf));
-	fc_conf.mode = RTE_ETH_FC_NONE;
-	rc = cnxk_nix_flow_ctrl_set(eth_dev, &fc_conf);
-
-	pfc_conf.mode = RTE_ETH_FC_NONE;
-	for (i = 0; i < RTE_MAX(eth_dev->data->nb_rx_queues,
-				eth_dev->data->nb_tx_queues);
-	     i++) {
-		pfc_conf.rx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
-		pfc_conf.rx_pause.tx_qid = i;
-		pfc_conf.tx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
-		pfc_conf.tx_pause.rx_qid = i;
-		rc = cnxk_nix_priority_flow_ctrl_queue_config(eth_dev,
-							      &pfc_conf);
-		if (rc && rc != -ENOTSUP)
-			plt_err("Failed to reset PFC. error code(%d)", rc);
+	if (fc_cfg->rx_pause || fc_cfg->tx_pause) {
+		fc_conf.mode = RTE_ETH_FC_NONE;
+		rc = cnxk_nix_flow_ctrl_set(eth_dev, &fc_conf);
+		if (rc < 0)
+			plt_err("Failed to reset control flow. error code(%d)",
+					rc);
+	}
+	if (pfc_cfg->rx_pause_en || pfc_cfg->tx_pause_en) {
+		for (i = 0; i < RTE_MAX(eth_dev->data->nb_rx_queues,
+					eth_dev->data->nb_tx_queues);
+		     i++) {
+			pfc_conf.mode = RTE_ETH_FC_NONE;
+			pfc_conf.rx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
+			pfc_conf.rx_pause.tx_qid = i;
+			pfc_conf.tx_pause.tc = ROC_NIX_PFC_CLASS_INVALID;
+			pfc_conf.tx_pause.rx_qid = i;
+			rc = cnxk_nix_priority_flow_ctrl_queue_config(eth_dev,
+					&pfc_conf);
+			if (rc && rc != -ENOTSUP)
+				plt_err("Failed to reset PFC. error code(%d)", rc);
+		}
 	}
 
 	/* Disable and free rte_meter entries */
@@ -1909,6 +2055,11 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 
 	/* Free ROC RQ's, SQ's and CQ's memory */
 	nix_free_queue_mem(dev);
+
+	/* free nix bpid */
+	rc = nix_rxchan_cfg_disable(dev);
+	if (rc)
+		plt_err("Failed to free nix bpid, rc=%d", rc);
 
 	/* Free nix lf resources */
 	rc = roc_nix_lf_free(nix);

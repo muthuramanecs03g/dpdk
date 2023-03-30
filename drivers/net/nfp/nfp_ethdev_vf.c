@@ -19,9 +19,9 @@
 #include "nfpcore/nfp_rtsym.h"
 
 #include "nfp_common.h"
+#include "nfp_ctrl.h"
 #include "nfp_rxtx.h"
 #include "nfp_logs.h"
-#include "nfp_ctrl.h"
 
 static void
 nfp_netvf_read_mac(struct nfp_net_hw *hw)
@@ -95,10 +95,7 @@ nfp_netvf_start(struct rte_eth_dev *dev)
 	if (rxmode->mq_mode & RTE_ETH_MQ_RX_RSS) {
 		nfp_net_rss_config_default(dev);
 		update |= NFP_NET_CFG_UPDATE_RSS;
-		if (hw->cap & NFP_NET_CFG_CTRL_RSS2)
-			new_ctrl |= NFP_NET_CFG_CTRL_RSS2;
-		else
-			new_ctrl |= NFP_NET_CFG_CTRL_RSS;
+		new_ctrl |= nfp_net_cfg_ctrl_rss(hw->cap);
 	}
 
 	/* Enable device */
@@ -218,7 +215,7 @@ nfp_netvf_close(struct rte_eth_dev *dev)
 }
 
 /* Initialise and register VF driver with DPDK Application */
-static const struct eth_dev_ops nfp_netvf_nfd3_eth_dev_ops = {
+static const struct eth_dev_ops nfp_netvf_eth_dev_ops = {
 	.dev_configure		= nfp_net_configure,
 	.dev_start		= nfp_netvf_start,
 	.dev_stop		= nfp_netvf_stop,
@@ -241,36 +238,7 @@ static const struct eth_dev_ops nfp_netvf_nfd3_eth_dev_ops = {
 	.rss_hash_conf_get	= nfp_net_rss_hash_conf_get,
 	.rx_queue_setup		= nfp_net_rx_queue_setup,
 	.rx_queue_release	= nfp_net_rx_queue_release,
-	.tx_queue_setup		= nfp_net_nfd3_tx_queue_setup,
-	.tx_queue_release	= nfp_net_tx_queue_release,
-	.rx_queue_intr_enable   = nfp_rx_queue_intr_enable,
-	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
-};
-
-static const struct eth_dev_ops nfp_netvf_nfdk_eth_dev_ops = {
-	.dev_configure		= nfp_net_configure,
-	.dev_start		= nfp_netvf_start,
-	.dev_stop		= nfp_netvf_stop,
-	.dev_set_link_up	= nfp_netvf_set_link_up,
-	.dev_set_link_down	= nfp_netvf_set_link_down,
-	.dev_close		= nfp_netvf_close,
-	.promiscuous_enable	= nfp_net_promisc_enable,
-	.promiscuous_disable	= nfp_net_promisc_disable,
-	.link_update		= nfp_net_link_update,
-	.stats_get		= nfp_net_stats_get,
-	.stats_reset		= nfp_net_stats_reset,
-	.dev_infos_get		= nfp_net_infos_get,
-	.dev_supported_ptypes_get = nfp_net_supported_ptypes_get,
-	.mtu_set		= nfp_net_dev_mtu_set,
-	.mac_addr_set		= nfp_net_set_mac_addr,
-	.vlan_offload_set	= nfp_net_vlan_offload_set,
-	.reta_update		= nfp_net_reta_update,
-	.reta_query		= nfp_net_reta_query,
-	.rss_hash_update	= nfp_net_rss_hash_update,
-	.rss_hash_conf_get	= nfp_net_rss_hash_conf_get,
-	.rx_queue_setup		= nfp_net_rx_queue_setup,
-	.rx_queue_release	= nfp_net_rx_queue_release,
-	.tx_queue_setup		= nfp_net_nfdk_tx_queue_setup,
+	.tx_queue_setup		= nfp_net_tx_queue_setup,
 	.tx_queue_release	= nfp_net_tx_queue_release,
 	.rx_queue_intr_enable   = nfp_rx_queue_intr_enable,
 	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
@@ -281,7 +249,6 @@ nfp_netvf_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
 {
 	switch (NFD_CFG_CLASS_VER_of(hw->ver)) {
 	case NFP_NET_CFG_VERSION_DP_NFD3:
-		eth_dev->dev_ops = &nfp_netvf_nfd3_eth_dev_ops;
 		eth_dev->tx_pkt_burst = &nfp_net_nfd3_xmit_pkts;
 		break;
 	case NFP_NET_CFG_VERSION_DP_NFDK:
@@ -290,7 +257,6 @@ nfp_netvf_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
 				NFD_CFG_MAJOR_VERSION_of(hw->ver));
 			return -EINVAL;
 		}
-		eth_dev->dev_ops = &nfp_netvf_nfdk_eth_dev_ops;
 		eth_dev->tx_pkt_burst = &nfp_net_nfdk_xmit_pkts;
 		break;
 	default:
@@ -298,6 +264,7 @@ nfp_netvf_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
 		return -EINVAL;
 	}
 
+	eth_dev->dev_ops = &nfp_netvf_eth_dev_ops;
 	eth_dev->rx_queue_count = nfp_net_rx_queue_count;
 	eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
 
@@ -321,14 +288,6 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
 
-	/* NFP can not handle DMA addresses requiring more than 40 bits */
-	if (rte_mem_check_dma_mask(40)) {
-		RTE_LOG(ERR, PMD,
-			"device %s can not be used: restricted dma mask to 40 bits!\n",
-			pci_dev->device.name);
-		return -ENODEV;
-	}
-
 	hw = NFP_NET_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
 
 	hw->ctrl_bar = (uint8_t *)pci_dev->mem_resource[0].addr;
@@ -341,6 +300,9 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 	PMD_INIT_LOG(DEBUG, "ctrl bar: %p", hw->ctrl_bar);
 
 	hw->ver = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
+
+	if (nfp_net_check_dma_mask(hw, pci_dev->name) != 0)
+		return -ENODEV;
 
 	if (nfp_netvf_ethdev_ops_mount(hw, eth_dev))
 		return -EINVAL;
@@ -363,6 +325,13 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	hw->max_rx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_RXRINGS);
 	hw->max_tx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_TXRINGS);
+	if (hw->max_rx_queues == 0 || hw->max_tx_queues == 0) {
+		PMD_DRV_LOG(ERR,
+			    "Device %s can not be used, there are no valid queue "
+			    "pairs for use, please try to generate less VFs",
+			    pci_dev->name);
+		return -ENODEV;
+	}
 
 	/* Work out where in the BAR the queues start. */
 	switch (pci_dev->id.device_id) {
@@ -396,44 +365,25 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 	hw->cap = nn_cfg_readl(hw, NFP_NET_CFG_CAP);
 	hw->max_mtu = nn_cfg_readl(hw, NFP_NET_CFG_MAX_MTU);
 	hw->mtu = RTE_ETHER_MTU;
-	hw->flbufsz = RTE_ETHER_MTU;
+	hw->flbufsz = DEFAULT_FLBUF_SIZE;
 
 	/* VLAN insertion is incompatible with LSOv2 */
 	if (hw->cap & NFP_NET_CFG_CTRL_LSO2)
 		hw->cap &= ~NFP_NET_CFG_CTRL_TXVLAN;
+
+	nfp_net_init_metadata_format(hw);
 
 	if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 2)
 		hw->rx_offset = NFP_NET_RX_OFFSET;
 	else
 		hw->rx_offset = nn_cfg_readl(hw, NFP_NET_CFG_RX_OFFSET_ADDR);
 
-	PMD_INIT_LOG(INFO, "VER: %u.%u, Maximum supported MTU: %d",
-			   NFD_CFG_MAJOR_VERSION_of(hw->ver),
-			   NFD_CFG_MINOR_VERSION_of(hw->ver), hw->max_mtu);
-
-	PMD_INIT_LOG(INFO, "CAP: %#x, %s%s%s%s%s%s%s%s%s%s%s%s%s%s", hw->cap,
-		     hw->cap & NFP_NET_CFG_CTRL_PROMISC ? "PROMISC " : "",
-		     hw->cap & NFP_NET_CFG_CTRL_L2BC    ? "L2BCFILT " : "",
-		     hw->cap & NFP_NET_CFG_CTRL_L2MC    ? "L2MCFILT " : "",
-		     hw->cap & NFP_NET_CFG_CTRL_RXCSUM  ? "RXCSUM "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_TXCSUM  ? "TXCSUM "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_RXVLAN  ? "RXVLAN "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_TXVLAN  ? "TXVLAN "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_SCATTER ? "SCATTER " : "",
-		     hw->cap & NFP_NET_CFG_CTRL_GATHER  ? "GATHER "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_LIVE_ADDR ? "LIVE_ADDR "  : "",
-		     hw->cap & NFP_NET_CFG_CTRL_LSO     ? "TSO "     : "",
-		     hw->cap & NFP_NET_CFG_CTRL_LSO2     ? "TSOv2 "     : "",
-		     hw->cap & NFP_NET_CFG_CTRL_RSS     ? "RSS "     : "",
-		     hw->cap & NFP_NET_CFG_CTRL_RSS2     ? "RSSv2 "     : "");
-
 	hw->ctrl = 0;
 
 	hw->stride_rx = stride;
 	hw->stride_tx = stride;
 
-	PMD_INIT_LOG(INFO, "max_rx_queues: %u, max_tx_queues: %u",
-		     hw->max_rx_queues, hw->max_tx_queues);
+	nfp_net_log_device_information(hw);
 
 	/* Initializing spinlock for reconfigs */
 	rte_spinlock_init(&hw->reconfig_lock);
@@ -462,7 +412,7 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 	rte_ether_addr_copy((struct rte_ether_addr *)hw->mac_addr,
 			&eth_dev->data->mac_addrs[0]);
 
-	if (!(hw->cap & NFP_NET_CFG_CTRL_LIVE_ADDR))
+	if ((hw->cap & NFP_NET_CFG_CTRL_LIVE_ADDR) == 0)
 		eth_dev->data->dev_flags |= RTE_ETH_DEV_NOLIVE_MAC_ADDR;
 
 	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;

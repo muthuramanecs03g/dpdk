@@ -844,7 +844,7 @@ testsuite_setup(void)
 				valid_devs, RTE_CRYPTO_MAX_DEVS);
 	if (nb_devs < 1) {
 		RTE_LOG(ERR, USER1, "No crypto devices found?\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 
 	/*
@@ -903,6 +903,12 @@ static void
 testsuite_teardown(void)
 {
 	struct crypto_testsuite_params_asym *ts_params = &testsuite_params;
+
+	/* Reset device */
+	ts_params->qp_conf.mp_session = NULL;
+	ts_params->conf.ff_disable = 0;
+	if (rte_cryptodev_configure(ts_params->valid_devs[0], &ts_params->conf))
+		RTE_LOG(DEBUG, USER1, "Could not reset cryptodev\n");
 
 	if (ts_params->op_mpool != NULL) {
 		RTE_LOG(DEBUG, USER1, "CRYPTO_OP_POOL count %u\n",
@@ -968,7 +974,7 @@ static inline void print_asym_capa(
 	int i = 0;
 
 	printf("\nxform type: %s\n===================\n",
-			rte_crypto_asym_xform_strings[capa->xform_type]);
+			rte_cryptodev_asym_get_xform_string(capa->xform_type));
 	printf("operation supported -");
 
 	for (i = 0; i < RTE_CRYPTO_ASYM_OP_LIST_END; i++) {
@@ -2250,7 +2256,7 @@ test_cryptodev_openssl_asym(void)
 
 	if (gbl_driver_id == -1) {
 		RTE_LOG(ERR, USER1, "OPENSSL PMD must be loaded.\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 
 	return unit_test_suite_runner(&cryptodev_openssl_asym_testsuite);
@@ -2264,7 +2270,7 @@ test_cryptodev_qat_asym(void)
 
 	if (gbl_driver_id == -1) {
 		RTE_LOG(ERR, USER1, "QAT PMD must be loaded.\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 
 	return unit_test_suite_runner(&cryptodev_qat_asym_testsuite);
@@ -2277,7 +2283,7 @@ test_cryptodev_octeontx_asym(void)
 			RTE_STR(CRYPTODEV_NAME_OCTEONTX_SYM_PMD));
 	if (gbl_driver_id == -1) {
 		RTE_LOG(ERR, USER1, "OCTEONTX PMD must be loaded.\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 	return unit_test_suite_runner(&cryptodev_octeontx_asym_testsuite);
 }
@@ -2289,7 +2295,7 @@ test_cryptodev_cn9k_asym(void)
 			RTE_STR(CRYPTODEV_NAME_CN9K_PMD));
 	if (gbl_driver_id == -1) {
 		RTE_LOG(ERR, USER1, "CN9K PMD must be loaded.\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 
 	/* Use test suite registered for crypto_octeontx PMD */
@@ -2303,7 +2309,7 @@ test_cryptodev_cn10k_asym(void)
 			RTE_STR(CRYPTODEV_NAME_CN10K_PMD));
 	if (gbl_driver_id == -1) {
 		RTE_LOG(ERR, USER1, "CN10K PMD must be loaded.\n");
-		return TEST_FAILED;
+		return TEST_SKIPPED;
 	}
 
 	/* Use test suite registered for crypto_octeontx PMD */

@@ -78,3 +78,5 @@ sources += files(
         'ice_dcf_parent.c',
         'ice_dcf_sched.c',
 )
+
+require_iova_in_mbuf = false

@@ -1701,18 +1701,18 @@ static const struct sfc_mae_field_locator flocs_eth[] = {
 		 * The field is handled by sfc_mae_rule_process_pattern_data().
 		 */
 		SFC_MAE_FIELD_HANDLING_DEFERRED,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, type),
-		offsetof(struct rte_flow_item_eth, type),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, hdr.ether_type),
+		offsetof(struct rte_flow_item_eth, hdr.ether_type),
 	},
 	{
 		EFX_MAE_FIELD_ETH_DADDR_BE,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, dst),
-		offsetof(struct rte_flow_item_eth, dst),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, hdr.dst_addr),
+		offsetof(struct rte_flow_item_eth, hdr.dst_addr),
 	},
 	{
 		EFX_MAE_FIELD_ETH_SADDR_BE,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, src),
-		offsetof(struct rte_flow_item_eth, src),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_eth, hdr.src_addr),
+		offsetof(struct rte_flow_item_eth, hdr.src_addr),
 	},
 };
 
@@ -1770,8 +1770,8 @@ sfc_mae_rule_parse_item_eth(const struct rte_flow_item *item,
 		 * sfc_mae_rule_process_pattern_data() will consider them
 		 * altogether when the rest of the items have been parsed.
 		 */
-		ethertypes[0].value = item_spec->type;
-		ethertypes[0].mask = item_mask->type;
+		ethertypes[0].value = item_spec->hdr.ether_type;
+		ethertypes[0].mask = item_mask->hdr.ether_type;
 		if (item_mask->has_vlan) {
 			pdata->has_ovlan_mask = B_TRUE;
 			if (item_spec->has_vlan)
@@ -1794,8 +1794,8 @@ static const struct sfc_mae_field_locator flocs_vlan[] = {
 	/* Outermost tag */
 	{
 		EFX_MAE_FIELD_VLAN0_TCI_BE,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, tci),
-		offsetof(struct rte_flow_item_vlan, tci),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, hdr.vlan_tci),
+		offsetof(struct rte_flow_item_vlan, hdr.vlan_tci),
 	},
 	{
 		/*
@@ -1803,15 +1803,15 @@ static const struct sfc_mae_field_locator flocs_vlan[] = {
 		 * The field is handled by sfc_mae_rule_process_pattern_data().
 		 */
 		SFC_MAE_FIELD_HANDLING_DEFERRED,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, inner_type),
-		offsetof(struct rte_flow_item_vlan, inner_type),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, hdr.eth_proto),
+		offsetof(struct rte_flow_item_vlan, hdr.eth_proto),
 	},
 
 	/* Innermost tag */
 	{
 		EFX_MAE_FIELD_VLAN1_TCI_BE,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, tci),
-		offsetof(struct rte_flow_item_vlan, tci),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, hdr.vlan_tci),
+		offsetof(struct rte_flow_item_vlan, hdr.vlan_tci),
 	},
 	{
 		/*
@@ -1819,8 +1819,8 @@ static const struct sfc_mae_field_locator flocs_vlan[] = {
 		 * The field is handled by sfc_mae_rule_process_pattern_data().
 		 */
 		SFC_MAE_FIELD_HANDLING_DEFERRED,
-		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, inner_type),
-		offsetof(struct rte_flow_item_vlan, inner_type),
+		RTE_SIZEOF_FIELD(struct rte_flow_item_vlan, hdr.eth_proto),
+		offsetof(struct rte_flow_item_vlan, hdr.eth_proto),
 	},
 };
 
@@ -1899,9 +1899,9 @@ sfc_mae_rule_parse_item_vlan(const struct rte_flow_item *item,
 		 * sfc_mae_rule_process_pattern_data() will consider them
 		 * altogether when the rest of the items have been parsed.
 		 */
-		et[pdata->nb_vlan_tags + 1].value = item_spec->inner_type;
-		et[pdata->nb_vlan_tags + 1].mask = item_mask->inner_type;
-		pdata->tci_masks[pdata->nb_vlan_tags] = item_mask->tci;
+		et[pdata->nb_vlan_tags + 1].value = item_spec->hdr.eth_proto;
+		et[pdata->nb_vlan_tags + 1].mask = item_mask->hdr.eth_proto;
+		pdata->tci_masks[pdata->nb_vlan_tags] = item_mask->hdr.vlan_tci;
 		if (item_mask->has_more_vlan) {
 			if (pdata->nb_vlan_tags ==
 			    SFC_MAE_MATCH_VLAN_MAX_NTAGS) {
@@ -2223,8 +2223,8 @@ static const struct sfc_mae_field_locator flocs_tunnel[] = {
 		 * The size and offset values are relevant
 		 * for Geneve and NVGRE, too.
 		 */
-		.size = RTE_SIZEOF_FIELD(struct rte_flow_item_vxlan, vni),
-		.ofst = offsetof(struct rte_flow_item_vxlan, vni),
+		.size = RTE_SIZEOF_FIELD(struct rte_flow_item_vxlan, hdr.vni),
+		.ofst = offsetof(struct rte_flow_item_vxlan, hdr.vni),
 	},
 };
 
@@ -2359,10 +2359,10 @@ sfc_mae_rule_parse_item_tunnel(const struct rte_flow_item *item,
 	 * The extra byte is 0 both in the mask and in the value.
 	 */
 	vxp = (const struct rte_flow_item_vxlan *)spec;
-	memcpy(vnet_id_v + 1, &vxp->vni, sizeof(vxp->vni));
+	memcpy(vnet_id_v + 1, &vxp->hdr.vni, sizeof(vxp->hdr.vni));
 
 	vxp = (const struct rte_flow_item_vxlan *)mask;
-	memcpy(vnet_id_m + 1, &vxp->vni, sizeof(vxp->vni));
+	memcpy(vnet_id_m + 1, &vxp->hdr.vni, sizeof(vxp->hdr.vni));
 
 	rc = efx_mae_match_spec_field_set(ctx_mae->match_spec,
 					  EFX_MAE_FIELD_ENC_VNET_ID_BE,
@@ -3896,12 +3896,10 @@ sfc_mae_rule_parse_actions(struct sfc_adapter *sa,
 		break;
 	case SFC_FT_RULE_SWITCH:
 		/*
-		 * Packets that go to the rule's AR have FT mark set (from the
-		 * TUNNEL rule OR's RECIRC_ID). Remove this mark in matching
-		 * packets. The user may have provided their own action
-		 * MARK above, so don't check the return value here.
+		 * Packets that go to the rule's AR have FT mark set (from
+		 * the TUNNEL rule OR's RECIRC_ID). Reset the mark to zero.
 		 */
-		(void)efx_mae_action_set_populate_mark(ctx.spec, 0);
+		efx_mae_action_set_populate_mark_reset(ctx.spec);
 
 		ctx.ft_switch_hit_counter =
 			&spec_mae->ft_ctx->switch_hit_counter;
@@ -3910,8 +3908,25 @@ sfc_mae_rule_parse_actions(struct sfc_adapter *sa,
 		SFC_ASSERT(B_FALSE);
 	}
 
+	/*
+	 * A DPDK flow entry must specify a fate action, which the parser
+	 * converts into a DELIVER action in a libefx action set. An
+	 * attempt to replace the action in the action set should
+	 * fail. If it succeeds then report an error, as the
+	 * parsed flow entry did not contain a fate action.
+	 */
+	rc = efx_mae_action_set_populate_drop(ctx.spec);
+	if (rc == 0) {
+		rc = rte_flow_error_set(error, EINVAL,
+					RTE_FLOW_ERROR_TYPE_ACTION, NULL,
+					"no fate action found");
+		goto fail_check_fate_action;
+	}
+
 	spec_mae->action_set = sfc_mae_action_set_attach(sa, &ctx);
 	if (spec_mae->action_set != NULL) {
+		sfc_mae_mac_addr_del(sa, ctx.src_mac);
+		sfc_mae_mac_addr_del(sa, ctx.dst_mac);
 		sfc_mae_encap_header_del(sa, ctx.encap_header);
 		efx_mae_action_set_spec_fini(sa->nic, ctx.spec);
 		return 0;
@@ -3924,6 +3939,7 @@ sfc_mae_rule_parse_actions(struct sfc_adapter *sa,
 	return 0;
 
 fail_action_set_add:
+fail_check_fate_action:
 fail_workaround_tunnel_delivery:
 fail_nb_count:
 	sfc_mae_encap_header_del(sa, ctx.encap_header);

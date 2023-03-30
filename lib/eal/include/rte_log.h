@@ -24,7 +24,6 @@ extern "C" {
 
 #include <rte_common.h>
 #include <rte_config.h>
-#include <rte_compat.h>
 
 /* SDK log type */
 #define RTE_LOGTYPE_EAL        0 /**< Log related to eal. */
@@ -235,9 +234,6 @@ int rte_log_register(const char *name);
 int rte_log_register_type_and_pick_level(const char *name, uint32_t level_def);
 
 /**
- * @warning
- * @b EXPERIMENTAL: this API may change without prior notice
- *
  * Dump name of each logtype, one per line.
  *
  * @param out
@@ -245,7 +241,6 @@ int rte_log_register_type_and_pick_level(const char *name, uint32_t level_def);
  * @param prefix
  *   String preceding each logtype in the output.
  */
-__rte_experimental
 void rte_log_list_types(FILE *out, const char *prefix);
 
 /**

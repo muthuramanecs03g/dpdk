@@ -5,7 +5,6 @@
 #include "cnxk_ethdev.h"
 #include <rte_mtr_driver.h>
 
-#define NIX_MTR_COUNT_MAX      73 /* 64(leaf) + 8(mid) + 1(top) */
 #define NIX_MTR_COUNT_PER_FLOW 3  /* 1(leaf) + 1(mid) + 1(top) */
 
 #define NIX_BPF_STATS_MASK_ALL                                                 \
@@ -359,6 +358,9 @@ cnxk_nix_mtr_policy_validate(struct rte_eth_dev *dev,
 				if (action->type == RTE_FLOW_ACTION_TYPE_VOID)
 					supported[i] = true;
 
+				if (action->type == RTE_FLOW_ACTION_TYPE_SKIP_CMAN)
+					supported[i] = true;
+
 				if (!supported[i])
 					return update_mtr_err(i, error, true);
 			}
@@ -398,6 +400,10 @@ cnxk_fill_policy_actions(struct cnxk_mtr_policy_node *fmp,
 					fmp->actions[i].action_fate =
 						action->type;
 				}
+
+				if (action->type ==
+					RTE_FLOW_ACTION_TYPE_SKIP_CMAN)
+					fmp->actions[i].skip_red = true;
 			}
 		}
 	}
@@ -720,6 +726,7 @@ cnxk_nix_mtr_disable(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
 
 static int
 cnxk_nix_mtr_dscp_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
+			       enum rte_mtr_color_in_protocol proto,
 			       enum rte_color *dscp_table,
 			       struct rte_mtr_error *error)
 {
@@ -750,7 +757,7 @@ cnxk_nix_mtr_dscp_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
 
 	table.count = ROC_NIX_BPF_PRECOLOR_TBL_SIZE_DSCP;
 
-	switch (dev->proto) {
+	switch (proto) {
 	case RTE_MTR_COLOR_IN_PROTO_OUTER_IP:
 		table.mode = ROC_NIX_BPF_PC_MODE_DSCP_OUTER;
 		break;
@@ -761,6 +768,13 @@ cnxk_nix_mtr_dscp_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
 		rc = -rte_mtr_error_set(error, EINVAL,
 			RTE_MTR_ERROR_TYPE_UNSPECIFIED, NULL,
 			"Invalid input color protocol");
+		goto exit;
+	}
+
+	if (dev->proto != proto) {
+		rc = -rte_mtr_error_set(error, EINVAL,
+			RTE_MTR_ERROR_TYPE_UNSPECIFIED, NULL,
+			"input color protocol is not configured");
 		goto exit;
 	}
 
@@ -784,6 +798,7 @@ exit:
 
 static int
 cnxk_nix_mtr_vlan_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
+			       enum rte_mtr_color_in_protocol proto,
 			       enum rte_color *vlan_table,
 			       struct rte_mtr_error *error)
 {
@@ -814,7 +829,7 @@ cnxk_nix_mtr_vlan_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
 
 	table.count = ROC_NIX_BPF_PRECOLOR_TBL_SIZE_VLAN;
 
-	switch (dev->proto) {
+	switch (proto) {
 	case RTE_MTR_COLOR_IN_PROTO_OUTER_VLAN:
 		table.mode = ROC_NIX_BPF_PC_MODE_VLAN_OUTER;
 		break;
@@ -825,6 +840,13 @@ cnxk_nix_mtr_vlan_table_update(struct rte_eth_dev *eth_dev, uint32_t mtr_id,
 		rc = -rte_mtr_error_set(error, EINVAL,
 			RTE_MTR_ERROR_TYPE_UNSPECIFIED, NULL,
 			"Invalid input color protocol");
+		goto exit;
+	}
+
+	if (dev->proto != proto) {
+		rc = -rte_mtr_error_set(error, EINVAL,
+			RTE_MTR_ERROR_TYPE_UNSPECIFIED, NULL,
+			"input color protocol is not configured");
 		goto exit;
 	}
 
@@ -1292,6 +1314,45 @@ nix_mtr_config_map(struct cnxk_meter_node *mtr, struct roc_nix_bpf_cfg *cfg)
 }
 
 static void
+nix_mtr_config_red(struct cnxk_meter_node *mtr, struct roc_nix_rq *rq,
+		   struct roc_nix_bpf_cfg *cfg)
+{
+	struct cnxk_mtr_policy_node *policy = mtr->policy;
+
+	if ((rq->red_pass && rq->red_pass >= rq->red_drop) ||
+	   (rq->spb_red_pass && rq->spb_red_pass >= rq->spb_red_drop)	||
+	   (rq->xqe_red_pass && rq->xqe_red_pass >= rq->xqe_red_drop)) {
+		if (policy->actions[RTE_COLOR_GREEN].action_fate ==
+			RTE_FLOW_ACTION_TYPE_DROP) {
+			if (policy->actions[RTE_COLOR_GREEN].skip_red)
+				cfg->action[ROC_NIX_BPF_COLOR_GREEN] =
+						ROC_NIX_BPF_ACTION_DROP;
+			else
+				cfg->action[ROC_NIX_BPF_COLOR_GREEN] =
+						ROC_NIX_BPF_ACTION_RED;
+		}
+		if (policy->actions[RTE_COLOR_YELLOW].action_fate ==
+			RTE_FLOW_ACTION_TYPE_DROP) {
+			if (policy->actions[RTE_COLOR_YELLOW].skip_red)
+				cfg->action[ROC_NIX_BPF_COLOR_YELLOW] =
+						ROC_NIX_BPF_ACTION_DROP;
+			else
+				cfg->action[ROC_NIX_BPF_COLOR_YELLOW] =
+						ROC_NIX_BPF_ACTION_RED;
+		}
+		if (policy->actions[RTE_COLOR_RED].action_fate ==
+			RTE_FLOW_ACTION_TYPE_DROP) {
+			if (policy->actions[RTE_COLOR_RED].skip_red)
+				cfg->action[ROC_NIX_BPF_COLOR_RED] =
+						ROC_NIX_BPF_ACTION_DROP;
+			else
+				cfg->action[ROC_NIX_BPF_COLOR_RED] =
+						ROC_NIX_BPF_ACTION_RED;
+		}
+	}
+}
+
+static void
 nix_precolor_table_map(struct cnxk_meter_node *mtr,
 		       struct roc_nix_bpf_precolor *tbl,
 		       enum rte_mtr_color_in_protocol proto)
@@ -1468,6 +1529,10 @@ nix_mtr_configure(struct rte_eth_dev *eth_dev, uint32_t id)
 			if (!mtr[i]->is_used) {
 				memset(&cfg, 0, sizeof(struct roc_nix_bpf_cfg));
 				nix_mtr_config_map(mtr[i], &cfg);
+				for (j = 0; j < mtr[i]->rq_num; j++) {
+					rq = &dev->rqs[mtr[i]->rq_id[j]];
+					nix_mtr_config_red(mtr[i], rq, &cfg);
+				}
 				rc = roc_nix_bpf_config(nix, mtr[i]->bpf_id,
 							lvl_map[mtr[i]->level],
 							&cfg);

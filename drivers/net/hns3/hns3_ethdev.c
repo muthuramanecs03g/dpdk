@@ -6,8 +6,8 @@
 #include <bus_pci_driver.h>
 #include <ethdev_pci.h>
 
-#include "hns3_ethdev.h"
 #include "hns3_common.h"
+#include "hns3_dump.h"
 #include "hns3_logs.h"
 #include "hns3_rxtx.h"
 #include "hns3_intr.h"
@@ -15,6 +15,7 @@
 #include "hns3_dcb.h"
 #include "hns3_mp.h"
 #include "hns3_flow.h"
+#include "hns3_ethdev.h"
 
 #define HNS3_SERVICE_INTERVAL		1000000 /* us */
 #define HNS3_SERVICE_QUICK_INTERVAL	10
@@ -1660,7 +1661,7 @@ err_pause_addr_cfg:
 		hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
 				       mac_addr);
 		hns3_warn(hw,
-			  "Failed to roll back to del setted mac addr(%s): %d",
+			  "Failed to roll back to del set mac addr(%s): %d",
 			  mac_str, ret_val);
 	}
 
@@ -1712,6 +1713,7 @@ hns3_add_mc_mac_addr(struct hns3_hw *hw, struct rte_ether_addr *mac_addr)
 	char mac_str[RTE_ETHER_ADDR_FMT_SIZE];
 	uint8_t vf_id;
 	int ret;
+	int idx;
 
 	/* Check if mac addr is valid */
 	if (!rte_is_multicast_ether_addr(mac_addr)) {
@@ -1729,9 +1731,8 @@ hns3_add_mc_mac_addr(struct hns3_hw *hw, struct rte_ether_addr *mac_addr)
 					HNS3_MC_MAC_VLAN_OPS_DESC_NUM);
 	if (ret) {
 		/* This mac addr do not exist, add new entry for it */
-		memset(desc[0].data, 0, sizeof(desc[0].data));
-		memset(desc[1].data, 0, sizeof(desc[0].data));
-		memset(desc[2].data, 0, sizeof(desc[0].data));
+		for (idx = 0; idx < HNS3_MC_MAC_VLAN_OPS_DESC_NUM; idx++)
+			memset(desc[idx].data, 0, sizeof(desc[idx].data));
 	}
 
 	/*
@@ -2646,66 +2647,6 @@ hns3_parse_speed(int speed_cmd, uint32_t *speed)
 	return 0;
 }
 
-static void
-hns3_set_default_dev_specifications(struct hns3_hw *hw)
-{
-	hw->max_non_tso_bd_num = HNS3_MAX_NON_TSO_BD_PER_PKT;
-	hw->rss_ind_tbl_size = HNS3_RSS_IND_TBL_SIZE;
-	hw->rss_key_size = HNS3_RSS_KEY_SIZE;
-	hw->max_tm_rate = HNS3_ETHER_MAX_RATE;
-	hw->intr.int_ql_max = HNS3_INTR_QL_NONE;
-}
-
-static void
-hns3_parse_dev_specifications(struct hns3_hw *hw, struct hns3_cmd_desc *desc)
-{
-	struct hns3_dev_specs_0_cmd *req0;
-
-	req0 = (struct hns3_dev_specs_0_cmd *)desc[0].data;
-
-	hw->max_non_tso_bd_num = req0->max_non_tso_bd_num;
-	hw->rss_ind_tbl_size = rte_le_to_cpu_16(req0->rss_ind_tbl_size);
-	hw->rss_key_size = rte_le_to_cpu_16(req0->rss_key_size);
-	hw->max_tm_rate = rte_le_to_cpu_32(req0->max_tm_rate);
-	hw->intr.int_ql_max = rte_le_to_cpu_16(req0->intr_ql_max);
-}
-
-static int
-hns3_check_dev_specifications(struct hns3_hw *hw)
-{
-	if (hw->rss_ind_tbl_size == 0 ||
-	    hw->rss_ind_tbl_size > HNS3_RSS_IND_TBL_SIZE_MAX) {
-		hns3_err(hw, "the size of hash lookup table configured (%u) exceeds the maximum(%u)",
-			 hw->rss_ind_tbl_size, HNS3_RSS_IND_TBL_SIZE_MAX);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int
-hns3_query_dev_specifications(struct hns3_hw *hw)
-{
-	struct hns3_cmd_desc desc[HNS3_QUERY_DEV_SPECS_BD_NUM];
-	int ret;
-	int i;
-
-	for (i = 0; i < HNS3_QUERY_DEV_SPECS_BD_NUM - 1; i++) {
-		hns3_cmd_setup_basic_desc(&desc[i], HNS3_OPC_QUERY_DEV_SPECS,
-					  true);
-		desc[i].flag |= rte_cpu_to_le_16(HNS3_CMD_FLAG_NEXT);
-	}
-	hns3_cmd_setup_basic_desc(&desc[i], HNS3_OPC_QUERY_DEV_SPECS, true);
-
-	ret = hns3_cmd_send(hw, desc, HNS3_QUERY_DEV_SPECS_BD_NUM);
-	if (ret)
-		return ret;
-
-	hns3_parse_dev_specifications(hw, desc);
-
-	return hns3_check_dev_specifications(hw);
-}
-
 static int
 hns3_get_capability(struct hns3_hw *hw)
 {
@@ -2762,7 +2703,6 @@ hns3_get_capability(struct hns3_hw *hw)
 	hw->tso_mode = HNS3_TSO_HW_CAL_PSEUDO_H_CSUM;
 	hw->vlan_mode = HNS3_HW_SHIFT_AND_DISCARD_MODE;
 	hw->drop_stats_mode = HNS3_PKTS_DROP_STATS_MODE2;
-	hw->min_tx_pkt_len = HNS3_HIP09_MIN_TX_PKT_LEN;
 	pf->tqp_config_mode = HNS3_FLEX_MAX_TQP_NUM_MODE;
 	hw->rss_info.ipv6_sctp_offload_supported = true;
 	hw->udp_cksum_mode = HNS3_SPECIAL_PORT_HW_CKSUM_MODE;
@@ -2807,6 +2747,7 @@ hns3_get_board_configuration(struct hns3_hw *hw)
 	struct hns3_cfg cfg;
 	int ret;
 
+	memset(&cfg, 0, sizeof(cfg));
 	ret = hns3_get_board_cfg(hw, &cfg);
 	if (ret) {
 		PMD_INIT_LOG(ERR, "get board config failed %d", ret);
@@ -3904,7 +3845,7 @@ hns3_dev_promiscuous_enable(struct rte_eth_dev *dev)
 
 	/*
 	 * When promiscuous mode was enabled, disable the vlan filter to let
-	 * all packets coming in in the receiving direction.
+	 * all packets coming in the receiving direction.
 	 */
 	offloads = dev->data->dev_conf.rxmode.offloads;
 	if (offloads & RTE_ETH_RX_OFFLOAD_VLAN_FILTER) {
@@ -5041,7 +4982,7 @@ hns3_do_start(struct hns3_adapter *hns, bool reset_queue)
 	if (ret)
 		goto err_set_link_speed;
 
-	return 0;
+	return hns3_restore_filter(hns);
 
 err_set_link_speed:
 	(void)hns3_cfg_mac_mode(hw, false);
@@ -5056,12 +4997,6 @@ err_config_mac_mode:
 	 */
 	(void)hns3_reset_all_tqps(hns);
 	return ret;
-}
-
-static void
-hns3_restore_filter(struct rte_eth_dev *dev)
-{
-	hns3_restore_rss_filter(dev);
 }
 
 static int
@@ -5117,10 +5052,7 @@ hns3_dev_start(struct rte_eth_dev *dev)
 	rte_spinlock_unlock(&hw->lock);
 
 	hns3_rx_scattered_calc(dev);
-	hns3_set_rxtx_function(dev);
-	hns3_mp_req_start_rxtx(dev);
-
-	hns3_restore_filter(dev);
+	hns3_start_rxtx_datapath(dev);
 
 	/* Enable interrupt of all rx queues before enabling queues */
 	hns3_dev_all_rx_queue_intr_enable(hw, true);
@@ -5198,12 +5130,7 @@ hns3_dev_stop(struct rte_eth_dev *dev)
 	dev->data->dev_started = 0;
 
 	hw->adapter_state = HNS3_NIC_STOPPING;
-	hns3_set_rxtx_function(dev);
-	rte_wmb();
-	/* Disable datapath on secondary process. */
-	hns3_mp_req_stop_rxtx(dev);
-	/* Prevent crashes when queues are still in use. */
-	rte_delay_ms(hw->cfg_max_queues);
+	hns3_stop_rxtx_datapath(dev);
 
 	rte_spinlock_lock(&hw->lock);
 	if (__atomic_load_n(&hw->reset.resetting, __ATOMIC_RELAXED) == 0) {
@@ -5601,7 +5528,15 @@ hns3_is_reset_pending(struct hns3_adapter *hns)
 	struct hns3_hw *hw = &hns->hw;
 	enum hns3_reset_level reset;
 
-	hns3_check_event_cause(hns, NULL);
+	/*
+	 * Check the registers to confirm whether there is reset pending.
+	 * Note: This check may lead to schedule reset task, but only primary
+	 *       process can process the reset event. Therefore, limit the
+	 *       checking under only primary process.
+	 */
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
+		hns3_check_event_cause(hns, NULL);
+
 	reset = hns3_get_reset_level(hns, &hw->reset.pending);
 	if (reset != HNS3_NONE_RESET && hw->reset.level != HNS3_NONE_RESET &&
 	    hw->reset.level < reset) {
@@ -5811,12 +5746,7 @@ hns3_stop_service(struct hns3_adapter *hns)
 		rte_eal_alarm_cancel(hns3_service_handler, eth_dev);
 		hns3_update_linkstatus_and_event(hw, false);
 	}
-
-	hns3_set_rxtx_function(eth_dev);
-	rte_wmb();
-	/* Disable datapath on secondary process. */
-	hns3_mp_req_stop_rxtx(eth_dev);
-	rte_delay_ms(hw->cfg_max_queues);
+	hns3_stop_rxtx_datapath(eth_dev);
 
 	rte_spinlock_lock(&hw->lock);
 	if (hns->hw.adapter_state == HNS3_NIC_STARTED ||
@@ -5849,8 +5779,7 @@ hns3_start_service(struct hns3_adapter *hns)
 	    hw->reset.level == HNS3_GLOBAL_RESET)
 		hns3_set_rst_done(hw);
 	eth_dev = &rte_eth_devices[hw->data->port_id];
-	hns3_set_rxtx_function(eth_dev);
-	hns3_mp_req_start_rxtx(eth_dev);
+	hns3_start_rxtx_datapath(eth_dev);
 	if (hw->adapter_state == HNS3_NIC_STARTED) {
 		/*
 		 * This API parent function already hold the hns3_hw.lock, the
@@ -5902,10 +5831,6 @@ hns3_restore_conf(struct hns3_adapter *hns)
 		goto err_promisc;
 
 	ret = hns3_restore_vlan_conf(hns);
-	if (ret)
-		goto err_promisc;
-
-	ret = hns3_restore_all_fdir_filter(hns);
 	if (ret)
 		goto err_promisc;
 
@@ -6558,6 +6483,8 @@ static const struct eth_dev_ops hns3_eth_dev_ops = {
 	.timesync_read_time         = hns3_timesync_read_time,
 	.timesync_write_time        = hns3_timesync_write_time,
 	.eth_dev_priv_dump          = hns3_eth_dev_priv_dump,
+	.eth_rx_descriptor_dump     = hns3_rx_descriptor_dump,
+	.eth_tx_descriptor_dump     = hns3_tx_descriptor_dump,
 };
 
 static const struct hns3_reset_ops hns3_reset_ops = {

@@ -14,4 +14,5 @@ Baseband Device Drivers
     fpga_lte_fec
     fpga_5gnr_fec
     acc100
+    vrb1
     la12xx

@@ -28,6 +28,7 @@
 /* devargs */
 #define ICE_SAFE_MODE_SUPPORT_ARG "safe-mode-support"
 #define ICE_PIPELINE_MODE_SUPPORT_ARG  "pipeline-mode-support"
+#define ICE_DEFAULT_MAC_DISABLE   "default-mac-disable"
 #define ICE_PROTO_XTR_ARG         "proto_xtr"
 #define ICE_FIELD_OFFS_ARG		  "field_offs"
 #define ICE_FIELD_NAME_ARG		  "field_name"
@@ -49,6 +50,7 @@ static const char * const ice_valid_args[] = {
 	ICE_HW_DEBUG_MASK_ARG,
 	ICE_ONE_PPS_OUT_ARG,
 	ICE_RX_LOW_LATENCY_ARG,
+	ICE_DEFAULT_MAC_DISABLE,
 	NULL
 };
 
@@ -161,6 +163,7 @@ static int ice_timesync_read_time(struct rte_eth_dev *dev,
 static int ice_timesync_write_time(struct rte_eth_dev *dev,
 				   const struct timespec *timestamp);
 static int ice_timesync_disable(struct rte_eth_dev *dev);
+static const uint32_t *ice_buffer_split_supported_hdr_ptypes_get(struct rte_eth_dev *dev);
 
 static const struct rte_pci_id pci_id_ice_map[] = {
 	{ RTE_PCI_DEVICE(ICE_INTEL_VENDOR_ID, ICE_DEV_ID_E823L_BACKPLANE) },
@@ -275,6 +278,7 @@ static const struct eth_dev_ops ice_eth_dev_ops = {
 	.timesync_write_time          = ice_timesync_write_time,
 	.timesync_disable             = ice_timesync_disable,
 	.tm_ops_get                   = ice_tm_ops_get,
+	.buffer_split_supported_hdr_ptypes_get = ice_buffer_split_supported_hdr_ptypes_get,
 };
 
 /* store statistics names and its offset in stats structure */
@@ -914,6 +918,7 @@ static int
 ice_init_mac_address(struct rte_eth_dev *dev)
 {
 	struct ice_hw *hw = ICE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct ice_adapter *ad = (struct ice_adapter *)hw->back;
 
 	if (!rte_is_unicast_ether_addr
 		((struct rte_ether_addr *)hw->port_info[0].mac.lan_addr)) {
@@ -933,9 +938,9 @@ ice_init_mac_address(struct rte_eth_dev *dev)
 		return -ENOMEM;
 	}
 	/* store it to dev data */
-	rte_ether_addr_copy(
-		(struct rte_ether_addr *)hw->port_info[0].mac.perm_addr,
-		&dev->data->mac_addrs[0]);
+	if (ad->devargs.default_mac_disable != 1)
+		rte_ether_addr_copy((struct rte_ether_addr *)hw->port_info[0].mac.perm_addr,
+			&dev->data->mac_addrs[0]);
 	return 0;
 }
 
@@ -960,8 +965,14 @@ ice_add_mac_filter(struct ice_vsi *vsi, struct rte_ether_addr *mac_addr)
 	struct ice_mac_filter *f;
 	struct LIST_HEAD_TYPE list_head;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
+	struct ice_adapter *ad = (struct ice_adapter *)hw->back;
 	int ret = 0;
 
+	if (ad->devargs.default_mac_disable == 1 && rte_is_same_ether_addr(mac_addr,
+			(struct rte_ether_addr *)hw->port_info[0].mac.perm_addr)) {
+		PMD_DRV_LOG(ERR, "This Default MAC filter is disabled.");
+		return 0;
+	}
 	/* If it's added and configured, return */
 	f = ice_find_mac_filter(vsi, mac_addr);
 	if (f) {
@@ -1841,17 +1852,17 @@ load_fw:
 	PMD_INIT_LOG(DEBUG, "DDP package name: %s", pkg_file);
 
 	err = ice_copy_and_init_pkg(hw, buf, bufsz);
-	if (err) {
+	if (!ice_is_init_pkg_successful(err)) {
 		PMD_INIT_LOG(ERR, "ice_copy_and_init_hw failed: %d\n", err);
-		goto out;
+		free(buf);
+		return -1;
 	}
 
 	/* store the loaded pkg type info */
 	adapter->active_pkg_type = ice_load_pkg_type(hw);
 
-out:
 	free(buf);
-	return err;
+	return 0;
 }
 
 static void
@@ -2070,6 +2081,11 @@ static int ice_parse_devargs(struct rte_eth_dev *dev)
 
 	ret = rte_kvargs_process(kvlist, ICE_PIPELINE_MODE_SUPPORT_ARG,
 				 &parse_bool, &ad->devargs.pipe_mode_support);
+	if (ret)
+		goto bail;
+
+	ret = rte_kvargs_process(kvlist, ICE_DEFAULT_MAC_DISABLE,
+				&parse_bool, &ad->devargs.default_mac_disable);
 	if (ret)
 		goto bail;
 
@@ -2397,6 +2413,17 @@ ice_dev_init(struct rte_eth_dev *dev)
 	/* Initialize TM configuration */
 	ice_tm_conf_init(dev);
 
+	if (ice_is_e810(hw))
+		hw->phy_cfg = ICE_PHY_E810;
+	else
+		hw->phy_cfg = ICE_PHY_E822;
+
+	if (hw->phy_cfg == ICE_PHY_E822) {
+		ret = ice_start_phy_timer_e822(hw, hw->pf_id, true);
+		if (ret)
+			PMD_INIT_LOG(ERR, "Failed to start phy timer\n");
+	}
+
 	if (!ad->is_safe_mode) {
 		ret = ice_flow_init(ad);
 		if (ret) {
@@ -2553,11 +2580,16 @@ ice_dev_close(struct rte_eth_dev *dev)
 		return 0;
 
 	/* Since stop will make link down, then the link event will be
-	 * triggered, disable the irq firstly to avoid the port_infoe etc
-	 * resources deallocation causing the interrupt service thread
-	 * crash.
+	 * triggered, disable the irq firstly.
 	 */
 	ice_pf_disable_irq0(hw);
+
+	/* Unregister callback func from eal lib, use sync version to
+	 * make sure all active interrupt callbacks is done, then it's
+	 * safe to free all resources.
+	 */
+	rte_intr_callback_unregister_sync(intr_handle,
+					  ice_interrupt_handler, dev);
 
 	ret = ice_dev_stop(dev);
 
@@ -2592,10 +2624,6 @@ ice_dev_close(struct rte_eth_dev *dev)
 
 	/* disable uio intr before callback unregister */
 	rte_intr_disable(intr_handle);
-
-	/* unregister callback func from eal lib */
-	rte_intr_callback_unregister(intr_handle,
-				     ice_interrupt_handler, dev);
 
 	return ret;
 }
@@ -3802,7 +3830,8 @@ ice_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 			RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM |
 			RTE_ETH_RX_OFFLOAD_VLAN_EXTEND |
 			RTE_ETH_RX_OFFLOAD_RSS_HASH |
-			RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+			RTE_ETH_RX_OFFLOAD_TIMESTAMP |
+			RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT;
 		dev_info->tx_offload_capa |=
 			RTE_ETH_TX_OFFLOAD_QINQ_INSERT |
 			RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
@@ -3814,7 +3843,7 @@ ice_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 		dev_info->flow_type_rss_offloads |= ICE_RSS_OFFLOAD_ALL;
 	}
 
-	dev_info->rx_queue_offload_capa = 0;
+	dev_info->rx_queue_offload_capa = RTE_ETH_RX_OFFLOAD_BUFFER_SPLIT;
 	dev_info->tx_queue_offload_capa = RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 	dev_info->reta_size = pf->hash_lut_size;
@@ -3882,6 +3911,11 @@ ice_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 	dev_info->default_txportconf.nb_queues = 1;
 	dev_info->default_rxportconf.ring_size = ICE_BUF_SIZE_MIN;
 	dev_info->default_txportconf.ring_size = ICE_BUF_SIZE_MIN;
+
+	dev_info->rx_seg_capa.max_nseg = ICE_RX_MAX_NSEG;
+	dev_info->rx_seg_capa.multi_pools = 1;
+	dev_info->rx_seg_capa.offset_allowed = 0;
+	dev_info->rx_seg_capa.offset_align_log2 = 0;
 
 	return 0;
 }
@@ -5198,7 +5232,7 @@ ice_get_module_eeprom(struct rte_eth_dev *dev,
 			}
 
 			/* Make sure we have enough room for the new block */
-			if ((i + SFF_READ_BLOCK_SIZE) < info->length)
+			if ((i + SFF_READ_BLOCK_SIZE) <= info->length)
 				memcpy(data + i, value, SFF_READ_BLOCK_SIZE);
 		}
 	}
@@ -5791,11 +5825,6 @@ ice_timesync_enable(struct rte_eth_dev *dev)
 		return -1;
 	}
 
-	if (ice_is_e810(hw))
-		hw->phy_cfg = ICE_PHY_E810;
-	else
-		hw->phy_cfg = ICE_PHY_E822;
-
 	if (hw->func_caps.ts_func_info.src_tmr_owned) {
 		ret = ice_ptp_init_phc(hw);
 		if (ret) {
@@ -5916,16 +5945,17 @@ ice_timesync_read_time(struct rte_eth_dev *dev, struct timespec *ts)
 	struct ice_hw *hw = ICE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct ice_adapter *ad =
 			ICE_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
+	uint8_t tmr_idx = hw->func_caps.ts_func_info.tmr_index_assoc;
 	uint32_t hi, lo, lo2;
 	uint64_t time, ns;
 
-	lo = ICE_READ_REG(hw, GLTSYN_TIME_L(0));
-	hi = ICE_READ_REG(hw, GLTSYN_TIME_H(0));
-	lo2 = ICE_READ_REG(hw, GLTSYN_TIME_L(0));
+	lo = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
+	hi = ICE_READ_REG(hw, GLTSYN_TIME_H(tmr_idx));
+	lo2 = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
 
 	if (lo2 < lo) {
-		lo = ICE_READ_REG(hw, GLTSYN_TIME_L(0));
-		hi = ICE_READ_REG(hw, GLTSYN_TIME_H(0));
+		lo = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
+		hi = ICE_READ_REG(hw, GLTSYN_TIME_H(tmr_idx));
 	}
 
 	time = ((uint64_t)hi << 32) | lo;
@@ -5941,6 +5971,7 @@ ice_timesync_disable(struct rte_eth_dev *dev)
 	struct ice_hw *hw = ICE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct ice_adapter *ad =
 			ICE_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
+	uint8_t tmr_idx = hw->func_caps.ts_func_info.tmr_index_assoc;
 	uint64_t val;
 	uint8_t lport;
 
@@ -5948,16 +5979,62 @@ ice_timesync_disable(struct rte_eth_dev *dev)
 
 	ice_clear_phy_tstamp(hw, lport, 0);
 
-	val = ICE_READ_REG(hw, GLTSYN_ENA(0));
+	val = ICE_READ_REG(hw, GLTSYN_ENA(tmr_idx));
 	val &= ~GLTSYN_ENA_TSYN_ENA_M;
-	ICE_WRITE_REG(hw, GLTSYN_ENA(0), val);
+	ICE_WRITE_REG(hw, GLTSYN_ENA(tmr_idx), val);
 
-	ICE_WRITE_REG(hw, GLTSYN_INCVAL_L(0), 0);
-	ICE_WRITE_REG(hw, GLTSYN_INCVAL_H(0), 0);
+	ICE_WRITE_REG(hw, GLTSYN_INCVAL_L(tmr_idx), 0);
+	ICE_WRITE_REG(hw, GLTSYN_INCVAL_H(tmr_idx), 0);
 
 	ad->ptp_ena = 0;
 
 	return 0;
+}
+
+static const uint32_t *
+ice_buffer_split_supported_hdr_ptypes_get(struct rte_eth_dev *dev __rte_unused)
+{
+	/* Buffer split protocol header capability. */
+	static const uint32_t ptypes[] = {
+		/* Non tunneled */
+		RTE_PTYPE_L2_ETHER,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_TCP,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_SCTP,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_UDP,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_TCP,
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_L4_SCTP,
+
+		/* Tunneled */
+		RTE_PTYPE_TUNNEL_GRENAT,
+
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER,
+
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN,
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN,
+
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_UDP,
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_TCP,
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_SCTP,
+
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_UDP,
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_TCP,
+		RTE_PTYPE_TUNNEL_GRENAT | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT_UNKNOWN | RTE_PTYPE_INNER_L4_SCTP,
+
+		RTE_PTYPE_UNKNOWN
+	};
+
+	return ptypes;
 }
 
 static int
@@ -5995,6 +6072,7 @@ RTE_PMD_REGISTER_PARAM_STRING(net_ice,
 			      ICE_PROTO_XTR_ARG "=[queue:]<vlan|ipv4|ipv6|ipv6_flow|tcp|ip_offset>"
 			      ICE_SAFE_MODE_SUPPORT_ARG "=<0|1>"
 			      ICE_PIPELINE_MODE_SUPPORT_ARG "=<0|1>"
+			      ICE_DEFAULT_MAC_DISABLE "=<0|1>"
 			      ICE_RX_LOW_LATENCY_ARG "=<0|1>");
 
 RTE_LOG_REGISTER_SUFFIX(ice_logtype_init, init, NOTICE);

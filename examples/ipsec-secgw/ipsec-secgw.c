@@ -44,6 +44,7 @@
 #include <rte_cryptodev.h>
 #include <rte_security.h>
 #include <rte_eventdev.h>
+#include <rte_event_crypto_adapter.h>
 #include <rte_ip.h>
 #include <rte_ip_frag.h>
 #include <rte_alarm.h>
@@ -84,7 +85,7 @@ static uint16_t nb_txd = IPSEC_SECGW_TX_DESC_DEFAULT;
 /*
  * Configurable number of descriptors per queue pair
  */
-static uint32_t qp_desc_nb = 2048;
+uint32_t qp_desc_nb = 2048;
 
 #define ETHADDR_TO_UINT64(addr) __BYTES_TO_UINT64( \
 		(addr)->addr_bytes[0], (addr)->addr_bytes[1], \
@@ -103,6 +104,8 @@ struct ethaddr_info ethaddr_tbl[RTE_MAX_ETHPORTS] = {
 	{ 0, ETHADDR(0x00, 0x16, 0x3e, 0x08, 0x69, 0x26) },
 	{ 0, ETHADDR(0x00, 0x16, 0x3e, 0x49, 0x9e, 0xdd) }
 };
+
+struct offloads tx_offloads;
 
 /*
  * To hold ethernet header per port, which will be applied
@@ -234,7 +237,6 @@ struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode	= RTE_ETH_MQ_RX_RSS,
-		.split_hdr_size = 0,
 		.offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
 	},
 	.rx_adv_conf = {
@@ -274,6 +276,7 @@ static void
 print_stats_cb(__rte_unused void *param)
 {
 	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+	uint64_t total_frag_packets_dropped = 0;
 	float burst_percent, rx_per_call, tx_per_call;
 	unsigned int coreid;
 
@@ -303,6 +306,7 @@ print_stats_cb(__rte_unused void *param)
 			   "\nPackets received: %20"PRIu64
 			   "\nPackets sent: %24"PRIu64
 			   "\nPackets dropped: %21"PRIu64
+			   "\nFrag Packets dropped: %16"PRIu64
 			   "\nBurst percent: %23.2f"
 			   "\nPackets per Rx call: %17.2f"
 			   "\nPackets per Tx call: %17.2f",
@@ -310,21 +314,25 @@ print_stats_cb(__rte_unused void *param)
 			   core_statistics[coreid].rx,
 			   core_statistics[coreid].tx,
 			   core_statistics[coreid].dropped,
+			   core_statistics[coreid].frag_dropped,
 			   burst_percent,
 			   rx_per_call,
 			   tx_per_call);
 
 		total_packets_dropped += core_statistics[coreid].dropped;
+		total_frag_packets_dropped += core_statistics[coreid].frag_dropped;
 		total_packets_tx += core_statistics[coreid].tx;
 		total_packets_rx += core_statistics[coreid].rx;
 	}
 	printf("\nAggregate statistics ==============================="
 		   "\nTotal packets received: %14"PRIu64
 		   "\nTotal packets sent: %18"PRIu64
-		   "\nTotal packets dropped: %15"PRIu64,
+		   "\nTotal packets dropped: %15"PRIu64
+		   "\nTotal frag packets dropped: %10"PRIu64,
 		   total_packets_rx,
 		   total_packets_tx,
-		   total_packets_dropped);
+		   total_packets_dropped,
+		   total_frag_packets_dropped);
 	printf("\n====================================================\n");
 
 	rte_eal_alarm_set(stats_interval * US_PER_S, print_stats_cb, NULL);
@@ -1540,7 +1548,7 @@ add_mapping(const char *str, uint16_t cdev_id,
 }
 
 static int32_t
-add_cdev_mapping(struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
+add_cdev_mapping(const struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
 		uint16_t qp, struct lcore_params *params)
 {
 	int32_t ret = 0;
@@ -1596,6 +1604,37 @@ add_cdev_mapping(struct rte_cryptodev_info *dev_info, uint16_t cdev_id,
 	return ret;
 }
 
+static uint16_t
+map_cdev_to_cores_from_config(enum eh_pkt_transfer_mode mode, int16_t cdev_id,
+		const struct rte_cryptodev_info *cdev_info,
+		uint16_t *last_used_lcore_id)
+{
+	uint16_t nb_qp = 0, i = 0, max_nb_qps;
+
+	/* For event lookaside mode all sessions are bound to single qp.
+	 * It's enough to bind one core, since all cores will share same qp
+	 * Event inline mode do not use this functionality.
+	 */
+	if (mode == EH_PKT_TRANSFER_MODE_EVENT) {
+		add_cdev_mapping(cdev_info, cdev_id, nb_qp, &lcore_params[0]);
+		return 1;
+	}
+
+	/* Check if there are enough queue pairs for all configured cores */
+	max_nb_qps = RTE_MIN(nb_lcore_params, cdev_info->max_nb_queue_pairs);
+
+	while (nb_qp < max_nb_qps && i < nb_lcore_params) {
+		if (add_cdev_mapping(cdev_info, cdev_id, nb_qp,
+					&lcore_params[*last_used_lcore_id]))
+			nb_qp++;
+		(*last_used_lcore_id)++;
+		*last_used_lcore_id %= nb_lcore_params;
+		i++;
+	}
+
+	return nb_qp;
+}
+
 /* Check if the device is enabled by cryptodev_mask */
 static int
 check_cryptodev_mask(uint8_t cdev_id)
@@ -1607,13 +1646,13 @@ check_cryptodev_mask(uint8_t cdev_id)
 }
 
 static uint16_t
-cryptodevs_init(uint16_t req_queue_num)
+cryptodevs_init(enum eh_pkt_transfer_mode mode)
 {
+	struct rte_hash_parameters params = { 0 };
 	struct rte_cryptodev_config dev_conf;
 	struct rte_cryptodev_qp_conf qp_conf;
-	uint16_t idx, max_nb_qps, qp, total_nb_qps, i;
+	uint16_t idx, qp, total_nb_qps;
 	int16_t cdev_id;
-	struct rte_hash_parameters params = { 0 };
 
 	const uint64_t mseg_flag = multi_seg_required() ?
 				RTE_CRYPTODEV_FF_IN_PLACE_SGL : 0;
@@ -1654,23 +1693,8 @@ cryptodevs_init(uint16_t req_queue_num)
 				cdev_id,
 				rte_cryptodev_get_feature_name(mseg_flag));
 
-		if (nb_lcore_params > cdev_info.max_nb_queue_pairs)
-			max_nb_qps = cdev_info.max_nb_queue_pairs;
-		else
-			max_nb_qps = nb_lcore_params;
 
-		qp = 0;
-		i = 0;
-		while (qp < max_nb_qps && i < nb_lcore_params) {
-			if (add_cdev_mapping(&cdev_info, cdev_id, qp,
-						&lcore_params[idx]))
-				qp++;
-			idx++;
-			idx = idx % nb_lcore_params;
-			i++;
-		}
-
-		qp = RTE_MIN(max_nb_qps, RTE_MAX(req_queue_num, qp));
+		qp = map_cdev_to_cores_from_config(mode, cdev_id, &cdev_info, &idx);
 		if (qp == 0)
 			continue;
 
@@ -1693,8 +1717,6 @@ cryptodevs_init(uint16_t req_queue_num)
 		qp_conf.nb_descriptors = qp_desc_nb;
 		qp_conf.mp_session =
 			socket_ctx[dev_conf.socket_id].session_pool;
-		qp_conf.mp_session_private =
-			socket_ctx[dev_conf.socket_id].session_priv_pool;
 		for (qp = 0; qp < dev_conf.nb_queue_pairs; qp++)
 			if (rte_cryptodev_queue_pair_setup(cdev_id, qp,
 					&qp_conf, dev_conf.socket_id))
@@ -1853,7 +1875,8 @@ parse_ptype_cb(uint16_t port __rte_unused, uint16_t queue __rte_unused,
 }
 
 static void
-port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
+port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads,
+	  uint8_t hw_reassembly)
 {
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf *txconf;
@@ -1863,6 +1886,7 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 	struct lcore_conf *qconf;
 	struct rte_ether_addr ethaddr;
 	struct rte_eth_conf local_port_conf = port_conf;
+	struct rte_eth_ip_reassembly_params reass_capa = {0};
 	int ptype_supported;
 
 	ret = rte_eth_dev_info_get(portid, &dev_info);
@@ -2039,6 +2063,12 @@ port_init(uint16_t portid, uint64_t req_rx_offloads, uint64_t req_tx_offloads)
 
 		}
 	}
+
+	if (hw_reassembly) {
+		rte_eth_ip_reassembly_capability_get(portid, &reass_capa);
+		reass_capa.timeout_ms = frag_ttl_ns;
+		rte_eth_ip_reassembly_conf_set(portid, &reass_capa);
+	}
 	printf("\n");
 }
 
@@ -2101,8 +2131,8 @@ session_pool_init(struct socket_ctx *ctx, int32_t socket_id, size_t sess_sz)
 	nb_sess = RTE_MAX(nb_sess, CDEV_MP_CACHE_SZ *
 			CDEV_MP_CACHE_MULTIPLIER);
 	sess_mp = rte_cryptodev_sym_session_pool_create(
-			mp_name, nb_sess, sess_sz, CDEV_MP_CACHE_SZ, 0,
-			socket_id);
+			mp_name, nb_sess, sess_sz, CDEV_MP_CACHE_SZ,
+			0, socket_id);
 	ctx->session_pool = sess_mp;
 
 	if (ctx->session_pool == NULL)
@@ -2110,38 +2140,6 @@ session_pool_init(struct socket_ctx *ctx, int32_t socket_id, size_t sess_sz)
 			"Cannot init session pool on socket %d\n", socket_id);
 	else
 		printf("Allocated session pool on socket %d\n",	socket_id);
-}
-
-static void
-session_priv_pool_init(struct socket_ctx *ctx, int32_t socket_id,
-	size_t sess_sz)
-{
-	char mp_name[RTE_MEMPOOL_NAMESIZE];
-	struct rte_mempool *sess_mp;
-	uint32_t nb_sess;
-
-	snprintf(mp_name, RTE_MEMPOOL_NAMESIZE,
-			"sess_mp_priv_%u", socket_id);
-	nb_sess = (get_nb_crypto_sessions() + CDEV_MP_CACHE_SZ *
-		rte_lcore_count());
-	nb_sess = RTE_MAX(nb_sess, CDEV_MP_CACHE_SZ *
-			CDEV_MP_CACHE_MULTIPLIER);
-	sess_mp = rte_mempool_create(mp_name,
-			nb_sess,
-			sess_sz,
-			CDEV_MP_CACHE_SZ,
-			0, NULL, NULL, NULL,
-			NULL, socket_id,
-			0);
-	ctx->session_priv_pool = sess_mp;
-
-	if (ctx->session_priv_pool == NULL)
-		rte_exit(EXIT_FAILURE,
-			"Cannot init session priv pool on socket %d\n",
-			socket_id);
-	else
-		printf("Allocated session priv pool on socket %d\n",
-			socket_id);
 }
 
 static void
@@ -2413,7 +2411,8 @@ signal_handler(int signum)
 }
 
 static void
-ev_mode_sess_verify(struct ipsec_sa *sa, int nb_sa)
+ev_mode_sess_verify(struct ipsec_sa *sa, int nb_sa,
+		struct eventmode_conf *em_conf)
 {
 	struct rte_ipsec_session *ips;
 	int32_t i;
@@ -2423,9 +2422,11 @@ ev_mode_sess_verify(struct ipsec_sa *sa, int nb_sa)
 
 	for (i = 0; i < nb_sa; i++) {
 		ips = ipsec_get_primary_session(&sa[i]);
-		if (ips->type != RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL)
-			rte_exit(EXIT_FAILURE, "Event mode supports only "
-				 "inline protocol sessions\n");
+		if (ips->type == RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL)
+			em_conf->enable_event_crypto_adapter = true;
+		else if (ips->type != RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL)
+			rte_exit(EXIT_FAILURE, "Event mode supports inline "
+				 "and lookaside protocol sessions\n");
 	}
 
 }
@@ -2458,13 +2459,12 @@ check_event_mode_params(struct eh_conf *eh_conf)
 		em_conf->ext_params.sched_type = RTE_SCHED_TYPE_ORDERED;
 
 	/*
-	 * Event mode currently supports only inline protocol sessions.
-	 * If there are other types of sessions configured then exit with
-	 * error.
+	 * Event mode currently supports inline and lookaside protocol
+	 * sessions. If there are other types of sessions configured then exit
+	 * with error.
 	 */
-	ev_mode_sess_verify(sa_in, nb_sa_in);
-	ev_mode_sess_verify(sa_out, nb_sa_out);
-
+	ev_mode_sess_verify(sa_in, nb_sa_in, em_conf);
+	ev_mode_sess_verify(sa_out, nb_sa_out, em_conf);
 
 	/* Option --config does not apply to event mode */
 	if (nb_lcore_params > 0) {
@@ -2501,12 +2501,8 @@ one_session_free(struct rte_ipsec_session *ips)
 		if (ips->crypto.ses == NULL)
 			return 0;
 
-		ret = rte_cryptodev_sym_session_clear(ips->crypto.dev_id,
-						      ips->crypto.ses);
-		if (ret)
-			return ret;
-
-		ret = rte_cryptodev_sym_session_free(ips->crypto.ses);
+		ret = rte_cryptodev_sym_session_free(ips->crypto.dev_id,
+				ips->crypto.ses);
 	} else {
 		/* Session has not been created */
 		if (ips->security.ctx == NULL || ips->security.ses == NULL)
@@ -2592,14 +2588,12 @@ handle_telemetry_cmd_ipsec_secgw_stats(const char *cmd __rte_unused,
 	}
 
 	/* add telemetry key/values pairs */
-	rte_tel_data_add_dict_u64(data, "packets received",
-				total_pkts_rx);
+	rte_tel_data_add_dict_uint(data, "packets received", total_pkts_rx);
 
-	rte_tel_data_add_dict_u64(data, "packets transmitted",
-				total_pkts_tx);
+	rte_tel_data_add_dict_uint(data, "packets transmitted", total_pkts_tx);
 
-	rte_tel_data_add_dict_u64(data, "packets dropped",
-				total_pkts_dropped);
+	rte_tel_data_add_dict_uint(data, "packets dropped",
+				   total_pkts_dropped);
 
 
 	return 0;
@@ -2618,6 +2612,7 @@ update_lcore_statistics(struct ipsec_core_statistics *total, uint32_t coreid)
 
 	total->rx = lcore_stats->rx;
 	total->dropped = lcore_stats->dropped;
+	total->frag_dropped = lcore_stats->frag_dropped;
 	total->tx = lcore_stats->tx;
 
 	/* outbound stats */
@@ -2698,30 +2693,30 @@ handle_telemetry_cmd_ipsec_secgw_stats_outbound(const char *cmd __rte_unused,
 
 	/* add spd 4 telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(spd4_data, "protect",
-		total_stats.outbound.spd4.protect);
-	rte_tel_data_add_dict_u64(spd4_data, "bypass",
-		total_stats.outbound.spd4.bypass);
-	rte_tel_data_add_dict_u64(spd4_data, "discard",
-		total_stats.outbound.spd4.discard);
+	rte_tel_data_add_dict_uint(spd4_data, "protect",
+				   total_stats.outbound.spd4.protect);
+	rte_tel_data_add_dict_uint(spd4_data, "bypass",
+				   total_stats.outbound.spd4.bypass);
+	rte_tel_data_add_dict_uint(spd4_data, "discard",
+				   total_stats.outbound.spd4.discard);
 
 	rte_tel_data_add_dict_container(data, "spd4", spd4_data, 0);
 
 	/* add spd 6 telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(spd6_data, "protect",
-		total_stats.outbound.spd6.protect);
-	rte_tel_data_add_dict_u64(spd6_data, "bypass",
-		total_stats.outbound.spd6.bypass);
-	rte_tel_data_add_dict_u64(spd6_data, "discard",
-		total_stats.outbound.spd6.discard);
+	rte_tel_data_add_dict_uint(spd6_data, "protect",
+				   total_stats.outbound.spd6.protect);
+	rte_tel_data_add_dict_uint(spd6_data, "bypass",
+				   total_stats.outbound.spd6.bypass);
+	rte_tel_data_add_dict_uint(spd6_data, "discard",
+				   total_stats.outbound.spd6.discard);
 
 	rte_tel_data_add_dict_container(data, "spd6", spd6_data, 0);
 
 	/* add sad telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(sad_data, "miss",
-		total_stats.outbound.sad.miss);
+	rte_tel_data_add_dict_uint(sad_data, "miss",
+				   total_stats.outbound.sad.miss);
 
 	rte_tel_data_add_dict_container(data, "sad", sad_data, 0);
 
@@ -2772,30 +2767,30 @@ handle_telemetry_cmd_ipsec_secgw_stats_inbound(const char *cmd __rte_unused,
 
 	/* add sad telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(sad_data, "miss",
-		total_stats.inbound.sad.miss);
+	rte_tel_data_add_dict_uint(sad_data, "miss",
+				   total_stats.inbound.sad.miss);
 
 	rte_tel_data_add_dict_container(data, "sad", sad_data, 0);
 
 	/* add spd 4 telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(spd4_data, "protect",
-		total_stats.inbound.spd4.protect);
-	rte_tel_data_add_dict_u64(spd4_data, "bypass",
-		total_stats.inbound.spd4.bypass);
-	rte_tel_data_add_dict_u64(spd4_data, "discard",
-		total_stats.inbound.spd4.discard);
+	rte_tel_data_add_dict_uint(spd4_data, "protect",
+				   total_stats.inbound.spd4.protect);
+	rte_tel_data_add_dict_uint(spd4_data, "bypass",
+				   total_stats.inbound.spd4.bypass);
+	rte_tel_data_add_dict_uint(spd4_data, "discard",
+				   total_stats.inbound.spd4.discard);
 
 	rte_tel_data_add_dict_container(data, "spd4", spd4_data, 0);
 
 	/* add spd 6 telemetry key/values pairs */
 
-	rte_tel_data_add_dict_u64(spd6_data, "protect",
-		total_stats.inbound.spd6.protect);
-	rte_tel_data_add_dict_u64(spd6_data, "bypass",
-		total_stats.inbound.spd6.bypass);
-	rte_tel_data_add_dict_u64(spd6_data, "discard",
-		total_stats.inbound.spd6.discard);
+	rte_tel_data_add_dict_uint(spd6_data, "protect",
+				   total_stats.inbound.spd6.protect);
+	rte_tel_data_add_dict_uint(spd6_data, "bypass",
+				   total_stats.inbound.spd6.bypass);
+	rte_tel_data_add_dict_uint(spd6_data, "discard",
+				   total_stats.inbound.spd6.discard);
 
 	rte_tel_data_add_dict_container(data, "spd6", spd6_data, 0);
 
@@ -2842,14 +2837,12 @@ handle_telemetry_cmd_ipsec_secgw_stats_routing(const char *cmd __rte_unused,
 	update_statistics(&total_stats, coreid);
 
 	/* add lpm 4 telemetry key/values pairs */
-	rte_tel_data_add_dict_u64(lpm4_data, "miss",
-		total_stats.lpm4.miss);
+	rte_tel_data_add_dict_uint(lpm4_data, "miss", total_stats.lpm4.miss);
 
 	rte_tel_data_add_dict_container(data, "IPv4 LPM", lpm4_data, 0);
 
 	/* add lpm 6 telemetry key/values pairs */
-	rte_tel_data_add_dict_u64(lpm6_data, "miss",
-		total_stats.lpm6.miss);
+	rte_tel_data_add_dict_uint(lpm6_data, "miss", total_stats.lpm6.miss);
 
 	rte_tel_data_add_dict_container(data, "IPv6 LPM", lpm6_data, 0);
 
@@ -2896,6 +2889,7 @@ main(int32_t argc, char **argv)
 	uint16_t portid, nb_crypto_qp, nb_ports = 0;
 	uint64_t req_rx_offloads[RTE_MAX_ETHPORTS];
 	uint64_t req_tx_offloads[RTE_MAX_ETHPORTS];
+	uint8_t req_hw_reassembly[RTE_MAX_ETHPORTS];
 	struct eh_conf *eh_conf = NULL;
 	uint32_t ipv4_cksum_port_mask = 0;
 	size_t sess_sz;
@@ -3006,8 +3000,6 @@ main(int32_t argc, char **argv)
 			continue;
 
 		session_pool_init(&socket_ctx[socket_id], socket_id, sess_sz);
-		session_priv_pool_init(&socket_ctx[socket_id], socket_id,
-			sess_sz);
 	}
 	printf("Number of mbufs in packet pool %d\n", nb_bufs_in_pool);
 
@@ -3015,24 +3007,25 @@ main(int32_t argc, char **argv)
 		if ((enabled_port_mask & (1 << portid)) == 0)
 			continue;
 
-		sa_check_offloads(portid, &req_rx_offloads[portid],
-				&req_tx_offloads[portid]);
-		port_init(portid, req_rx_offloads[portid],
-				req_tx_offloads[portid]);
+		sa_check_offloads(portid, &req_rx_offloads[portid], &req_tx_offloads[portid],
+				  &req_hw_reassembly[portid]);
+		port_init(portid, req_rx_offloads[portid], req_tx_offloads[portid],
+			  req_hw_reassembly[portid]);
 		if ((req_tx_offloads[portid] & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM))
-			ipv4_cksum_port_mask = 1U << portid;
+			ipv4_cksum_port_mask |= 1U << portid;
 	}
 
-	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
-		if (rte_lcore_is_enabled(lcore_id) == 0)
-			continue;
+	tx_offloads.ipv4_offloads = RTE_MBUF_F_TX_IPV4;
+	tx_offloads.ipv6_offloads = RTE_MBUF_F_TX_IPV6;
+	/* Update per lcore checksum offload support only if all ports support it */
+	if (ipv4_cksum_port_mask == enabled_port_mask)
+		tx_offloads.ipv4_offloads |= RTE_MBUF_F_TX_IP_CKSUM;
 
+	lcore_id = 0;
+	RTE_LCORE_FOREACH(lcore_id) {
 		/* Pre-populate pkt offloads based on capabilities */
-		lcore_conf[lcore_id].outbound.ipv4_offloads = RTE_MBUF_F_TX_IPV4;
-		lcore_conf[lcore_id].outbound.ipv6_offloads = RTE_MBUF_F_TX_IPV6;
-		/* Update per lcore checksum offload support only if all ports support it */
-		if (ipv4_cksum_port_mask == enabled_port_mask)
-			lcore_conf[lcore_id].outbound.ipv4_offloads |= RTE_MBUF_F_TX_IP_CKSUM;
+		lcore_conf[lcore_id].outbound.ipv4_offloads = tx_offloads.ipv4_offloads;
+		lcore_conf[lcore_id].outbound.ipv6_offloads = tx_offloads.ipv6_offloads;
 	}
 
 	/*
@@ -3094,7 +3087,8 @@ main(int32_t argc, char **argv)
 		if ((socket_ctx[socket_id].session_pool != NULL) &&
 			(socket_ctx[socket_id].sa_in == NULL) &&
 			(socket_ctx[socket_id].sa_out == NULL)) {
-			sa_init(&socket_ctx[socket_id], socket_id, lcore_conf);
+			sa_init(&socket_ctx[socket_id], socket_id, lcore_conf,
+				eh_conf->mode_params);
 			sp4_init(&socket_ctx[socket_id], socket_id);
 			sp6_init(&socket_ctx[socket_id], socket_id);
 			rt_init(&socket_ctx[socket_id], socket_id);

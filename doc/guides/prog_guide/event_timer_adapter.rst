@@ -35,7 +35,7 @@ device upon timer expiration.
 
 The Event Timer Adapter API represents each event timer with a generic struct,
 which contains an event and user metadata.  The ``rte_event_timer`` struct is
-defined in ``lib/event/librte_event_timer_adapter.h``.
+defined in ``rte_event_timer_adapter.h``.
 
 .. _timer_expiry_event:
 
@@ -107,18 +107,19 @@ to ``rte_event_timer_adapter_create()``.
 
 .. code-block:: c
 
-	#define NSECPERSEC 1E9 // No of ns in 1 sec
+	#define NSECPERSEC 1E9
 	const struct rte_event_timer_adapter_conf adapter_config = {
                 .event_dev_id = event_dev_id,
                 .timer_adapter_id = 0,
+		.socket_id = rte_socket_id(),
                 .clk_src = RTE_EVENT_TIMER_ADAPTER_CPU_CLK,
-                .timer_tick_ns = NSECPERSEC / 10, // 100 milliseconds
-                .max_tmo_nsec = 180 * NSECPERSEC // 2 minutes
+                .timer_tick_ns = NSECPERSEC / 10,
+                .max_tmo_ns = 180 * NSECPERSEC,
                 .nb_timers = 40000,
-                .timer_adapter_flags = 0,
+                .flags = 0,
 	};
 
-	struct rte_event_timer_adapter *adapter = NULL;
+	struct rte_event_timer_adapter *adapter;
 	adapter = rte_event_timer_adapter_create(&adapter_config);
 
 	if (adapter == NULL) { ... };
@@ -138,6 +139,24 @@ This function is passed a callback function that will be invoked if the
 adapter needs to create an event port, giving the application the opportunity
 to control how it is done.
 
+Event device configuration for service based adapter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When ``rte_event_timer_adapter_create()`` is used for creating
+adapter instance, ``rte_event_dev_config::nb_event_ports`` is
+automatically incremented, and the event device is reconfigured
+with additional event port during service initialization.
+This event device reconfigure logic also increments the
+``rte_event_dev_config::nb_single_link_event_port_queues``
+parameter if the adapter event port config is of type
+``RTE_EVENT_PORT_CFG_SINGLE_LINK``.
+
+Application no longer needs to account for the
+``rte_event_dev_config::nb_event_ports`` and
+``rte_event_dev_config::nb_single_link_event_port_queues``
+parameters required for timer adapter in event device configuration,
+when the adapter is created using the above-mentioned API.
+
 Adapter modes
 ^^^^^^^^^^^^^
 An event timer adapter can be configured in either periodic or non-periodic mode
@@ -145,9 +164,9 @@ to support timers of the respective type. A periodic timer expires at a fixed
 time interval repeatedly till it is cancelled. A non-periodic timer expires only
 once. The periodic capability flag, ``RTE_EVENT_TIMER_ADAPTER_CAP_PERIODIC``,
 can be set for implementations that support periodic mode if desired. To
-configure an adapter in periodic mode, ``timer_adapter_flags`` of
+configure an adapter in periodic mode, ``flags`` of
 ``rte_event_timer_adapter_conf`` is set to include the periodic flag
-``RTE_EVENT_TIMER_ADAPTER_F_PERIODIC``. Maximum timeout (``max_tmo_nsec``) does
+``RTE_EVENT_TIMER_ADAPTER_F_PERIODIC``. Maximum timeout (``max_tmo_ns``) does
 not apply to periodic mode.
 
 Retrieve Event Timer Adapter Contextual Information

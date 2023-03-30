@@ -348,6 +348,25 @@ Runtime Config Options
    set with this custom mask, inbound encrypted traffic from all ports with
    matching channel number pattern will be directed to the inline IPSec device.
 
+- ``Inline IPsec device flow rules`` (default ``none``)
+
+   For inline IPsec device, reserve number of rules specified by ``max_ipsec_rules``
+   and use them while installing rules with action as security.
+   Rule priority should be 0.
+   If specified number of rules not available,
+   then only available number of rules will be allocated and used.
+   If application try to insert more than allocated rules, flow creation will fail.
+
+   For example::
+
+      -a 0002:1d:00.0,max_ipsec_rules=100
+
+   With the above configuration, 100 rules will be allocated from 0-99 if available
+   and will be used for rules with action security.
+   If 100 rules are not available, and only 50 are available,
+   then only 50 rules will be allocated and used for flow rule creation.
+   If application try to add more than 50 rules, the flow creation will fail.
+
 - ``SDP device channel and mask`` (default ``none``)
    Set channel and channel mask configuration for the SDP device. This
    will be used when creating flow rules on the SDP device.
@@ -368,6 +387,34 @@ Runtime Config Options
    between traffic from each SDP interface. The channel and mask combination
    specified should match all the channels(or rings) configured on the SDP
    interface.
+
+- ``Transmit completion handler`` (default ``0``)
+
+   When transmit completion handler is enabled,
+   the PMD invokes the callback handler provided by the application
+   for every packet which has external buf attached to mbuf
+   and frees main mbuf, external buffer is provided to applicatoin.
+   Once external buffer is handed over to application,
+   it is application responsibility either to free or reuse external buffer
+   using ``tx_compl_ena`` devargs parameter.
+
+   For example::
+
+      -a 0002:01:00.1,tx_compl_ena=1
+
+- ``Meta buffer size per ethdev port for inline inbound IPsec second pass``
+
+   Size of meta buffer allocated for inline inbound IPsec second pass per
+   ethdev port can be specified by ``meta_buf_sz`` ``devargs`` parameter.
+   Default value is computed runtime based on pkt mbuf pools created and in use.
+   This option is for OCTEON CN106-B0/CN103XX SoC family.
+
+   For example::
+
+      -a 0002:02:00.0,meta_buf_sz=512
+
+   With the above configuration, PMD would allocate meta buffers of size 512 for
+   inline inbound IPsec processing second pass.
 
 .. note::
 
@@ -494,6 +541,45 @@ Runtime Config Options for inline device
    With the above configuration, application can enable inline IPsec processing
    for inbound SA with max SPI of 128 for traffic aggregated on inline device.
 
+- ``Count of meta buffers for inline inbound IPsec second pass``
+
+   Number of meta buffers allocated for inline inbound IPsec second pass can
+   be specified by ``nb_meta_bufs`` ``devargs`` parameter. Default value is
+   computed runtime based on pkt mbuf pools created and in use. Number of meta
+   buffers should be at least equal to aggregated number of packet buffers of all
+   packet mbuf pools in use by Inline IPsec enabled ethernet devices.
+
+   For example::
+
+      -a 0002:1d:00.0,nb_meta_bufs=1024
+
+   With the above configuration, PMD would enable inline IPsec processing
+   for inbound with 1024 meta buffers available for second pass.
+
+- ``Meta buffer size for inline inbound IPsec second pass``
+
+   Size of meta buffer allocated for inline inbound IPsec second pass can
+   be specified by ``meta_buf_sz`` ``devargs`` parameter. Default value is
+   computed runtime based on pkt mbuf pools created and in use.
+
+   For example::
+
+      -a 0002:1d:00.0,meta_buf_sz=512
+
+   With the above configuration, PMD would allocate meta buffers of size 512 for
+   inline inbound IPsec processing second pass.
+
+- ``Inline Outbound soft expiry poll frequency in usec`` (default ``100``)
+
+   Soft expiry poll frequency for Inline Outbound sessions can be specified by
+   ``soft_exp_poll_freq`` ``devargs`` parameter.
+
+   For example::
+
+      -a 0002:1d:00.0,soft_exp_poll_freq=1000
+
+   With the above configuration, driver would poll for soft expiry events every
+   1000 usec.
 
 Debugging Options
 -----------------

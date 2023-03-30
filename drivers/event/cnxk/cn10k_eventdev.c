@@ -2,7 +2,10 @@
  * Copyright(C) 2021 Marvell.
  */
 
+#include "cn10k_tx_worker.h"
 #include "cn10k_worker.h"
+#include "cn10k_ethdev.h"
+#include "cn10k_cryptodev_ops.h"
 #include "cnxk_eventdev.h"
 #include "cnxk_worker.h"
 
@@ -252,9 +255,12 @@ cn10k_sso_set_rsrc(void *arg)
 static int
 cn10k_sso_rsrc_init(void *arg, uint8_t hws, uint8_t hwgrp)
 {
+	struct cnxk_tim_evdev *tim_dev = cnxk_tim_priv_get();
 	struct cnxk_sso_evdev *dev = arg;
+	uint16_t nb_tim_lfs;
 
-	return roc_sso_rsrc_init(&dev->sso, hws, hwgrp);
+	nb_tim_lfs = tim_dev ? tim_dev->nb_rings : 0;
+	return roc_sso_rsrc_init(&dev->sso, hws, hwgrp, nb_tim_lfs);
 }
 
 static int
@@ -292,6 +298,7 @@ static void
 cn10k_sso_fp_fns_set(struct rte_eventdev *event_dev)
 {
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
+	struct roc_cpt *cpt = roc_idev_cpt_get();
 	const event_dequeue_t sso_hws_deq[NIX_RX_OFFLOAD_MAX] = {
 #define R(name, flags)[flags] = cn10k_sso_hws_deq_##name,
 		NIX_RX_FASTPATH_MODES
@@ -594,14 +601,17 @@ cn10k_sso_fp_fns_set(struct rte_eventdev *event_dev)
 			}
 		}
 	}
-	event_dev->ca_enqueue = cn10k_cpt_crypto_adapter_enqueue;
+
+	if ((cpt != NULL) && cpt->hw_caps[CPT_ENG_TYPE_SE].sg_ver2 &&
+	    cpt->hw_caps[CPT_ENG_TYPE_IE].sg_ver2)
+		event_dev->ca_enqueue = cn10k_cpt_sg_ver2_crypto_adapter_enqueue;
+	else
+		event_dev->ca_enqueue = cn10k_cpt_sg_ver1_crypto_adapter_enqueue;
 
 	if (dev->tx_offloads & NIX_TX_MULTI_SEG_F)
-		CN10K_SET_EVDEV_ENQ_OP(dev, event_dev->txa_enqueue,
-				       sso_hws_tx_adptr_enq_seg);
+		CN10K_SET_EVDEV_ENQ_OP(dev, event_dev->txa_enqueue, sso_hws_tx_adptr_enq_seg);
 	else
-		CN10K_SET_EVDEV_ENQ_OP(dev, event_dev->txa_enqueue,
-				       sso_hws_tx_adptr_enq);
+		CN10K_SET_EVDEV_ENQ_OP(dev, event_dev->txa_enqueue, sso_hws_tx_adptr_enq);
 
 	event_dev->txa_enqueue_same_dest = event_dev->txa_enqueue;
 }
@@ -777,6 +787,24 @@ cn10k_sso_port_unlink(struct rte_eventdev *event_dev, void *port,
 	return (int)nb_unlinks;
 }
 
+static void
+cn10k_sso_configure_queue_stash(struct rte_eventdev *event_dev)
+{
+	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
+	struct roc_sso_hwgrp_stash stash[dev->stash_cnt];
+	int i, rc;
+
+	plt_sso_dbg();
+	for (i = 0; i < dev->stash_cnt; i++) {
+		stash[i].hwgrp = dev->stash_parse_data[i].queue;
+		stash[i].stash_offset = dev->stash_parse_data[i].stash_offset;
+		stash[i].stash_count = dev->stash_parse_data[i].stash_length;
+	}
+	rc = roc_sso_hwgrp_stash_config(&dev->sso, stash, dev->stash_cnt);
+	if (rc < 0)
+		plt_warn("failed to configure HWGRP WQE stashing rc = %d", rc);
+}
+
 static int
 cn10k_sso_start(struct rte_eventdev *event_dev)
 {
@@ -786,6 +814,7 @@ cn10k_sso_start(struct rte_eventdev *event_dev)
 	if (rc < 0)
 		return rc;
 
+	cn10k_sso_configure_queue_stash(event_dev);
 	rc = cnxk_sso_start(event_dev, cn10k_sso_hws_reset,
 			    cn10k_sso_hws_flush_events);
 	if (rc < 0)
@@ -834,7 +863,7 @@ cn10k_sso_rx_adapter_caps_get(const struct rte_eventdev *event_dev,
 }
 
 static void
-cn10k_sso_set_priv_mem(const struct rte_eventdev *event_dev, void *lookup_mem, uint64_t meta_aura)
+cn10k_sso_set_priv_mem(const struct rte_eventdev *event_dev, void *lookup_mem)
 {
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
 	int i;
@@ -846,8 +875,6 @@ cn10k_sso_set_priv_mem(const struct rte_eventdev *event_dev, void *lookup_mem, u
 		ws->tstamp = dev->tstamp;
 		if (lookup_mem)
 			ws->lookup_mem = lookup_mem;
-		if (meta_aura)
-			ws->meta_aura = meta_aura;
 	}
 }
 
@@ -857,8 +884,9 @@ cn10k_sso_rx_adapter_queue_add(
 	int32_t rx_queue_id,
 	const struct rte_event_eth_rx_adapter_queue_conf *queue_conf)
 {
+	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
+	struct roc_sso_hwgrp_stash stash;
 	struct cn10k_eth_rxq *rxq;
-	uint64_t meta_aura;
 	void *lookup_mem;
 	int rc;
 
@@ -872,9 +900,16 @@ cn10k_sso_rx_adapter_queue_add(
 		return -EINVAL;
 	rxq = eth_dev->data->rx_queues[0];
 	lookup_mem = rxq->lookup_mem;
-	meta_aura = rxq->meta_aura;
-	cn10k_sso_set_priv_mem(event_dev, lookup_mem, meta_aura);
+	cn10k_sso_set_priv_mem(event_dev, lookup_mem);
 	cn10k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
+	if (roc_feature_sso_has_stash()) {
+		stash.hwgrp = queue_conf->ev.queue_id;
+		stash.stash_offset = CN10K_SSO_DEFAULT_STASH_OFFSET;
+		stash.stash_count = CN10K_SSO_DEFAULT_STASH_LENGTH;
+		rc = roc_sso_hwgrp_stash_config(&dev->sso, &stash, 1);
+		if (rc < 0)
+			plt_warn("failed to configure HWGRP WQE stashing rc = %d", rc);
+	}
 
 	return 0;
 }
@@ -1047,7 +1082,7 @@ cn10k_crypto_adapter_qp_add(const struct rte_eventdev *event_dev,
 	cn10k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
 
 	ret = cnxk_crypto_adapter_qp_add(event_dev, cdev, queue_pair_id, conf);
-	cn10k_sso_set_priv_mem(event_dev, NULL, 0);
+	cn10k_sso_set_priv_mem(event_dev, NULL);
 
 	return ret;
 }
@@ -1217,6 +1252,7 @@ RTE_PMD_REGISTER_PARAM_STRING(event_cn10k, CNXK_SSO_XAE_CNT "=<int>"
 			      CNXK_SSO_GGRP_QOS "=<string>"
 			      CNXK_SSO_FORCE_BP "=1"
 			      CN10K_SSO_GW_MODE "=<int>"
+			      CN10K_SSO_STASH "=<string>"
 			      CNXK_TIM_DISABLE_NPA "=1"
 			      CNXK_TIM_CHNK_SLOTS "=<int>"
 			      CNXK_TIM_RINGS_LMT "=<int>"

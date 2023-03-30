@@ -88,7 +88,8 @@ usage(char* progname)
 	       "in NUMA mode.\n");
 	printf("  --mbuf-size=N,[N1[,..Nn]: set the data size of mbuf to "
 	       "N bytes. If multiple numbers are specified the extra pools "
-	       "will be created to receive with packet split features\n");
+	       "will be created to receive packets based on the features "
+	       "supported, like packet split, multi-rx-mempool.\n");
 	printf("  --total-num-mbufs=N: set the number of mbufs to be allocated "
 	       "in mbuf pools.\n");
 	printf("  --max-pkt-len=N: set the maximum size of packet to N bytes.\n");
@@ -152,8 +153,10 @@ usage(char* progname)
 	       " Used mainly with PCAP drivers.\n");
 	printf("  --rxoffs=X[,Y]*: set RX segment offsets for split.\n");
 	printf("  --rxpkts=X[,Y]*: set RX segment sizes to split.\n");
+	printf("  --rxhdrs=eth[,ipv4]*: set RX segment protocol to split.\n");
 	printf("  --txpkts=X[,Y]*: set TX segment sizes"
 		" or total packet length.\n");
+	printf("  --multi-rx-mempool: enable multi-rx-mempool support\n");
 	printf("  --txonly-multi-flow: generate multiple flows in txonly mode\n");
 	printf("  --tx-ip=src,dst: IP addresses in Tx-only mode\n");
 	printf("  --tx-udp=src[,dst]: UDP ports in Tx-only mode\n");
@@ -166,12 +169,13 @@ usage(char* progname)
 	printf("  --no-rmv-interrupt: disable device removal interrupt.\n");
 	printf("  --bitrate-stats=N: set the logical core N to perform "
 		"bit-rate calculation.\n");
-	printf("  --print-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|all>: "
+	printf("  --print-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|err_recovering|recovery_success|recovery_failed|all>: "
 	       "enable print of designated event or all of them.\n");
-	printf("  --mask-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|all>: "
+	printf("  --mask-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|err_recovering|recovery_success|recovery_failed||all>: "
 	       "disable print of designated event or all of them.\n");
 	printf("  --flow-isolate-all: "
 	       "requests flow API isolated mode on all ports at initialization time.\n");
+	printf("  --disable-flow-flush: disable port flow flush when stop port.\n");
 	printf("  --tx-offloads=0xXXXXXXXX: hexadecimal bitmask of TX queue offloads\n");
 	printf("  --rx-offloads=0xXXXXXXXX: hexadecimal bitmask of RX queue offloads\n");
 	printf("  --hot-plug: enable hot plug for device.\n");
@@ -452,6 +456,12 @@ parse_event_printing_config(const char *optarg, int enable)
 		mask = UINT32_C(1) << RTE_ETH_EVENT_DESTROY;
 	else if (!strcmp(optarg, "flow_aged"))
 		mask = UINT32_C(1) << RTE_ETH_EVENT_FLOW_AGED;
+	else if (!strcmp(optarg, "err_recovering"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_ERR_RECOVERING;
+	else if (!strcmp(optarg, "recovery_success"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_SUCCESS;
+	else if (!strcmp(optarg, "recovery_failed"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_FAILED;
 	else if (!strcmp(optarg, "all"))
 		mask = ~UINT32_C(0);
 	else {
@@ -558,6 +568,9 @@ parse_link_speed(int n)
 	case 200000:
 		speed |= RTE_ETH_LINK_SPEED_200G;
 		break;
+	case 400000:
+		speed |= RTE_ETH_LINK_SPEED_400G;
+		break;
 	case 100:
 	case 10:
 	default:
@@ -658,9 +671,12 @@ launch_args_parse(int argc, char** argv)
 		{ "rxfreet",                    1, 0, 0 },
 		{ "no-flush-rx",	0, 0, 0 },
 		{ "flow-isolate-all",	        0, 0, 0 },
+		{ "disable-flow-flush",         0, 0, 0 },
 		{ "rxoffs",			1, 0, 0 },
 		{ "rxpkts",			1, 0, 0 },
+		{ "rxhdrs",			1, 0, 0 },
 		{ "txpkts",			1, 0, 0 },
+		{ "multi-rx-mempool",           0, 0, 0 },
 		{ "txonly-multi-flow",		0, 0, 0 },
 		{ "rxq-share",			2, 0, 0 },
 		{ "eth-link-speed",		1, 0, 0 },
@@ -1085,7 +1101,7 @@ launch_args_parse(int argc, char** argv)
 				if (errno != 0 || end == optarg)
 					rte_exit(EXIT_FAILURE, "hairpin mode invalid\n");
 				else
-					hairpin_mode = (uint16_t)n;
+					hairpin_mode = (uint32_t)n;
 			}
 			if (!strcmp(lgopts[opt_idx].name, "burst")) {
 				n = atoi(optarg);
@@ -1254,13 +1270,25 @@ launch_args_parse(int argc, char** argv)
 			if (!strcmp(lgopts[opt_idx].name, "rxpkts")) {
 				unsigned int seg_len[MAX_SEGS_BUFFER_SPLIT];
 				unsigned int nb_segs;
-
 				nb_segs = parse_item_list
 						(optarg, "rxpkt segments",
 						 MAX_SEGS_BUFFER_SPLIT,
 						 seg_len, 0);
 				if (nb_segs > 0)
 					set_rx_pkt_segments(seg_len, nb_segs);
+				else
+					rte_exit(EXIT_FAILURE, "bad rxpkts\n");
+			}
+			if (!strcmp(lgopts[opt_idx].name, "rxhdrs")) {
+				unsigned int seg_hdrs[MAX_SEGS_BUFFER_SPLIT];
+				unsigned int nb_segs;
+
+				nb_segs = parse_hdrs_list
+						(optarg, "rxpkt segments",
+						MAX_SEGS_BUFFER_SPLIT,
+						seg_hdrs);
+				if (nb_segs > 0)
+					set_rx_pkt_hdrs(seg_hdrs, nb_segs);
 				else
 					rte_exit(EXIT_FAILURE, "bad rxpkts\n");
 			}
@@ -1275,6 +1303,8 @@ launch_args_parse(int argc, char** argv)
 				else
 					rte_exit(EXIT_FAILURE, "bad txpkts\n");
 			}
+			if (!strcmp(lgopts[opt_idx].name, "multi-rx-mempool"))
+				multi_rx_mempool = 1;
 			if (!strcmp(lgopts[opt_idx].name, "txonly-multi-flow"))
 				txonly_multi_flow = 1;
 			if (!strcmp(lgopts[opt_idx].name, "rxq-share")) {
@@ -1305,6 +1335,8 @@ launch_args_parse(int argc, char** argv)
 				rmv_interrupt = 0;
 			if (!strcmp(lgopts[opt_idx].name, "flow-isolate-all"))
 				flow_isolate_all = 1;
+			if (!strcmp(lgopts[opt_idx].name, "disable-flow-flush"))
+				no_flow_flush = 1;
 			if (!strcmp(lgopts[opt_idx].name, "tx-offloads")) {
 				char *end = NULL;
 				n = strtoull(optarg, &end, 16);

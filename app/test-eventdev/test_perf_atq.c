@@ -15,16 +15,6 @@ atq_nb_event_queues(struct evt_options *opt)
 }
 
 static __rte_always_inline void
-atq_mark_fwd_latency(struct rte_event *const ev)
-{
-	if (unlikely(ev->sub_event_type == 0)) {
-		struct perf_elt *const m = ev->event_ptr;
-
-		m->timestamp = rte_get_timer_cycles();
-	}
-}
-
-static __rte_always_inline void
 atq_fwd_event(struct rte_event *const ev, uint8_t *const sched_type_list,
 		const uint8_t nb_stages)
 {
@@ -32,6 +22,16 @@ atq_fwd_event(struct rte_event *const ev, uint8_t *const sched_type_list,
 	ev->sched_type = sched_type_list[ev->sub_event_type % nb_stages];
 	ev->op = RTE_EVENT_OP_FORWARD;
 	ev->event_type = RTE_EVENT_TYPE_CPU;
+}
+
+static __rte_always_inline void
+atq_fwd_event_vector(struct rte_event *const ev, uint8_t *const sched_type_list,
+		const uint8_t nb_stages)
+{
+	ev->sub_event_type++;
+	ev->sched_type = sched_type_list[ev->sub_event_type % nb_stages];
+	ev->op = RTE_EVENT_OP_FORWARD;
+	ev->event_type = RTE_EVENT_TYPE_CPU_VECTOR;
 }
 
 static int
@@ -49,35 +49,23 @@ perf_atq_worker(void *arg, const int enable_fwd_latency)
 			continue;
 		}
 
-		if (prod_crypto_type &&
-		    (ev.event_type == RTE_EVENT_TYPE_CRYPTODEV)) {
-			struct rte_crypto_op *op = ev.event_ptr;
-
-			if (op->status == RTE_CRYPTO_OP_STATUS_SUCCESS) {
-				if (op->type == RTE_CRYPTO_OP_TYPE_SYMMETRIC) {
-					if (op->sym->m_dst == NULL)
-						ev.event_ptr = op->sym->m_src;
-					else
-						ev.event_ptr = op->sym->m_dst;
-					rte_crypto_op_free(op);
-				}
-			} else {
-				rte_crypto_op_free(op);
+		if (prod_crypto_type && (ev.event_type == RTE_EVENT_TYPE_CRYPTODEV)) {
+			if (perf_handle_crypto_ev(&ev, &pe, enable_fwd_latency))
 				continue;
-			}
 		}
 
-		if (enable_fwd_latency && !prod_timer_type)
+		stage = ev.sub_event_type % nb_stages;
+		if (enable_fwd_latency && !prod_timer_type && stage == 0)
 		/* first stage in pipeline, mark ts to compute fwd latency */
-			atq_mark_fwd_latency(&ev);
+			perf_mark_fwd_latency(ev.event_ptr);
 
 		/* last stage in pipeline */
-		if (unlikely((ev.sub_event_type % nb_stages) == laststage)) {
+		if (unlikely(stage == laststage)) {
 			if (enable_fwd_latency)
-				cnt = perf_process_last_stage_latency(pool,
+				cnt = perf_process_last_stage_latency(pool, prod_crypto_type,
 					&ev, w, bufs, sz, cnt);
 			else
-				cnt = perf_process_last_stage(pool, &ev, w,
+				cnt = perf_process_last_stage(pool, prod_crypto_type, &ev, w,
 					 bufs, sz, cnt);
 		} else {
 			atq_fwd_event(&ev, sched_type_list, nb_stages);
@@ -111,40 +99,26 @@ perf_atq_worker_burst(void *arg, const int enable_fwd_latency)
 		}
 
 		for (i = 0; i < nb_rx; i++) {
-			if (prod_crypto_type &&
-			    (ev[i].event_type == RTE_EVENT_TYPE_CRYPTODEV)) {
-				struct rte_crypto_op *op = ev[i].event_ptr;
-
-				if (op->status ==
-				    RTE_CRYPTO_OP_STATUS_SUCCESS) {
-					if (op->sym->m_dst == NULL)
-						ev[i].event_ptr =
-							op->sym->m_src;
-					else
-						ev[i].event_ptr =
-							op->sym->m_dst;
-					rte_crypto_op_free(op);
-				} else {
-					rte_crypto_op_free(op);
+			if (prod_crypto_type && (ev[i].event_type == RTE_EVENT_TYPE_CRYPTODEV)) {
+				if (perf_handle_crypto_ev(&ev[i], &pe, enable_fwd_latency))
 					continue;
-				}
 			}
 
-			if (enable_fwd_latency && !prod_timer_type) {
+			stage = ev[i].sub_event_type % nb_stages;
+			if (enable_fwd_latency && !prod_timer_type && stage == 0) {
 				rte_prefetch0(ev[i+1].event_ptr);
 				/* first stage in pipeline.
 				 * mark time stamp to compute fwd latency
 				 */
-				atq_mark_fwd_latency(&ev[i]);
+				perf_mark_fwd_latency(ev[i].event_ptr);
 			}
 			/* last stage in pipeline */
-			if (unlikely((ev[i].sub_event_type % nb_stages)
-						== laststage)) {
+			if (unlikely(stage == laststage)) {
 				if (enable_fwd_latency)
-					cnt = perf_process_last_stage_latency(
-						pool, &ev[i], w, bufs, sz, cnt);
+					cnt = perf_process_last_stage_latency(pool,
+						prod_crypto_type, &ev[i], w, bufs, sz, cnt);
 				else
-					cnt = perf_process_last_stage(pool,
+					cnt = perf_process_last_stage(pool, prod_crypto_type,
 						&ev[i], w, bufs, sz, cnt);
 
 				ev[i].op = RTE_EVENT_OP_RELEASE;
@@ -167,6 +141,50 @@ perf_atq_worker_burst(void *arg, const int enable_fwd_latency)
 }
 
 static int
+perf_atq_worker_vector(void *arg, const int enable_fwd_latency)
+{
+	uint16_t enq = 0, deq = 0;
+	struct rte_event ev;
+	PERF_WORKER_INIT;
+
+	RTE_SET_USED(sz);
+	RTE_SET_USED(cnt);
+	RTE_SET_USED(prod_crypto_type);
+
+	while (t->done == false) {
+		deq = rte_event_dequeue_burst(dev, port, &ev, 1, 0);
+
+		if (!deq)
+			continue;
+
+		if (ev.event_type == RTE_EVENT_TYPE_CRYPTODEV_VECTOR) {
+			if (perf_handle_crypto_vector_ev(&ev, &pe, enable_fwd_latency))
+				continue;
+		}
+
+		stage = ev.sub_event_type % nb_stages;
+		/* First q in pipeline, mark timestamp to compute fwd latency */
+		if (enable_fwd_latency && !prod_timer_type && stage == 0)
+			perf_mark_fwd_latency(pe);
+
+		/* Last stage in pipeline */
+		if (unlikely(stage == laststage)) {
+			perf_process_vector_last_stage(pool, t->ca_op_pool, &ev, w,
+							enable_fwd_latency);
+		} else {
+			atq_fwd_event_vector(&ev, sched_type_list, nb_stages);
+			do {
+				enq = rte_event_enqueue_burst(dev, port, &ev, 1);
+			} while (!enq && !t->done);
+		}
+	}
+
+	perf_worker_cleanup(pool, dev, port, &ev, enq, deq);
+
+	return 0;
+}
+
+static int
 worker_wrapper(void *arg)
 {
 	struct worker_data *w  = arg;
@@ -176,7 +194,9 @@ worker_wrapper(void *arg)
 	const int fwd_latency = opt->fwd_latency;
 
 	/* allow compiler to optimize */
-	if (!burst && !fwd_latency)
+	if (opt->ena_vector && opt->prod_type == EVT_PROD_TYPE_EVENT_CRYPTO_ADPTR)
+		return perf_atq_worker_vector(arg, fwd_latency);
+	else if (!burst && !fwd_latency)
 		return perf_atq_worker(arg, 0);
 	else if (!burst && fwd_latency)
 		return perf_atq_worker(arg, 1);

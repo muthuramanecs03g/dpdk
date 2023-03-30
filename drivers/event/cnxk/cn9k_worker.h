@@ -718,7 +718,6 @@ cn9k_sso_hws_xmit_sec_one(const struct cn9k_eth_txq *txq, uint64_t base,
 	esn = outb_priv->esn;
 	outb_priv->esn = esn + 1;
 
-	ucode_cmd[0] |= (esn >> 32) << 16;
 	esn_lo = rte_cpu_to_be_32(esn & (BIT_ULL(32) - 1));
 	esn_hi = rte_cpu_to_be_32(esn >> 32);
 
@@ -731,6 +730,7 @@ cn9k_sso_hws_xmit_sec_one(const struct cn9k_eth_txq *txq, uint64_t base,
 
 	rte_io_wmb();
 	cn9k_sso_txq_fc_wait(txq);
+	cn9k_nix_sec_fc_wait_one(txq);
 
 	/* Write CPT instruction to lmt line */
 	vst1q_u64(lmt_addr, cmd01);
@@ -782,12 +782,16 @@ cn9k_sso_hws_event_tx(uint64_t base, struct rte_event *ev, uint64_t *cmd,
 	    !(flags & NIX_TX_OFFLOAD_SECURITY_F))
 		rte_io_wmb();
 	txq = cn9k_sso_hws_xtract_meta(m, txq_data);
+
+	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F && txq->tx_compl.ena)
+		handle_tx_completion_pkts(txq, 1, 1);
+
 	if (((txq->nb_sqb_bufs_adj -
 	      __atomic_load_n((int16_t *)txq->fc_mem, __ATOMIC_RELAXED))
 	     << txq->sqes_per_sqb_log2) <= 0)
 		return 0;
 	cn9k_nix_tx_skeleton(txq, cmd, flags, 0);
-	cn9k_nix_xmit_prepare(m, cmd, flags, txq->lso_tun_fmt, txq->mark_flag,
+	cn9k_nix_xmit_prepare(txq, m, cmd, flags, txq->lso_tun_fmt, txq->mark_flag,
 			      txq->mark_fmt);
 
 	if (flags & NIX_TX_OFFLOAD_SECURITY_F) {
@@ -809,7 +813,7 @@ cn9k_sso_hws_event_tx(uint64_t base, struct rte_event *ev, uint64_t *cmd,
 	}
 
 	if (flags & NIX_TX_MULTI_SEG_F) {
-		const uint16_t segdw = cn9k_nix_prepare_mseg(m, cmd, flags);
+		const uint16_t segdw = cn9k_nix_prepare_mseg(txq, m, cmd, flags);
 		cn9k_nix_xmit_prepare_tstamp(txq, cmd, m->ol_flags, segdw,
 					     flags);
 		if (!CNXK_TT_FROM_EVENT(ev->event)) {

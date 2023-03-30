@@ -9,6 +9,7 @@
 #include <rte_security.h>
 
 #define IPSEC_TEST_PACKETS_MAX 32
+#define IPSEC_TEXT_MAX_LEN 16384u
 
 struct ipsec_test_data {
 	struct {
@@ -19,12 +20,12 @@ struct ipsec_test_data {
 	} auth_key;
 
 	struct {
-		uint8_t data[1024];
+		uint8_t data[IPSEC_TEXT_MAX_LEN];
 		unsigned int len;
 	} input_text;
 
 	struct {
-		uint8_t data[1024];
+		uint8_t data[IPSEC_TEXT_MAX_LEN];
 		unsigned int len;
 	} output_text;
 
@@ -93,6 +94,7 @@ struct ipsec_test_flags {
 	uint32_t tunnel_hdr_verify;
 	bool udp_encap;
 	bool udp_ports_verify;
+	bool udp_encap_custom_ports;
 	bool ip_csum;
 	bool l4_csum;
 	bool ipv6;
@@ -106,6 +108,8 @@ struct ipsec_test_flags {
 	enum flabel_flags flabel;
 	bool dec_ttl_or_hop_limit;
 	bool ah;
+	uint32_t plaintext_len;
+	int nb_segs_in_mbuf;
 };
 
 struct crypto_param {
@@ -152,6 +156,18 @@ static const struct crypto_param cipher_list[] = {
 	},
 	{
 		.type = RTE_CRYPTO_SYM_XFORM_CIPHER,
+		.alg.cipher =  RTE_CRYPTO_CIPHER_DES_CBC,
+		.key_length = 8,
+		.iv_length = 8,
+	},
+	{
+		.type = RTE_CRYPTO_SYM_XFORM_CIPHER,
+		.alg.cipher =  RTE_CRYPTO_CIPHER_3DES_CBC,
+		.key_length = 24,
+		.iv_length = 8,
+	},
+	{
+		.type = RTE_CRYPTO_SYM_XFORM_CIPHER,
 		.alg.cipher =  RTE_CRYPTO_CIPHER_AES_CBC,
 		.key_length = 16,
 		.iv_length = 16,
@@ -180,6 +196,12 @@ static const struct crypto_param auth_list[] = {
 	{
 		.type = RTE_CRYPTO_SYM_XFORM_AUTH,
 		.alg.auth =  RTE_CRYPTO_AUTH_NULL,
+	},
+	{
+		.type = RTE_CRYPTO_SYM_XFORM_AUTH,
+		.alg.auth =  RTE_CRYPTO_AUTH_MD5_HMAC,
+		.key_length = 16,
+		.digest_length = 12,
 	},
 	{
 		.type = RTE_CRYPTO_SYM_XFORM_AUTH,
@@ -267,7 +289,7 @@ void test_ipsec_td_update(struct ipsec_test_data td_inb[],
 void test_ipsec_display_alg(const struct crypto_param *param1,
 			    const struct crypto_param *param2);
 
-int test_ipsec_post_process(struct rte_mbuf *m,
+int test_ipsec_post_process(const struct rte_mbuf *m,
 			    const struct ipsec_test_data *td,
 			    struct ipsec_test_data *res_d, bool silent,
 			    const struct ipsec_test_flags *flags);
@@ -279,7 +301,7 @@ int test_ipsec_status_check(const struct ipsec_test_data *td,
 			    int pkt_num);
 
 int test_ipsec_stats_verify(struct rte_security_ctx *ctx,
-			    struct rte_security_session *sess,
+			    void *sess,
 			    const struct ipsec_test_flags *flags,
 			    enum rte_security_ipsec_sa_direction dir);
 

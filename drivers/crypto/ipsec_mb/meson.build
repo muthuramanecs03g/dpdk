@@ -41,3 +41,4 @@ sources = files(
         'pmd_zuc.c',
 )
 deps += ['bus_vdev', 'net', 'security']
+require_iova_in_mbuf = false

@@ -82,9 +82,10 @@ The application supports two modes of operation: poll mode and event mode.
   to help application to have multiple worker threads by maximizing performance from
   every type of event device without affecting existing paths/use cases. The worker
   to be used will be determined by the operating conditions and the underlying device
-  capabilities. **Currently the application provides non-burst, internal port worker
-  threads and supports inline protocol only.** It also provides infrastructure for
-  non-internal port however does not define any worker threads.
+  capabilities.
+  **Currently the application provides non-burst, internal port worker threads.**
+  It also provides infrastructure for non-internal port
+  however does not define any worker threads.
 
   Event mode also supports event vectorization. The event devices, ethernet device
   pairs which support the capability ``RTE_EVENT_ETH_RX_ADAPTER_CAP_EVENT_VECTOR`` can
@@ -94,6 +95,9 @@ The application supports two modes of operation: poll mode and event mode.
   (default vector-size is 16) and vector-tmo (default vector-tmo is 102400ns).
   By default event vectorization is disabled and it can be enabled using event-vector
   option.
+  For the event devices, crypto device pairs which support the capability
+  ``RTE_EVENT_CRYPTO_ADAPTER_CAP_EVENT_VECTOR`` vector aggregation
+  could also be enable using event-vector option.
 
 Additionally the event mode introduces two submodes of processing packets:
 
@@ -534,7 +538,7 @@ The SA rule syntax is shown as follows:
 
     sa <dir> <spi> <cipher_algo> <cipher_key> <auth_algo> <auth_key>
     <mode> <src_ip> <dst_ip> <action_type> <port_id> <fallback>
-    <flow-direction> <port_id> <queue_id> <udp-encap>
+    <flow-direction> <port_id> <queue_id> <udp-encap> <reassembly_en>
 
 where each options means:
 
@@ -789,6 +793,16 @@ where each options means:
  * Syntax:
 
    * *esn N* N is the initial ESN value
+
+ ``<reassembly_en>``
+
+ * Option to enable HW reassembly per SA.
+
+ * Optional: Yes, it is disabled by default
+
+ * Syntax:
+
+   * *reassembly_en*
 
 Example SA rules:
 

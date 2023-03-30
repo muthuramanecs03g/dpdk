@@ -40,7 +40,7 @@ dummy_mbuf_prep(struct rte_mbuf *mb, uint8_t buf[], uint32_t buf_len,
 	uint8_t *db;
 
 	mb->buf_addr = buf;
-	mb->buf_iova = (uintptr_t)buf;
+	rte_mbuf_iova_set(mb, (uintptr_t)buf);
 	mb->buf_len = buf_len;
 	rte_mbuf_refcnt_set(mb, 1);
 
@@ -109,8 +109,15 @@ test_setup(void)
 		return -1;
 	}
 
+	/* Add interface to the file */
+	if (rte_pcapng_add_interface(pcapng, port_id,
+				     NULL, NULL, NULL) != 0) {
+		fprintf(stderr, "can not add port %u\n", port_id);
+		return -1;
+	}
+
 	/* Make a pool for cloned packets */
-	mp = rte_pktmbuf_pool_create_by_ops("pcapng_test_pool", NUM_PACKETS,
+	mp = rte_pktmbuf_pool_create_by_ops("pcapng_test_pool", IOV_MAX + NUM_PACKETS,
 					    0, 0,
 					    rte_pcapng_mbuf_size(pkt_len),
 					    SOCKET_ID_ANY, "ring_mp_sc");
@@ -139,7 +146,7 @@ test_write_packets(void)
 		struct rte_mbuf *mc;
 
 		mc = rte_pcapng_copy(port_id, 0, orig, mp, pkt_len,
-				rte_get_tsc_cycles(), 0);
+				rte_get_tsc_cycles(), 0, NULL);
 		if (mc == NULL) {
 			fprintf(stderr, "Cannot copy packet\n");
 			return -1;
@@ -237,6 +244,45 @@ test_validate(void)
 	return ret;
 }
 
+static int
+test_write_over_limit_iov_max(void)
+{
+	struct rte_mbuf *orig;
+	struct rte_mbuf *clones[IOV_MAX + NUM_PACKETS] = { };
+	struct dummy_mbuf mbfs;
+	unsigned int i;
+	ssize_t len;
+
+	/* make a dummy packet */
+	mbuf1_prepare(&mbfs, pkt_len);
+
+	/* clone them */
+	orig  = &mbfs.mb[0];
+	for (i = 0; i < IOV_MAX + NUM_PACKETS; i++) {
+		struct rte_mbuf *mc;
+
+		mc = rte_pcapng_copy(port_id, 0, orig, mp, pkt_len,
+				rte_get_tsc_cycles(), 0, NULL);
+		if (mc == NULL) {
+			fprintf(stderr, "Cannot copy packet\n");
+			return -1;
+		}
+		clones[i] = mc;
+	}
+
+	/* write it to capture file */
+	len = rte_pcapng_write_packets(pcapng, clones, IOV_MAX + NUM_PACKETS);
+
+	rte_pktmbuf_free_bulk(clones, IOV_MAX + NUM_PACKETS);
+
+	if (len <= 0) {
+		fprintf(stderr, "Write of packets failed\n");
+		return -1;
+	}
+
+	return 0;
+}
+
 static void
 test_cleanup(void)
 {
@@ -256,6 +302,7 @@ unit_test_suite test_pcapng_suite  = {
 		TEST_CASE(test_write_packets),
 		TEST_CASE(test_write_stats),
 		TEST_CASE(test_validate),
+		TEST_CASE(test_write_over_limit_iov_max),
 		TEST_CASES_END()
 	}
 };

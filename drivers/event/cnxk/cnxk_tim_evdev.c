@@ -4,6 +4,8 @@
 
 #include <math.h>
 
+#include "roc_npa.h"
+
 #include "cnxk_eventdev.h"
 #include "cnxk_tim_evdev.h"
 
@@ -14,12 +16,11 @@ static int
 cnxk_tim_chnk_pool_create(struct cnxk_tim_ring *tim_ring,
 			  struct rte_event_timer_adapter_conf *rcfg)
 {
-	unsigned int cache_sz = (tim_ring->nb_chunks / 1.5);
 	unsigned int mp_flags = 0;
+	unsigned int cache_sz;
 	char pool_name[25];
 	int rc;
 
-	cache_sz /= rte_lcore_count();
 	/* Create chunk pool. */
 	if (rcfg->flags & RTE_EVENT_TIMER_ADAPTER_F_SP_PUT) {
 		mp_flags = RTE_MEMPOOL_F_SP_PUT | RTE_MEMPOOL_F_SC_GET;
@@ -30,9 +31,7 @@ cnxk_tim_chnk_pool_create(struct cnxk_tim_ring *tim_ring,
 	snprintf(pool_name, sizeof(pool_name), "cnxk_tim_chunk_pool%d",
 		 tim_ring->ring_id);
 
-	if (cache_sz > CNXK_TIM_MAX_POOL_CACHE_SZ)
-		cache_sz = CNXK_TIM_MAX_POOL_CACHE_SZ;
-	cache_sz = cache_sz != 0 ? cache_sz : 2;
+	cache_sz = CNXK_TIM_MAX_POOL_CACHE_SZ;
 	tim_ring->nb_chunks += (cache_sz * rte_lcore_count());
 	if (!tim_ring->disable_npa) {
 		tim_ring->chunk_pool = rte_mempool_create_empty(
@@ -266,7 +265,7 @@ cnxk_tim_ring_create(struct rte_event_timer_adapter *adptr)
 	cnxk_sso_updt_xae_cnt(cnxk_sso_pmd_priv(dev->event_dev), tim_ring,
 			      RTE_EVENT_TYPE_TIMER);
 	cnxk_sso_xae_reconfigure(dev->event_dev);
-	sso_set_priv_mem_fn(dev->event_dev, NULL, 0);
+	sso_set_priv_mem_fn(dev->event_dev, NULL);
 
 	plt_tim_dbg(
 		"Total memory used %" PRIu64 "MB\n",
@@ -381,6 +380,7 @@ cnxk_tim_caps_get(const struct rte_eventdev *evdev, uint64_t flags,
 		  cnxk_sso_set_priv_mem_t priv_mem_fn)
 {
 	struct cnxk_tim_evdev *dev = cnxk_tim_priv_get();
+	struct cnxk_tim_ring *tim_ring;
 
 	RTE_SET_USED(flags);
 
@@ -403,6 +403,12 @@ cnxk_tim_caps_get(const struct rte_eventdev *evdev, uint64_t flags,
 	dev->event_dev = (struct rte_eventdev *)(uintptr_t)evdev;
 	*caps = RTE_EVENT_TIMER_ADAPTER_CAP_INTERNAL_PORT |
 		RTE_EVENT_TIMER_ADAPTER_CAP_PERIODIC;
+
+	tim_ring = ((struct rte_event_timer_adapter_data
+			     *)((char *)caps - offsetof(struct rte_event_timer_adapter_data, caps)))
+			   ->adapter_priv;
+	if (tim_ring != NULL && rte_eal_process_type() == RTE_PROC_SECONDARY)
+		cnxk_tim_set_fp_ops(tim_ring);
 	*ops = &cnxk_tim_ops;
 
 	return 0;

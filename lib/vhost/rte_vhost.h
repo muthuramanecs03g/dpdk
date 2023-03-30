@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <sys/eventfd.h>
 
+#include <rte_compat.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
 
@@ -79,8 +80,8 @@ extern "C" {
 #define VHOST_USER_PROTOCOL_F_NET_MTU	4
 #endif
 
-#ifndef VHOST_USER_PROTOCOL_F_SLAVE_REQ
-#define VHOST_USER_PROTOCOL_F_SLAVE_REQ	5
+#ifndef VHOST_USER_PROTOCOL_F_BACKEND_REQ
+#define VHOST_USER_PROTOCOL_F_BACKEND_REQ	5
 #endif
 
 #ifndef VHOST_USER_PROTOCOL_F_CRYPTO_SESSION
@@ -95,8 +96,8 @@ extern "C" {
 #define VHOST_USER_PROTOCOL_F_CONFIG 9
 #endif
 
-#ifndef VHOST_USER_PROTOCOL_F_SLAVE_SEND_FD
-#define VHOST_USER_PROTOCOL_F_SLAVE_SEND_FD 10
+#ifndef VHOST_USER_PROTOCOL_F_BACKEND_SEND_FD
+#define VHOST_USER_PROTOCOL_F_BACKEND_SEND_FD 10
 #endif
 
 #ifndef VHOST_USER_PROTOCOL_F_HOST_NOTIFIER
@@ -263,9 +264,9 @@ typedef enum rte_vhost_msg_result (*rte_vhost_msg_handle)(int vid, void *msg);
  * Optional vhost user message handlers.
  */
 struct rte_vhost_user_extern_ops {
-	/* Called prior to the master message handling. */
+	/* Called prior to the frontend message handling. */
 	rte_vhost_msg_handle pre_msg_handle;
-	/* Called after the master message handling. */
+	/* Called after the frontend message handling. */
 	rte_vhost_msg_handle post_msg_handle;
 };
 
@@ -910,6 +911,21 @@ rte_vhost_clr_inflight_desc_packed(int vid, uint16_t vring_idx,
 int rte_vhost_vring_call(int vid, uint16_t vring_idx);
 
 /**
+ * Notify the guest that used descriptors have been added to the vring.  This
+ * function acts as a memory barrier.  This function will return -EAGAIN when
+ * vq's access lock is held by other thread, user should try again later.
+ *
+ * @param vid
+ *  vhost device ID
+ * @param vring_idx
+ *  vring index
+ * @return
+ *  0 on success, -1 on failure, -EAGAIN for another retry
+ */
+__rte_experimental
+int rte_vhost_vring_call_nonblock(int vid, uint16_t vring_idx);
+
+/**
  * Get vhost RX queue avail count.
  *
  * @param vid
@@ -1044,13 +1060,13 @@ rte_vhost_get_vdpa_device(int vid);
  * @param vid
  *  vhost device ID
  * @param need_reply
- *  wait for the master response the status of this operation
+ *  wait for the frontend response the status of this operation
  * @return
  *  0 on success, < 0 on failure
  */
 __rte_experimental
 int
-rte_vhost_slave_config_change(int vid, bool need_reply);
+rte_vhost_backend_config_change(int vid, bool need_reply);
 
 /**
  * Retrieve names of statistics of a Vhost virtqueue.
@@ -1075,7 +1091,6 @@ rte_vhost_slave_config_change(int vid, bool need_reply);
  *  - Failure if lower than 0. The device ID or queue ID is invalid or
  +    statistics collection is not enabled.
  */
-__rte_experimental
 int
 rte_vhost_vring_stats_get_names(int vid, uint16_t queue_id,
 		struct rte_vhost_stat_name *name, unsigned int size);
@@ -1103,7 +1118,6 @@ rte_vhost_vring_stats_get_names(int vid, uint16_t queue_id,
  *  - Failure if lower than 0. The device ID or queue ID is invalid, or
  *    statistics collection is not enabled.
  */
-__rte_experimental
 int
 rte_vhost_vring_stats_get(int vid, uint16_t queue_id,
 		struct rte_vhost_stat *stats, unsigned int n);
@@ -1120,7 +1134,6 @@ rte_vhost_vring_stats_get(int vid, uint16_t queue_id,
  *  - Failure if lower than 0. The device ID or queue ID is invalid, or
  *    statistics collection is not enabled.
  */
-__rte_experimental
 int
 rte_vhost_vring_stats_reset(int vid, uint16_t queue_id);
 
