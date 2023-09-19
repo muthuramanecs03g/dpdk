@@ -97,8 +97,8 @@ rte_rwlock_read_lock(rte_rwlock_t *rwl)
 			rte_pause();
 
 		/* Try to get read lock */
-		x = __atomic_add_fetch(&rwl->cnt, RTE_RWLOCK_READ,
-				       __ATOMIC_ACQUIRE);
+		x = __atomic_fetch_add(&rwl->cnt, RTE_RWLOCK_READ,
+				       __ATOMIC_ACQUIRE) + RTE_RWLOCK_READ;
 
 		/* If no writer, then acquire was successful */
 		if (likely(!(x & RTE_RWLOCK_MASK)))
@@ -134,8 +134,8 @@ rte_rwlock_read_trylock(rte_rwlock_t *rwl)
 		return -EBUSY;
 
 	/* Try to get read lock */
-	x = __atomic_add_fetch(&rwl->cnt, RTE_RWLOCK_READ,
-			       __ATOMIC_ACQUIRE);
+	x = __atomic_fetch_add(&rwl->cnt, RTE_RWLOCK_READ,
+			       __ATOMIC_ACQUIRE) + RTE_RWLOCK_READ;
 
 	/* Back out if writer raced in */
 	if (unlikely(x & RTE_RWLOCK_MASK)) {
@@ -234,6 +234,23 @@ rte_rwlock_write_unlock(rte_rwlock_t *rwl)
 	__rte_no_thread_safety_analysis
 {
 	__atomic_fetch_sub(&rwl->cnt, RTE_RWLOCK_WRITE, __ATOMIC_RELEASE);
+}
+
+/**
+ * Test if the write lock is taken.
+ *
+ * @param rwl
+ *   A pointer to a rwlock structure.
+ * @return
+ *   1 if the write lock is currently taken; 0 otherwise.
+ */
+static inline int
+rte_rwlock_write_is_locked(rte_rwlock_t *rwl)
+{
+	if (__atomic_load_n(&rwl->cnt, __ATOMIC_RELAXED) & RTE_RWLOCK_WRITE)
+		return 1;
+
+	return 0;
 }
 
 /**

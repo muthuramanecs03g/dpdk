@@ -74,6 +74,8 @@ int rte_eal_iopl_init(void);
  * @param argv
  *   An array of strings.  The contents of the array, as well as the strings
  *   which are pointed to by the array, may be modified by this function.
+ *   The program name pointer argv[0] is copied into the last parsed argv
+ *   so that argv[0] is still the same after deducing the parsed arguments.
  * @return
  *   - On success, the number of parsed arguments, which is greater or
  *     equal to zero. After the call to rte_eal_init(),
@@ -240,7 +242,6 @@ rte_mp_action_register(const char *name, rte_mp_t action);
  *
  * @param name
  *   The name argument plays as the nonredundant key to find the action.
- *
  */
 void
 rte_mp_action_unregister(const char *name);
@@ -463,7 +464,6 @@ uint64_t rte_eal_get_baseaddr(void);
  * IOVA mapping mode is iommu programming mode of a device.
  * That device (for example: IOMMU backed DMA device) based
  * on rte_iova_mode will generate physical or virtual address.
- *
  */
 enum rte_iova_mode {
 	RTE_IOVA_DC = 0,	/* Don't care mode */

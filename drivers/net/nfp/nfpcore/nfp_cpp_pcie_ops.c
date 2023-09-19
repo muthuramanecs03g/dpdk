@@ -34,7 +34,6 @@
 
 #include "nfp_cpp.h"
 #include "nfp_logs.h"
-#include "nfp_target.h"
 #include "nfp6000/nfp6000.h"
 #include "../nfp_logs.h"
 
@@ -67,8 +66,8 @@
 #define NFP_PCIE_P2C_GENERAL_TOKEN_OFFSET(bar, x) ((x) << ((bar)->bitsize - 4))
 #define NFP_PCIE_P2C_GENERAL_SIZE(bar)             (1 << ((bar)->bitsize - 4))
 
-#define NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(bar, slot) \
-	(NFP_PCIE_BAR(0) + ((bar) * 8 + (slot)) * 4)
+#define NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(id, bar, slot) \
+	(NFP_PCIE_BAR(id) + ((bar) * 8 + (slot)) * 4)
 
 #define NFP_PCIE_CPP_BAR_PCIETOCPPEXPBAR(bar, slot) \
 	(((bar) * 8 + (slot)) * 4)
@@ -115,9 +114,9 @@ struct nfp_pcie_user {
 
 	int device;
 	int lock;
-	int secondary_lock;
 	char busdev[BUSDEV_SZ];
 	int barsz;
+	int dev_id;
 	char *cfg;
 };
 
@@ -247,7 +246,7 @@ nfp_bar_write(struct nfp_pcie_user *nfp, struct nfp_bar *bar,
 		return (-ENOMEM);
 
 	bar->csr = nfp->cfg +
-		   NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(base, slot);
+		   NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(nfp->dev_id, base, slot);
 
 	*(uint32_t *)(bar->csr) = newcfg;
 
@@ -288,10 +287,7 @@ nfp_reconfigure_bar(struct nfp_pcie_user *nfp, struct nfp_bar *bar, int tgt,
  *         for setting the link up or down. Secondary processes do not need
  *         to map the first two slots again, but it requires one slot for
  *         accessing the link, even if it is not likely the secondary process
- *         starting the port. This implies a limit of secondary processes
- *         supported. Due to this requirement and future extensions requiring
- *         new slots per process, only one secondary process is supported by
- *         now.
+ *         starting the port.
  *         For Flower firmware:
  *         NFP PMD need another fixed slots, used as the configureation BAR
  *         for ctrl vNIC.
@@ -319,10 +315,8 @@ nfp_enable_bars(struct nfp_pcie_user *nfp)
 		bar->base = 0;
 		bar->iomem = NULL;
 		bar->lock = 0;
-		bar->csr = nfp->cfg +
-			   NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(bar->index >> 3,
-							   bar->index & 7);
-
+		bar->csr = nfp->cfg + NFP_PCIE_CFG_BAR_PCIETOCPPEXPBAR(nfp->dev_id,
+				bar->index >> 3, bar->index & 7);
 		bar->iomem = nfp->cfg + (bar->index << bar->bitsize);
 	}
 	return 0;
@@ -406,7 +400,7 @@ nfp6000_area_init(struct nfp_cpp_area *area, uint32_t dest,
 	uint32_t token = NFP_CPP_ID_TOKEN_of(dest);
 	int pp, ret = 0;
 
-	pp = nfp6000_target_pushpull(NFP_CPP_ID(target, action, token),
+	pp = nfp_target_pushpull(NFP_CPP_ID(target, action, token),
 				     address);
 	if (pp < 0)
 		return pp;
@@ -661,52 +655,6 @@ nfp_acquire_process_lock(struct nfp_pcie_user *desc)
 }
 
 static int
-nfp_acquire_secondary_process_lock(struct nfp_pcie_user *desc)
-{
-	int rc;
-	struct flock lock;
-	const char *lockname = "/.lock_nfp_secondary";
-	char *home_path;
-	char *lockfile;
-
-	memset(&lock, 0, sizeof(lock));
-
-	/*
-	 * Using user's home directory. Note this can be called in a DPDK app
-	 * being executed as non-root. This is not the case for the previous
-	 * function nfp_acquire_process_lock which is invoked only when UIO
-	 * driver is used because that implies root user.
-	 */
-	home_path = getenv("HOME");
-	lockfile = calloc(strlen(home_path) + strlen(lockname) + 1,
-			  sizeof(char));
-
-	if (lockfile == NULL)
-		return -ENOMEM;
-
-	strcat(lockfile, home_path);
-	strcat(lockfile, "/.lock_nfp_secondary");
-	desc->secondary_lock = open(lockfile, O_RDWR | O_CREAT | O_NONBLOCK,
-				    0666);
-	if (desc->secondary_lock < 0) {
-		PMD_DRV_LOG(ERR, "NFP lock for secondary process failed");
-		free(lockfile);
-		return desc->secondary_lock;
-	}
-
-	lock.l_type = F_WRLCK;
-	lock.l_whence = SEEK_SET;
-	rc = fcntl(desc->secondary_lock, F_SETLK, &lock);
-	if (rc < 0) {
-		PMD_DRV_LOG(ERR, "NFP lock for secondary process failed");
-		close(desc->secondary_lock);
-	}
-
-	free(lockfile);
-	return rc;
-}
-
-static int
 nfp6000_set_model(struct rte_pci_device *dev, struct nfp_cpp *cpp)
 {
 	uint32_t model;
@@ -820,13 +768,6 @@ nfp6000_init(struct nfp_cpp *cpp, struct rte_pci_device *dev)
 			goto error;
 	}
 
-	/* Just support for one secondary process */
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
-		ret = nfp_acquire_secondary_process_lock(desc);
-		if (ret)
-			goto error;
-	}
-
 	if (nfp6000_set_model(dev, cpp) < 0)
 		goto error;
 	if (nfp6000_set_interface(dev, cpp) < 0)
@@ -836,7 +777,8 @@ nfp6000_init(struct nfp_cpp *cpp, struct rte_pci_device *dev)
 	if (nfp6000_set_barsz(dev, desc) < 0)
 		goto error;
 
-	desc->cfg = (char *)dev->mem_resource[0].addr;
+	desc->cfg = dev->mem_resource[0].addr;
+	desc->dev_id = dev->addr.function & 0x7;
 
 	nfp_enable_bars(desc);
 
@@ -857,8 +799,6 @@ nfp6000_free(struct nfp_cpp *cpp)
 	nfp_disable_bars(desc);
 	if (cpp->driver_lock_needed)
 		close(desc->lock);
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
-		close(desc->secondary_lock);
 	close(desc->device);
 	free(desc);
 }

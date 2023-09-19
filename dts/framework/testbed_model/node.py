@@ -7,7 +7,9 @@
 A node is a generic host that DTS connects to and manages.
 """
 
-from typing import Any, Callable
+from abc import ABC
+from ipaddress import IPv4Interface, IPv6Interface
+from typing import Any, Callable, Type, Union
 
 from framework.config import (
     BuildTargetConfiguration,
@@ -15,7 +17,7 @@ from framework.config import (
     NodeConfiguration,
 )
 from framework.logger import DTSLOG, getLogger
-from framework.remote_session import OSSession, create_session
+from framework.remote_session import InteractiveShellType, OSSession, create_session
 from framework.settings import SETTINGS
 
 from .hw import (
@@ -23,11 +25,13 @@ from .hw import (
     LogicalCoreCount,
     LogicalCoreList,
     LogicalCoreListFilter,
+    VirtualDevice,
     lcore_filter,
 )
+from .hw.port import Port
 
 
-class Node(object):
+class Node(ABC):
     """
     Basic class for node management. This class implements methods that
     manage a node, such as information gathering (of CPU/PCI/NIC) and
@@ -38,14 +42,19 @@ class Node(object):
     config: NodeConfiguration
     name: str
     lcores: list[LogicalCore]
+    ports: list[Port]
     _logger: DTSLOG
     _other_sessions: list[OSSession]
+    _execution_config: ExecutionConfiguration
+    virtual_devices: list[VirtualDevice]
 
     def __init__(self, node_config: NodeConfiguration):
         self.config = node_config
         self.name = node_config.name
         self._logger = getLogger(self.name)
         self.main_session = create_session(self.config, self.name, self._logger)
+
+        self._logger.info(f"Connected to node: {self.name}")
 
         self._get_remote_cpus()
         # filter the node lcores according to user config
@@ -54,8 +63,14 @@ class Node(object):
         ).filter()
 
         self._other_sessions = []
+        self.virtual_devices = []
+        self._init_ports()
 
-        self._logger.info(f"Created node: {self.name}")
+    def _init_ports(self) -> None:
+        self.ports = [Port(self.name, port_config) for port_config in self.config.ports]
+        self.main_session.update_ports(self.ports)
+        for port in self.ports:
+            self.configure_port_state(port)
 
     def set_up_execution(self, execution_config: ExecutionConfiguration) -> None:
         """
@@ -64,6 +79,9 @@ class Node(object):
         """
         self._setup_hugepages()
         self._set_up_execution(execution_config)
+        self._execution_config = execution_config
+        for vdev in execution_config.vdevs:
+            self.virtual_devices.append(VirtualDevice(vdev))
 
     def _set_up_execution(self, execution_config: ExecutionConfiguration) -> None:
         """
@@ -76,6 +94,7 @@ class Node(object):
         Perform the execution teardown that will be done after each execution
         this node is part of concludes.
         """
+        self.virtual_devices = []
         self._tear_down_execution()
 
     def _tear_down_execution(self) -> None:
@@ -127,6 +146,37 @@ class Node(object):
         self._other_sessions.append(connection)
         return connection
 
+    def create_interactive_shell(
+        self,
+        shell_cls: Type[InteractiveShellType],
+        timeout: float = SETTINGS.timeout,
+        privileged: bool = False,
+        app_args: str = "",
+    ) -> InteractiveShellType:
+        """Create a handler for an interactive session.
+
+        Instantiate shell_cls according to the remote OS specifics.
+
+        Args:
+            shell_cls: The class of the shell.
+            timeout: Timeout for reading output from the SSH channel. If you are
+                reading from the buffer and don't receive any data within the timeout
+                it will throw an error.
+            privileged: Whether to run the shell with administrative privileges.
+            app_args: The arguments to be passed to the application.
+        Returns:
+            Instance of the desired interactive application.
+        """
+        if not shell_cls.dpdk_app:
+            shell_cls.path = self.main_session.join_remote_path(shell_cls.path)
+
+        return self.main_session.create_interactive_shell(
+            shell_cls,
+            app_args,
+            timeout,
+            privileged,
+        )
+
     def filter_lcores(
         self,
         filter_specifier: LogicalCoreCount | LogicalCoreList,
@@ -165,6 +215,23 @@ class Node(object):
             self.main_session.setup_hugepages(
                 self.config.hugepages.amount, self.config.hugepages.force_first_numa
             )
+
+    def configure_port_state(self, port: Port, enable: bool = True) -> None:
+        """
+        Enable/disable port.
+        """
+        self.main_session.configure_port_state(port, enable)
+
+    def configure_port_ip_address(
+        self,
+        address: Union[IPv4Interface, IPv6Interface],
+        port: Port,
+        delete: bool = False,
+    ) -> None:
+        """
+        Configure the IP address of a port on this node.
+        """
+        self.main_session.configure_port_ip_address(address, port, delete)
 
     def close(self) -> None:
         """

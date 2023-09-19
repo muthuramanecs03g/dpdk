@@ -85,7 +85,7 @@ struct nfp_mask_id_entry {
 struct nfp_pre_tun_entry {
 	uint16_t mac_index;
 	uint16_t ref_cnt;
-	uint8_t mac_addr[RTE_ETHER_ADDR_LEN];
+	struct rte_ether_addr mac_addr;
 } __rte_aligned(32);
 
 static inline struct nfp_flow_priv *
@@ -93,7 +93,7 @@ nfp_flow_dev_to_priv(struct rte_eth_dev *dev)
 {
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	return repr->app_fw_flower->flow_priv;
 }
 
@@ -726,9 +726,8 @@ nfp_flow_key_layers_calculate_items(const struct rte_flow_item items[],
 			if (port_id->id >= RTE_MAX_ETHPORTS)
 				return -ERANGE;
 			ethdev = &rte_eth_devices[port_id->id];
-			representor = (struct nfp_flower_representor *)
-					ethdev->data->dev_private;
-			key_ls->port = rte_cpu_to_be_32(representor->port_id);
+			representor = ethdev->data->dev_private;
+			key_ls->port = representor->port_id;
 			break;
 		case RTE_FLOW_ITEM_TYPE_VLAN:
 			PMD_DRV_LOG(DEBUG, "RTE_FLOW_ITEM_TYPE_VLAN detected");
@@ -1232,6 +1231,7 @@ nfp_flow_merge_ipv6(__rte_unused struct nfp_app_fw_flower *app_fw_flower,
 		bool is_mask,
 		bool is_outer_layer)
 {
+	uint32_t vtc_flow;
 	struct nfp_flower_ipv6 *ipv6;
 	const struct rte_ipv6_hdr *hdr;
 	struct nfp_flower_meta_tci *meta_tci;
@@ -1255,12 +1255,12 @@ nfp_flow_merge_ipv6(__rte_unused struct nfp_app_fw_flower *app_fw_flower,
 
 		hdr = is_mask ? &mask->hdr : &spec->hdr;
 
+		vtc_flow = rte_be_to_cpu_32(hdr->vtc_flow);
 		if (ext_meta && (rte_be_to_cpu_32(ext_meta->nfp_flow_key_layer2) &
 				NFP_FLOWER_LAYER2_GRE)) {
 			ipv6_gre_tun = (struct nfp_flower_ipv6_gre_tun *)*mbuf_off;
 
-			ipv6_gre_tun->ip_ext.tos = (hdr->vtc_flow &
-					RTE_IPV6_HDR_TC_MASK) >> RTE_IPV6_HDR_TC_SHIFT;
+			ipv6_gre_tun->ip_ext.tos = vtc_flow >> RTE_IPV6_HDR_TC_SHIFT;
 			ipv6_gre_tun->ip_ext.ttl = hdr->hop_limits;
 			memcpy(ipv6_gre_tun->ipv6.ipv6_src, hdr->src_addr,
 					sizeof(ipv6_gre_tun->ipv6.ipv6_src));
@@ -1269,8 +1269,7 @@ nfp_flow_merge_ipv6(__rte_unused struct nfp_app_fw_flower *app_fw_flower,
 		} else {
 			ipv6_udp_tun = (struct nfp_flower_ipv6_udp_tun *)*mbuf_off;
 
-			ipv6_udp_tun->ip_ext.tos = (hdr->vtc_flow &
-					RTE_IPV6_HDR_TC_MASK) >> RTE_IPV6_HDR_TC_SHIFT;
+			ipv6_udp_tun->ip_ext.tos = vtc_flow >> RTE_IPV6_HDR_TC_SHIFT;
 			ipv6_udp_tun->ip_ext.ttl = hdr->hop_limits;
 			memcpy(ipv6_udp_tun->ipv6.ipv6_src, hdr->src_addr,
 					sizeof(ipv6_udp_tun->ipv6.ipv6_src));
@@ -1291,10 +1290,10 @@ nfp_flow_merge_ipv6(__rte_unused struct nfp_app_fw_flower *app_fw_flower,
 			*mbuf_off += sizeof(struct nfp_flower_tp_ports);
 
 		hdr = is_mask ? &mask->hdr : &spec->hdr;
+		vtc_flow = rte_be_to_cpu_32(hdr->vtc_flow);
 		ipv6 = (struct nfp_flower_ipv6 *)*mbuf_off;
 
-		ipv6->ip_ext.tos   = (hdr->vtc_flow & RTE_IPV6_HDR_TC_MASK) >>
-				RTE_IPV6_HDR_TC_SHIFT;
+		ipv6->ip_ext.tos   = vtc_flow >> RTE_IPV6_HDR_TC_SHIFT;
 		ipv6->ip_ext.proto = hdr->proto;
 		ipv6->ip_ext.ttl   = hdr->hop_limits;
 		memcpy(ipv6->ipv6_src, hdr->src_addr, sizeof(ipv6->ipv6_src));
@@ -1909,6 +1908,19 @@ nfp_flow_inner_item_get(const struct rte_flow_item items[],
 	return false;
 }
 
+static bool
+nfp_flow_tcp_flag_check(const struct rte_flow_item items[])
+{
+	const struct rte_flow_item *item;
+
+	for (item = items; item->type != RTE_FLOW_ITEM_TYPE_END; ++item) {
+		if (item->type == RTE_FLOW_ITEM_TYPE_TCP)
+			return true;
+	}
+
+	return false;
+}
+
 static int
 nfp_flow_compile_item_proc(struct nfp_flower_representor *repr,
 		const struct rte_flow_item items[],
@@ -2004,6 +2016,9 @@ nfp_flow_compile_items(struct nfp_flower_representor *representor,
 		mbuf_off_mask += sizeof(struct nfp_flower_ext_meta);
 	}
 
+	if (nfp_flow_tcp_flag_check(items))
+		nfp_flow->tcp_flag = true;
+
 	/* Check if this is a tunnel flow and get the inner item*/
 	is_tun_flow = nfp_flow_inner_item_get(items, &loop_item);
 	if (is_tun_flow)
@@ -2047,7 +2062,7 @@ nfp_flow_action_output(char *act_data,
 		return -ERANGE;
 
 	ethdev = &rte_eth_devices[port_id->id];
-	representor = (struct nfp_flower_representor *)ethdev->data->dev_private;
+	representor = ethdev->data->dev_private;
 	act_size = sizeof(struct nfp_fl_act_output);
 
 	output = (struct nfp_fl_act_output *)act_data;
@@ -2083,7 +2098,7 @@ nfp_flow_action_set_mac(char *act_data,
 	set_eth->head.len_lw  = act_size >> NFP_FL_LW_SIZ;
 	set_eth->reserved     = 0;
 
-	set_mac = (const struct rte_flow_action_set_mac *)action->conf;
+	set_mac = action->conf;
 	if (mac_src_flag) {
 		rte_memcpy(&set_eth->eth_addr[RTE_ETHER_ADDR_LEN],
 				set_mac->mac_addr, RTE_ETHER_ADDR_LEN);
@@ -2133,7 +2148,7 @@ nfp_flow_action_set_ip(char *act_data,
 	set_ip->head.len_lw  = act_size >> NFP_FL_LW_SIZ;
 	set_ip->reserved     = 0;
 
-	set_ipv4 = (const struct rte_flow_action_set_ipv4 *)action->conf;
+	set_ipv4 = action->conf;
 	if (ip_src_flag) {
 		set_ip->ipv4_src = set_ipv4->ipv4_addr;
 		set_ip->ipv4_src_mask = RTE_BE32(0xffffffff);
@@ -2149,12 +2164,13 @@ nfp_flow_action_set_ipv6(char *act_data,
 		bool ip_src_flag)
 {
 	int i;
+	rte_be32_t tmp;
 	size_t act_size;
 	struct nfp_fl_act_set_ipv6_addr *set_ip;
 	const struct rte_flow_action_set_ipv6 *set_ipv6;
 
 	set_ip = (struct nfp_fl_act_set_ipv6_addr *)act_data;
-	set_ipv6 = (const struct rte_flow_action_set_ipv6 *)action->conf;
+	set_ipv6 = action->conf;
 
 	if (ip_src_flag)
 		set_ip->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV6_SRC;
@@ -2166,7 +2182,8 @@ nfp_flow_action_set_ipv6(char *act_data,
 	set_ip->reserved = 0;
 
 	for (i = 0; i < 4; i++) {
-		set_ip->ipv6[i].exact = set_ipv6->ipv6_addr[i * 4];
+		rte_memcpy(&tmp, &set_ipv6->ipv6_addr[i * 4], 4);
+		set_ip->ipv6[i].exact = tmp;
 		set_ip->ipv6[i].mask = RTE_BE32(0xffffffff);
 	}
 }
@@ -2175,7 +2192,8 @@ static void
 nfp_flow_action_set_tp(char *act_data,
 		const struct rte_flow_action *action,
 		bool tp_src_flag,
-		bool tp_set_flag)
+		bool tp_set_flag,
+		bool tcp_flag)
 {
 	size_t act_size;
 	struct nfp_fl_act_set_tport *set_tp;
@@ -2187,11 +2205,14 @@ nfp_flow_action_set_tp(char *act_data,
 		set_tp = (struct nfp_fl_act_set_tport *)act_data;
 
 	act_size = sizeof(struct nfp_fl_act_set_tport);
-	set_tp->head.jump_id = NFP_FL_ACTION_OPCODE_SET_TCP;
+	if (tcp_flag)
+		set_tp->head.jump_id = NFP_FL_ACTION_OPCODE_SET_TCP;
+	else
+		set_tp->head.jump_id = NFP_FL_ACTION_OPCODE_SET_UDP;
 	set_tp->head.len_lw  = act_size >> NFP_FL_LW_SIZ;
 	set_tp->reserved     = 0;
 
-	set_tp_conf = (const struct rte_flow_action_set_tp *)action->conf;
+	set_tp_conf = action->conf;
 	if (tp_src_flag) {
 		set_tp->src_port = set_tp_conf->port;
 		set_tp->src_port_mask = RTE_BE16(0xffff);
@@ -2205,6 +2226,8 @@ static int
 nfp_flow_action_push_vlan(char *act_data,
 		const struct rte_flow_action *action)
 {
+	uint8_t pcp;
+	uint16_t vid;
 	size_t act_size;
 	struct nfp_fl_act_push_vlan *push_vlan;
 	const struct rte_flow_action_of_push_vlan *push_vlan_conf;
@@ -2221,15 +2244,14 @@ nfp_flow_action_push_vlan(char *act_data,
 	push_vlan->head.len_lw  = act_size >> NFP_FL_LW_SIZ;
 	push_vlan->reserved     = 0;
 
-	push_vlan_conf = (const struct rte_flow_action_of_push_vlan *)
-			action->conf;
-	vlan_pcp_conf  = (const struct rte_flow_action_of_set_vlan_pcp *)
-			(action + 1)->conf;
-	vlan_vid_conf  = (const struct rte_flow_action_of_set_vlan_vid *)
-			(action + 2)->conf;
+	push_vlan_conf = action->conf;
+	vlan_pcp_conf  = (action + 1)->conf;
+	vlan_vid_conf  = (action + 2)->conf;
+
+	vid = rte_be_to_cpu_16(vlan_vid_conf->vlan_vid) & 0x0fff;
+	pcp = vlan_pcp_conf->vlan_pcp & 0x07;
 	push_vlan->vlan_tpid = push_vlan_conf->ethertype;
-	push_vlan->vlan_tci = ((vlan_pcp_conf->vlan_pcp & 0x07) << 13) |
-			(vlan_vid_conf->vlan_vid & 0x0fff);
+	push_vlan->vlan_tci = rte_cpu_to_be_16(vid | (pcp << 13));
 
 	return 0;
 }
@@ -2252,7 +2274,7 @@ nfp_flow_action_set_ttl(char *act_data,
 	ttl_tos->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV4_TTL_TOS;
 	ttl_tos->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
-	ttl_conf = (const struct rte_flow_action_set_ttl *)action->conf;
+	ttl_conf = action->conf;
 	ttl_tos->ipv4_ttl = ttl_conf->ttl_value;
 	ttl_tos->ipv4_ttl_mask = 0xff;
 	ttl_tos->reserved = 0;
@@ -2276,7 +2298,7 @@ nfp_flow_action_set_hl(char *act_data,
 	tc_hl->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV6_TC_HL_FL;
 	tc_hl->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
-	ttl_conf = (const struct rte_flow_action_set_ttl *)action->conf;
+	ttl_conf = action->conf;
 	tc_hl->ipv6_hop_limit = ttl_conf->ttl_value;
 	tc_hl->ipv6_hop_limit_mask = 0xff;
 	tc_hl->reserved = 0;
@@ -2300,7 +2322,7 @@ nfp_flow_action_set_tos(char *act_data,
 	ttl_tos->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV4_TTL_TOS;
 	ttl_tos->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
-	tos_conf = (const struct rte_flow_action_set_dscp *)action->conf;
+	tos_conf = action->conf;
 	ttl_tos->ipv4_tos = tos_conf->dscp;
 	ttl_tos->ipv4_tos_mask = 0xff;
 	ttl_tos->reserved = 0;
@@ -2324,7 +2346,7 @@ nfp_flow_action_set_tc(char *act_data,
 	tc_hl->head.jump_id = NFP_FL_ACTION_OPCODE_SET_IPV6_TC_HL_FL;
 	tc_hl->head.len_lw = act_size >> NFP_FL_LW_SIZ;
 
-	tos_conf = (const struct rte_flow_action_set_dscp *)action->conf;
+	tos_conf = action->conf;
 	tc_hl->ipv6_tc = tos_conf->dscp;
 	tc_hl->ipv6_tc_mask = 0xff;
 	tc_hl->reserved = 0;
@@ -2474,10 +2496,10 @@ nfp_flower_add_tun_neigh_v4_decap(struct nfp_app_fw_flower *app_fw_flower,
 	if (nfp_flower_support_decap_v2(app_fw_flower)) {
 		if (meta_tci->tci != 0) {
 			payload.ext.vlan_tci = meta_tci->tci;
-			payload.ext.vlan_tpid = 0x88a8;
+			payload.ext.vlan_tpid = RTE_BE16(0x88a8);
 		} else {
-			payload.ext.vlan_tci = 0xffff;
-			payload.ext.vlan_tpid = 0xffff;
+			payload.ext.vlan_tci = RTE_BE16(0xffff);
+			payload.ext.vlan_tpid = RTE_BE16(0xffff);
 		}
 		payload.ext.host_ctx = nfp_flow_meta->host_ctx_id;
 	}
@@ -2601,10 +2623,10 @@ nfp_flower_add_tun_neigh_v6_decap(struct nfp_app_fw_flower *app_fw_flower,
 	if (nfp_flower_support_decap_v2(app_fw_flower)) {
 		if (meta_tci->tci != 0) {
 			payload.ext.vlan_tci = meta_tci->tci;
-			payload.ext.vlan_tpid = 0x88a8;
+			payload.ext.vlan_tpid = RTE_BE16(0x88a8);
 		} else {
-			payload.ext.vlan_tci = 0xffff;
-			payload.ext.vlan_tpid = 0xffff;
+			payload.ext.vlan_tci = RTE_BE16(0xffff);
+			payload.ext.vlan_tpid = RTE_BE16(0xffff);
 		}
 		payload.ext.host_ctx = nfp_flow_meta->host_ctx_id;
 	}
@@ -2715,9 +2737,9 @@ nfp_flow_action_vxlan_encap_v4(struct nfp_app_fw_flower *app_fw_flower,
 	size_t act_pre_size = sizeof(struct nfp_fl_act_pre_tun);
 	size_t act_set_size = sizeof(struct nfp_fl_act_set_tun);
 
-	eth   = (const struct rte_flow_item_eth *)vxlan_data->items[0].spec;
-	ipv4  = (const struct rte_flow_item_ipv4 *)vxlan_data->items[1].spec;
-	vxlan = (const struct rte_flow_item_vxlan *)vxlan_data->items[3].spec;
+	eth   = vxlan_data->items[0].spec;
+	ipv4  = vxlan_data->items[1].spec;
+	vxlan = vxlan_data->items[3].spec;
 
 	pre_tun = (struct nfp_fl_act_pre_tun *)actions;
 	memset(pre_tun, 0, act_pre_size);
@@ -2725,7 +2747,7 @@ nfp_flow_action_vxlan_encap_v4(struct nfp_app_fw_flower *app_fw_flower,
 
 	set_tun = (struct nfp_fl_act_set_tun *)(act_data + act_pre_size);
 	memset(set_tun, 0, act_set_size);
-	tun_id = rte_be_to_cpu_32(vxlan->hdr.vx_vni);
+	tun_id = rte_be_to_cpu_32(vxlan->hdr.vx_vni) >> 8;
 	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_VXLAN, tun_id,
 			ipv4->hdr.time_to_live, ipv4->hdr.type_of_service);
 	set_tun->tun_flags = vxlan->hdr.vx_flags;
@@ -2743,6 +2765,7 @@ nfp_flow_action_vxlan_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 		struct nfp_fl_rule_metadata *nfp_flow_meta,
 		struct nfp_fl_tun *tun)
 {
+	uint8_t tos;
 	uint64_t tun_id;
 	struct nfp_fl_act_pre_tun *pre_tun;
 	struct nfp_fl_act_set_tun *set_tun;
@@ -2752,9 +2775,9 @@ nfp_flow_action_vxlan_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 	size_t act_pre_size = sizeof(struct nfp_fl_act_pre_tun);
 	size_t act_set_size = sizeof(struct nfp_fl_act_set_tun);
 
-	eth   = (const struct rte_flow_item_eth *)vxlan_data->items[0].spec;
-	ipv6  = (const struct rte_flow_item_ipv6 *)vxlan_data->items[1].spec;
-	vxlan = (const struct rte_flow_item_vxlan *)vxlan_data->items[3].spec;
+	eth   = vxlan_data->items[0].spec;
+	ipv6  = vxlan_data->items[1].spec;
+	vxlan = vxlan_data->items[3].spec;
 
 	pre_tun = (struct nfp_fl_act_pre_tun *)actions;
 	memset(pre_tun, 0, act_pre_size);
@@ -2762,10 +2785,10 @@ nfp_flow_action_vxlan_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 
 	set_tun = (struct nfp_fl_act_set_tun *)(act_data + act_pre_size);
 	memset(set_tun, 0, act_set_size);
-	tun_id = rte_be_to_cpu_32(vxlan->hdr.vx_vni);
+	tun_id = rte_be_to_cpu_32(vxlan->hdr.vx_vni) >> 8;
+	tos = rte_be_to_cpu_32(ipv6->hdr.vtc_flow) >> RTE_IPV6_HDR_TC_SHIFT;
 	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_VXLAN, tun_id,
-			ipv6->hdr.hop_limits,
-			(ipv6->hdr.vtc_flow >> RTE_IPV6_HDR_TC_SHIFT) & 0xff);
+			ipv6->hdr.hop_limits, tos);
 	set_tun->tun_flags = vxlan->hdr.vx_flags;
 
 	/* Send the tunnel neighbor cmsg to fw */
@@ -2894,7 +2917,7 @@ nfp_pre_tun_table_check_add(struct nfp_flower_representor *repr,
 	}
 
 	entry->ref_cnt = 1U;
-	memcpy(entry->mac_addr, repr->mac_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+	rte_ether_addr_copy(&repr->mac_addr, &entry->mac_addr);
 
 	/* 0 is considered a failed match */
 	for (i = 1; i < NFP_TUN_PRE_TUN_RULE_LIMIT; i++) {
@@ -2954,7 +2977,7 @@ nfp_pre_tun_table_check_del(struct nfp_flower_representor *repr,
 	}
 
 	entry->ref_cnt = 1U;
-	memcpy(entry->mac_addr, repr->mac_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+	rte_ether_addr_copy(&repr->mac_addr, &entry->mac_addr);
 
 	/* 0 is considered a failed match */
 	for (i = 1; i < NFP_TUN_PRE_TUN_RULE_LIMIT; i++) {
@@ -3129,7 +3152,7 @@ nfp_flow_action_geneve_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 
 	set_tun = (struct nfp_fl_act_set_tun *)(act_data + act_pre_size);
 	memset(set_tun, 0, act_set_size);
-	tos = (ipv6->hdr.vtc_flow >> RTE_IPV6_HDR_TC_SHIFT) & 0xff;
+	tos = rte_be_to_cpu_32(ipv6->hdr.vtc_flow) >> RTE_IPV6_HDR_TC_SHIFT;
 	tun_id = (geneve->vni[0] << 16) | (geneve->vni[1] << 8) | geneve->vni[2];
 	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_GENEVE, tun_id,
 			ipv6->hdr.hop_limits, tos);
@@ -3148,6 +3171,7 @@ nfp_flow_action_nvgre_encap_v4(struct nfp_app_fw_flower *app_fw_flower,
 		struct nfp_fl_rule_metadata *nfp_flow_meta,
 		struct nfp_fl_tun *tun)
 {
+	uint64_t tun_id;
 	const struct rte_ether_hdr *eth;
 	const struct rte_flow_item_ipv4 *ipv4;
 	const struct rte_flow_item_gre *gre;
@@ -3159,6 +3183,7 @@ nfp_flow_action_nvgre_encap_v4(struct nfp_app_fw_flower *app_fw_flower,
 	eth  = (const struct rte_ether_hdr *)raw_encap->data;
 	ipv4 = (const struct rte_flow_item_ipv4 *)(eth + 1);
 	gre  = (const struct rte_flow_item_gre *)(ipv4 + 1);
+	tun_id = rte_be_to_cpu_32(*(const rte_be32_t *)(gre + 1));
 
 	pre_tun = (struct nfp_fl_act_pre_tun *)actions;
 	memset(pre_tun, 0, act_pre_size);
@@ -3166,7 +3191,7 @@ nfp_flow_action_nvgre_encap_v4(struct nfp_app_fw_flower *app_fw_flower,
 
 	set_tun = (struct nfp_fl_act_set_tun *)(act_data + act_pre_size);
 	memset(set_tun, 0, act_set_size);
-	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_GRE, 0,
+	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_GRE, tun_id,
 			ipv4->hdr.time_to_live, ipv4->hdr.type_of_service);
 	set_tun->tun_proto = gre->protocol;
 
@@ -3184,6 +3209,7 @@ nfp_flow_action_nvgre_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 		struct nfp_fl_tun *tun)
 {
 	uint8_t tos;
+	uint64_t tun_id;
 	const struct rte_ether_hdr *eth;
 	const struct rte_flow_item_ipv6 *ipv6;
 	const struct rte_flow_item_gre *gre;
@@ -3195,6 +3221,7 @@ nfp_flow_action_nvgre_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 	eth    = (const struct rte_ether_hdr *)raw_encap->data;
 	ipv6   = (const struct rte_flow_item_ipv6 *)(eth + 1);
 	gre    = (const struct rte_flow_item_gre *)(ipv6 + 1);
+	tun_id = rte_be_to_cpu_32(*(const rte_be32_t *)(gre + 1));
 
 	pre_tun = (struct nfp_fl_act_pre_tun *)actions;
 	memset(pre_tun, 0, act_pre_size);
@@ -3202,8 +3229,8 @@ nfp_flow_action_nvgre_encap_v6(struct nfp_app_fw_flower *app_fw_flower,
 
 	set_tun = (struct nfp_fl_act_set_tun *)(act_data + act_pre_size);
 	memset(set_tun, 0, act_set_size);
-	tos = (ipv6->hdr.vtc_flow >> RTE_IPV6_HDR_TC_SHIFT) & 0xff;
-	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_GRE, 0,
+	tos = rte_be_to_cpu_32(ipv6->hdr.vtc_flow) >> RTE_IPV6_HDR_TC_SHIFT;
+	nfp_flow_set_tun_process(set_tun, NFP_FL_TUN_GRE, tun_id,
 			ipv6->hdr.hop_limits, tos);
 	set_tun->tun_proto = gre->protocol;
 
@@ -3442,7 +3469,8 @@ nfp_flow_compile_action(struct nfp_flower_representor *representor,
 			break;
 		case RTE_FLOW_ACTION_TYPE_SET_TP_SRC:
 			PMD_DRV_LOG(DEBUG, "Process RTE_FLOW_ACTION_TYPE_SET_TP_SRC");
-			nfp_flow_action_set_tp(position, action, true, tp_set_flag);
+			nfp_flow_action_set_tp(position, action, true,
+					tp_set_flag, nfp_flow->tcp_flag);
 			if (!tp_set_flag) {
 				position += sizeof(struct nfp_fl_act_set_tport);
 				tp_set_flag = true;
@@ -3450,7 +3478,8 @@ nfp_flow_compile_action(struct nfp_flower_representor *representor,
 			break;
 		case RTE_FLOW_ACTION_TYPE_SET_TP_DST:
 			PMD_DRV_LOG(DEBUG, "Process RTE_FLOW_ACTION_TYPE_SET_TP_DST");
-			nfp_flow_action_set_tp(position, action, false, tp_set_flag);
+			nfp_flow_action_set_tp(position, action, false,
+					tp_set_flag, nfp_flow->tcp_flag);
 			if (!tp_set_flag) {
 				position += sizeof(struct nfp_fl_act_set_tport);
 				tp_set_flag = true;
@@ -3622,7 +3651,7 @@ nfp_flow_process(struct nfp_flower_representor *representor,
 	nfp_flower_update_meta_tci(nfp_flow->payload.unmasked_data, new_mask_id);
 
 	/* Calculate and store the hash_key for later use */
-	hash_data = (char *)(nfp_flow->payload.unmasked_data);
+	hash_data = nfp_flow->payload.unmasked_data;
 	nfp_flow->hash_key = rte_jhash(hash_data, nfp_flow->length, priv->hash_seed);
 
 	/* Find the flow in hash table */
@@ -3712,7 +3741,7 @@ nfp_flow_validate(struct rte_eth_dev *dev,
 	struct nfp_flow_priv *priv;
 	struct nfp_flower_representor *representor;
 
-	representor = (struct nfp_flower_representor *)dev->data->dev_private;
+	representor = dev->data->dev_private;
 	priv = representor->app_fw_flower->flow_priv;
 
 	nfp_flow = nfp_flow_setup(representor, attr, items, actions, error, true);
@@ -3747,7 +3776,7 @@ nfp_flow_create(struct rte_eth_dev *dev,
 	struct nfp_app_fw_flower *app_fw_flower;
 	struct nfp_flower_representor *representor;
 
-	representor = (struct nfp_flower_representor *)dev->data->dev_private;
+	representor = dev->data->dev_private;
 	app_fw_flower = representor->app_fw_flower;
 	priv = app_fw_flower->flow_priv;
 
@@ -3809,7 +3838,7 @@ nfp_flow_destroy(struct rte_eth_dev *dev,
 	struct nfp_app_fw_flower *app_fw_flower;
 	struct nfp_flower_representor *representor;
 
-	representor = (struct nfp_flower_representor *)dev->data->dev_private;
+	representor = dev->data->dev_private;
 	app_fw_flower = representor->app_fw_flower;
 	priv = app_fw_flower->flow_priv;
 
@@ -3945,7 +3974,7 @@ nfp_flow_stats_get(struct rte_eth_dev *dev,
 		return;
 	}
 
-	query = (struct rte_flow_query_count *)data;
+	query = data;
 	reset = query->reset;
 	memset(query, 0, sizeof(*query));
 
@@ -4105,11 +4134,19 @@ nfp_flow_priv_init(struct nfp_pf_dev *pf_dev)
 	size_t stats_size;
 	uint64_t ctx_count;
 	uint64_t ctx_split;
+	char mask_name[RTE_HASH_NAMESIZE];
+	char flow_name[RTE_HASH_NAMESIZE];
+	char pretun_name[RTE_HASH_NAMESIZE];
 	struct nfp_flow_priv *priv;
 	struct nfp_app_fw_flower *app_fw_flower;
+	const char *pci_name = strchr(pf_dev->pci_dev->name, ':') + 1;
+
+	snprintf(mask_name, sizeof(mask_name), "%s_mask", pci_name);
+	snprintf(flow_name, sizeof(flow_name), "%s_flow", pci_name);
+	snprintf(pretun_name, sizeof(pretun_name), "%s_pretun", pci_name);
 
 	struct rte_hash_parameters mask_hash_params = {
-		.name       = "mask_hash_table",
+		.name       = mask_name,
 		.entries    = NFP_MASK_TABLE_ENTRIES,
 		.hash_func  = rte_jhash,
 		.socket_id  = rte_socket_id(),
@@ -4118,7 +4155,7 @@ nfp_flow_priv_init(struct nfp_pf_dev *pf_dev)
 	};
 
 	struct rte_hash_parameters flow_hash_params = {
-		.name       = "flow_hash_table",
+		.name       = flow_name,
 		.hash_func  = rte_jhash,
 		.socket_id  = rte_socket_id(),
 		.key_len    = sizeof(uint32_t),
@@ -4126,7 +4163,7 @@ nfp_flow_priv_init(struct nfp_pf_dev *pf_dev)
 	};
 
 	struct rte_hash_parameters pre_tun_hash_params = {
-		.name       = "pre_tunnel_table",
+		.name       = pretun_name,
 		.entries    = 32,
 		.hash_func  = rte_jhash,
 		.socket_id  = rte_socket_id(),

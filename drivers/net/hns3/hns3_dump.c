@@ -68,12 +68,14 @@ hns3_get_dev_mac_info(FILE *file, struct hns3_adapter *hns)
 
 	fprintf(file, "  - MAC Info:\n");
 	fprintf(file,
+		"\t  -- media_type=%s\n"
 		"\t  -- query_type=%u\n"
 		"\t  -- supported_speed=0x%x\n"
 		"\t  -- advertising=0x%x\n"
 		"\t  -- lp_advertising=0x%x\n"
 		"\t  -- support_autoneg=%s\n"
 		"\t  -- support_fc_autoneg=%s\n",
+		hns3_get_media_type_name(hw->mac.media_type),
 		hw->mac.query_type,
 		hw->mac.supported_speed,
 		hw->mac.advertising,
@@ -96,11 +98,13 @@ hns3_get_dev_feature_capability(FILE *file, struct hns3_hw *hw)
 		{HNS3_DEV_SUPPORT_TX_PUSH_B, "TX PUSH"},
 		{HNS3_DEV_SUPPORT_INDEP_TXRX_B, "INDEP TXRX"},
 		{HNS3_DEV_SUPPORT_STASH_B, "STASH"},
+		{HNS3_DEV_SUPPORT_SIMPLE_BD_B, "SIMPLE BD"},
 		{HNS3_DEV_SUPPORT_RXD_ADV_LAYOUT_B, "RXD Advanced Layout"},
 		{HNS3_DEV_SUPPORT_OUTER_UDP_CKSUM_B, "OUTER UDP CKSUM"},
 		{HNS3_DEV_SUPPORT_RAS_IMP_B, "RAS IMP"},
 		{HNS3_DEV_SUPPORT_TM_B, "TM"},
 		{HNS3_DEV_SUPPORT_VF_VLAN_FLT_MOD_B, "VF VLAN FILTER MOD"},
+		{HNS3_DEV_SUPPORT_FC_AUTO_B, "FC AUTO"}
 	};
 	uint32_t i;
 

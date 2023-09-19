@@ -237,6 +237,8 @@ vhost_backend_cleanup(struct virtio_net *dev)
 	}
 
 	dev->postcopy_listening = 0;
+
+	vhost_user_iotlb_destroy(dev);
 }
 
 static void
@@ -399,7 +401,7 @@ vhost_user_set_features(struct virtio_net **pdev,
 			cleanup_vq_inflight(dev, vq);
 			/* vhost_user_lock_all_queue_pairs locked all qps */
 			vq_assert_lock(dev, vq);
-			rte_spinlock_unlock(&vq->access_lock);
+			rte_rwlock_write_unlock(&vq->access_lock);
 			free_vq(dev, vq);
 		}
 	}
@@ -539,7 +541,6 @@ numa_realloc(struct virtio_net **pdev, struct vhost_virtqueue **pvq)
 	if (vq != dev->virtqueue[vq->index]) {
 		VHOST_LOG_CONFIG(dev->ifname, INFO, "reallocated virtqueue on node %d\n", node);
 		dev->virtqueue[vq->index] = vq;
-		vhost_user_iotlb_init(dev, vq);
 	}
 
 	if (vq_is_packed(dev)) {
@@ -664,6 +665,8 @@ out_dev_realloc:
 		return;
 	}
 	dev->guest_pages = gp;
+
+	vhost_user_iotlb_init(dev);
 }
 #else
 static void
@@ -740,7 +743,7 @@ log_addr_to_gpa(struct virtio_net *dev, struct vhost_virtqueue *vq)
 	return log_gpa;
 }
 
-uint64_t
+static uint64_t
 hua_to_alignment(struct rte_vhost_memory *mem, void *ptr)
 {
 	struct rte_vhost_mem_region *r;
@@ -1360,8 +1363,7 @@ vhost_user_set_mem_table(struct virtio_net **pdev,
 
 		/* Flush IOTLB cache as previous HVAs are now invalid */
 		if (dev->features & (1ULL << VIRTIO_F_IOMMU_PLATFORM))
-			for (i = 0; i < dev->nr_vring; i++)
-				vhost_user_iotlb_flush_all(dev, dev->virtqueue[i]);
+			vhost_user_iotlb_flush_all(dev);
 
 		free_mem_region(dev);
 		rte_free(dev->mem);
@@ -2194,7 +2196,7 @@ vhost_user_get_vring_base(struct virtio_net **pdev,
 	ctx->msg.size = sizeof(ctx->msg.payload.state);
 	ctx->fd_num = 0;
 
-	vhost_user_iotlb_flush_all(dev, vq);
+	vhost_user_iotlb_flush_all(dev);
 
 	vring_invalidate(dev, vq);
 
@@ -2630,7 +2632,7 @@ vhost_user_iotlb_msg(struct virtio_net **pdev,
 	struct virtio_net *dev = *pdev;
 	struct vhost_iotlb_msg *imsg = &ctx->msg.payload.iotlb;
 	uint16_t i;
-	uint64_t vva, len;
+	uint64_t vva, len, pg_sz;
 
 	switch (imsg->type) {
 	case VHOST_IOTLB_UPDATE:
@@ -2639,43 +2641,42 @@ vhost_user_iotlb_msg(struct virtio_net **pdev,
 		if (!vva)
 			return RTE_VHOST_MSG_RESULT_ERR;
 
+		pg_sz = hua_to_alignment(dev->mem, (void *)(uintptr_t)vva);
+
+		vhost_user_iotlb_cache_insert(dev, imsg->iova, vva, 0, len, pg_sz, imsg->perm);
+
 		for (i = 0; i < dev->nr_vring; i++) {
 			struct vhost_virtqueue *vq = dev->virtqueue[i];
 
 			if (!vq)
 				continue;
 
-			vhost_user_iotlb_cache_insert(dev, vq, imsg->iova, vva,
-					len, imsg->perm);
-
 			if (is_vring_iotlb(dev, vq, imsg)) {
-				rte_spinlock_lock(&vq->access_lock);
+				rte_rwlock_write_lock(&vq->access_lock);
 				translate_ring_addresses(&dev, &vq);
 				*pdev = dev;
-				rte_spinlock_unlock(&vq->access_lock);
+				rte_rwlock_write_unlock(&vq->access_lock);
 			}
 		}
 		break;
 	case VHOST_IOTLB_INVALIDATE:
+		vhost_user_iotlb_cache_remove(dev, imsg->iova, imsg->size);
+
 		for (i = 0; i < dev->nr_vring; i++) {
 			struct vhost_virtqueue *vq = dev->virtqueue[i];
 
 			if (!vq)
 				continue;
 
-			vhost_user_iotlb_cache_remove(dev, vq, imsg->iova,
-					imsg->size);
-
 			if (is_vring_iotlb(dev, vq, imsg)) {
-				rte_spinlock_lock(&vq->access_lock);
+				rte_rwlock_write_lock(&vq->access_lock);
 				vring_invalidate(dev, vq);
-				rte_spinlock_unlock(&vq->access_lock);
+				rte_rwlock_write_unlock(&vq->access_lock);
 			}
 		}
 		break;
 	default:
-		VHOST_LOG_CONFIG(dev->ifname, ERR,
-			"invalid IOTLB message type (%d)\n",
+		VHOST_LOG_CONFIG(dev->ifname, ERR, "invalid IOTLB message type (%d)\n",
 			imsg->type);
 		return RTE_VHOST_MSG_RESULT_ERR;
 	}
@@ -3030,7 +3031,7 @@ vhost_user_lock_all_queue_pairs(struct virtio_net *dev)
 		struct vhost_virtqueue *vq = dev->virtqueue[i];
 
 		if (vq) {
-			rte_spinlock_lock(&vq->access_lock);
+			rte_rwlock_write_lock(&vq->access_lock);
 			vq_num++;
 		}
 		i++;
@@ -3048,7 +3049,7 @@ vhost_user_unlock_all_queue_pairs(struct virtio_net *dev)
 		struct vhost_virtqueue *vq = dev->virtqueue[i];
 
 		if (vq) {
-			rte_spinlock_unlock(&vq->access_lock);
+			rte_rwlock_write_unlock(&vq->access_lock);
 			vq_num++;
 		}
 		i++;
@@ -3304,7 +3305,7 @@ out:
 	return ret;
 }
 
-int
+static int
 vhost_user_iotlb_miss(struct virtio_net *dev, uint64_t iova, uint8_t perm)
 {
 	int ret;
@@ -3462,4 +3463,24 @@ disable:
 	}
 
 	return ret;
+}
+
+static int
+vhost_user_inject_irq(struct virtio_net *dev __rte_unused, struct vhost_virtqueue *vq)
+{
+	if (vq->callfd < 0)
+		return -1;
+
+	return eventfd_write(vq->callfd, (eventfd_t)1);
+}
+
+static struct vhost_backend_ops vhost_user_backend_ops = {
+	.iotlb_miss = vhost_user_iotlb_miss,
+	.inject_irq = vhost_user_inject_irq,
+};
+
+int
+vhost_user_new_device(void)
+{
+	return vhost_new_device(&vhost_user_backend_ops);
 }

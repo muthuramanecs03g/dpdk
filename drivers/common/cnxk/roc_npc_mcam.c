@@ -542,6 +542,7 @@ npc_mcam_fetch_kex_cfg(struct npc *npc)
 	mbox_memcpy((char *)npc->profile_name, kex_rsp->mkex_pfl_name,
 		    MKEX_NAME_LEN);
 
+	npc->exact_match_ena = (kex_rsp->rx_keyx_cfg >> 40) & 0xF;
 	npc_mcam_process_mkex_cfg(npc, kex_rsp);
 
 done:
@@ -587,9 +588,47 @@ npc_mcam_set_channel(struct roc_npc_flow *flow,
 	flow->mcam_mask[0] |= (uint64_t)mask;
 }
 
+static int
+npc_mcam_set_pf_func(struct npc *npc, struct roc_npc_flow *flow, uint16_t pf_func)
+{
+#define NPC_PF_FUNC_WIDTH    2
+#define NPC_KEX_PF_FUNC_MASK 0xFFFF
+	uint16_t nr_bytes, hdr_offset, key_offset, pf_func_offset;
+	uint8_t *flow_mcam_data, *flow_mcam_mask;
+	struct npc_lid_lt_xtract_info *xinfo;
+	bool pffunc_found = false;
+	uint16_t mask = 0xFFFF;
+	int i;
+
+	flow_mcam_data = (uint8_t *)flow->mcam_data;
+	flow_mcam_mask = (uint8_t *)flow->mcam_mask;
+
+	xinfo = &npc->prx_dxcfg[NIX_INTF_TX][NPC_LID_LA][NPC_LT_LA_IH_NIX_ETHER];
+
+	for (i = 0; i < NPC_MAX_LD; i++) {
+		nr_bytes = xinfo->xtract[i].len;
+		hdr_offset = xinfo->xtract[i].hdr_off;
+		key_offset = xinfo->xtract[i].key_off;
+
+		if (hdr_offset > 0 || nr_bytes < NPC_PF_FUNC_WIDTH)
+			continue;
+		else
+			pffunc_found = true;
+
+		pf_func_offset = key_offset + nr_bytes - NPC_PF_FUNC_WIDTH;
+		memcpy((void *)&flow_mcam_data[pf_func_offset], (uint8_t *)&pf_func,
+		       NPC_PF_FUNC_WIDTH);
+		memcpy((void *)&flow_mcam_mask[pf_func_offset], (uint8_t *)&mask,
+		       NPC_PF_FUNC_WIDTH);
+	}
+	if (!pffunc_found)
+		return -EINVAL;
+
+	return 0;
+}
+
 int
-npc_mcam_alloc_and_write(struct npc *npc, struct roc_npc_flow *flow,
-			 struct npc_parse_state *pst)
+npc_mcam_alloc_and_write(struct npc *npc, struct roc_npc_flow *flow, struct npc_parse_state *pst)
 {
 	struct npc_mcam_write_entry_req *req;
 	struct nix_inl_dev *inl_dev = NULL;
@@ -668,6 +707,16 @@ npc_mcam_alloc_and_write(struct npc *npc, struct roc_npc_flow *flow,
 	 */
 	req->entry_data.vtag_action = flow->vtag_action;
 
+	if (flow->nix_intf == NIX_INTF_TX) {
+		uint16_t pf_func = (flow->npc_action >> 4) & 0xffff;
+
+		pf_func = plt_cpu_to_be_16(pf_func);
+
+		rc = npc_mcam_set_pf_func(npc, flow, pf_func);
+		if (rc)
+			return rc;
+	}
+
 	for (idx = 0; idx < ROC_NPC_MAX_MCAM_WIDTH_DWORDS; idx++) {
 		req->entry_data.kw[idx] = flow->mcam_data[idx];
 		req->entry_data.kw_mask[idx] = flow->mcam_mask[idx];
@@ -696,7 +745,7 @@ npc_mcam_alloc_and_write(struct npc *npc, struct roc_npc_flow *flow,
 		 * For all other rules, set LA LTYPE to match both 1st pass and 2nd pass ltypes.
 		 */
 		if (pst->is_second_pass_rule || (!pst->is_second_pass_rule && pst->has_eth_type)) {
-			la_offset = __builtin_popcount(npc->keyx_supp_nmask[flow->nix_intf] &
+			la_offset = rte_popcount32(npc->keyx_supp_nmask[flow->nix_intf] &
 						       ((1ULL << 9 /* LA offset */) - 1));
 			la_offset *= 4;
 
@@ -718,15 +767,6 @@ npc_mcam_alloc_and_write(struct npc *npc, struct roc_npc_flow *flow,
 				flow->mcam_mask[0] |= (0x7ULL << la_offset);
 			}
 		}
-	} else {
-		uint16_t pf_func = (flow->npc_action >> 4) & 0xffff;
-
-		pf_func = plt_cpu_to_be_16(pf_func);
-		req->entry_data.kw[0] |= ((uint64_t)pf_func << 32);
-		req->entry_data.kw_mask[0] |= ((uint64_t)0xffff << 32);
-
-		flow->mcam_data[0] |= ((uint64_t)pf_func << 32);
-		flow->mcam_mask[0] |= ((uint64_t)0xffff << 32);
 	}
 
 	rc = mbox_process_msg(mbox, (void *)&rsp);
@@ -750,7 +790,7 @@ npc_set_vlan_ltype(struct npc_parse_state *pst)
 	uint8_t lb_offset;
 
 	lb_offset =
-		__builtin_popcount(pst->npc->keyx_supp_nmask[pst->nix_intf] &
+		rte_popcount32(pst->npc->keyx_supp_nmask[pst->nix_intf] &
 				   ((1ULL << NPC_LTYPE_LB_OFFSET) - 1));
 	lb_offset *= 4;
 
@@ -772,7 +812,7 @@ npc_set_ipv6ext_ltype_mask(struct npc_parse_state *pst)
 	uint64_t val, mask;
 
 	lc_offset =
-		__builtin_popcount(pst->npc->keyx_supp_nmask[pst->nix_intf] &
+		rte_popcount32(pst->npc->keyx_supp_nmask[pst->nix_intf] &
 				   ((1ULL << NPC_LTYPE_LC_OFFSET) - 1));
 	lc_offset *= 4;
 
@@ -795,7 +835,7 @@ npc_set_ipv6ext_ltype_mask(struct npc_parse_state *pst)
 	 * zero in LFLAG.
 	 */
 	if (pst->npc->keyx_supp_nmask[pst->nix_intf] & (1ULL << NPC_LFLAG_LC_OFFSET)) {
-		lcflag_offset = __builtin_popcount(pst->npc->keyx_supp_nmask[pst->nix_intf] &
+		lcflag_offset = rte_popcount32(pst->npc->keyx_supp_nmask[pst->nix_intf] &
 						   ((1ULL << NPC_LFLAG_LC_OFFSET) - 1));
 		lcflag_offset *= 4;
 

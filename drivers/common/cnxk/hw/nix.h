@@ -363,6 +363,8 @@
 #define NIX_LF_SQ_OP_STATUS	 (0xa30ull)
 #define NIX_LF_SQ_OP_DROP_OCTS	 (0xa40ull)
 #define NIX_LF_SQ_OP_DROP_PKTS	 (0xa50ull)
+#define NIX_LF_SQ_OP_AGE_DROP_OCTS (0xa60ull) /* [CN10K, .) */
+#define NIX_LF_SQ_OP_AGE_DROP_PKTS (0xa70ull) /* [CN10K, .) */
 #define NIX_LF_CQ_OP_INT	 (0xb00ull)
 #define NIX_LF_CQ_OP_DOOR	 (0xb30ull)
 #define NIX_LF_CQ_OP_STATUS	 (0xb40ull)
@@ -1620,7 +1622,6 @@ struct nix_send_crc_s {
 };
 
 /* NIX send extended header sub descriptor structure */
-PLT_STD_C11
 union nix_send_ext_w0_u {
 	uint64_t u;
 	struct {
@@ -1640,7 +1641,6 @@ union nix_send_ext_w0_u {
 	};
 };
 
-PLT_STD_C11
 union nix_send_ext_w1_u {
 	uint64_t u;
 	struct {
@@ -1670,7 +1670,6 @@ struct nix_send_ext_s {
 };
 
 /* NIX send header sub descriptor structure */
-PLT_STD_C11
 union nix_send_hdr_w0_u {
 	uint64_t u;
 	struct {
@@ -1684,7 +1683,6 @@ union nix_send_hdr_w0_u {
 	};
 };
 
-PLT_STD_C11
 union nix_send_hdr_w1_u {
 	uint64_t u;
 	struct {
@@ -1726,7 +1724,6 @@ struct nix_send_jump_s {
 };
 
 /* NIX send memory sub descriptor structure */
-PLT_STD_C11
 union nix_send_mem_w0_u {
 	uint64_t u;
 	struct {
@@ -1754,7 +1751,6 @@ struct nix_send_mem_s {
 };
 
 /* NIX send scatter/gather sub descriptor structure */
-PLT_STD_C11
 union nix_send_sg2_s {
 	uint64_t u;
 	struct {
@@ -1769,7 +1765,6 @@ union nix_send_sg2_s {
 	};
 };
 
-PLT_STD_C11
 union nix_send_sg_s {
 	uint64_t u;
 	struct {
@@ -2126,7 +2121,7 @@ struct nix_lso_format {
 #define NIX_SDP_MAX_HW_FRS  65535UL
 #define NIX_SDP_16K_HW_FRS  16380UL
 #define NIX_RPM_MAX_HW_FRS  16380UL
-#define NIX_MIN_HW_FRS	    60UL
+#define NIX_MIN_HW_FRS	    40UL
 
 /** NIX policer rate limits */
 #define NIX_BPF_MAX_RATE_DIV_EXP  12

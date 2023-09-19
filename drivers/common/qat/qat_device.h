@@ -17,12 +17,13 @@
 
 #define QAT_DEV_NAME_MAX_LEN	64
 
-#define QAT_IPSEC_MB_LIB "qat_ipsec_mb_lib"
+#define QAT_LEGACY_CAPA "qat_legacy_capa"
 #define SYM_ENQ_THRESHOLD_NAME "qat_sym_enq_threshold"
 #define ASYM_ENQ_THRESHOLD_NAME "qat_asym_enq_threshold"
 #define COMP_ENQ_THRESHOLD_NAME "qat_comp_enq_threshold"
+#define SYM_CIPHER_CRC_ENABLE_NAME "qat_sym_cipher_crc_enable"
 #define QAT_CMD_SLICE_MAP "qat_cmd_slice_disable"
-#define QAT_CMD_SLICE_MAP_POS	4
+#define QAT_CMD_SLICE_MAP_POS	5
 #define MAX_QP_THRESHOLD_SIZE	32
 
 /**
@@ -37,7 +38,7 @@ typedef int (*qat_dev_get_misc_bar_t)
 typedef int (*qat_dev_read_config_t)
 		(struct qat_pci_device *);
 typedef int (*qat_dev_get_extra_size_t)(void);
-typedef int (*qat_dev_get_slice_map_t)(uint16_t *map,
+typedef int (*qat_dev_get_slice_map_t)(uint32_t *map,
 		const struct rte_pci_device *pci_dev);
 
 struct qat_dev_hw_spec_funcs {

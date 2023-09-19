@@ -56,6 +56,7 @@
 
 /* Device IDs */
 #define IDPF_DEV_ID_CPF			0x1453
+#define VIRTCHNL2_QUEUE_GROUP_P2P	0x100
 
 struct cpfl_vport_param {
 	struct cpfl_adapter_ext *adapter;
@@ -69,13 +70,45 @@ struct cpfl_devargs {
 	uint16_t req_vport_nb;
 };
 
+struct p2p_queue_chunks_info {
+	uint32_t tx_start_qid;
+	uint32_t rx_start_qid;
+	uint32_t tx_compl_start_qid;
+	uint32_t rx_buf_start_qid;
+
+	uint64_t tx_qtail_start;
+	uint32_t tx_qtail_spacing;
+	uint64_t rx_qtail_start;
+	uint32_t rx_qtail_spacing;
+	uint64_t tx_compl_qtail_start;
+	uint32_t tx_compl_qtail_spacing;
+	uint64_t rx_buf_qtail_start;
+	uint32_t rx_buf_qtail_spacing;
+};
+
+struct cpfl_vport {
+	struct idpf_vport base;
+	struct p2p_queue_chunks_info *p2p_q_chunks_info;
+
+	struct rte_mempool *p2p_mp;
+
+	uint16_t nb_data_rxq;
+	uint16_t nb_data_txq;
+	uint16_t nb_p2p_rxq;
+	uint16_t nb_p2p_txq;
+
+	struct idpf_rx_queue *p2p_rx_bufq;
+	struct idpf_tx_queue *p2p_tx_complq;
+	bool p2p_manual_bind;
+};
+
 struct cpfl_adapter_ext {
 	TAILQ_ENTRY(cpfl_adapter_ext) next;
 	struct idpf_adapter base;
 
 	char name[CPFL_ADAPTER_NAME_LEN];
 
-	struct idpf_vport **vports;
+	struct cpfl_vport **vports;
 	uint16_t max_vport_nb;
 
 	uint16_t cur_vports; /* bit mask of created vport */

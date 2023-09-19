@@ -243,6 +243,10 @@ typedef void (*mldev_stats_reset_t)(struct rte_ml_dev *dev);
  *
  * @param dev
  *	ML device pointer.
+ * @param mode
+ *	Mode of stats to retrieve.
+ * @param model_id
+ *	Used to specify model id in model mode. Ignored in device mode.
  * @param xstats_map
  *	Array to insert id and names into.
  * @param size
@@ -253,8 +257,9 @@ typedef void (*mldev_stats_reset_t)(struct rte_ml_dev *dev);
  *	- > size, error. Returns the size of xstats_map array required.
  *	- < 0, error code on failure.
  */
-typedef int (*mldev_xstats_names_get_t)(struct rte_ml_dev *dev,
-					struct rte_ml_dev_xstats_map *xstats_map, uint32_t size);
+typedef int (*mldev_xstats_names_get_t)(struct rte_ml_dev *dev, enum rte_ml_dev_xstats_mode mode,
+					int32_t model_id, struct rte_ml_dev_xstats_map *xstats_map,
+					uint32_t size);
 
 /**
  * @internal
@@ -271,7 +276,7 @@ typedef int (*mldev_xstats_names_get_t)(struct rte_ml_dev *dev,
  *	Value of the stat to be returned.
  *
  * @return
- *	- >= 0 stat value.
+ *	- = 0 success.
  *	- < 0, error code on failure.
  */
 typedef int (*mldev_xstats_by_name_get_t)(struct rte_ml_dev *dev, const char *name,
@@ -284,6 +289,10 @@ typedef int (*mldev_xstats_by_name_get_t)(struct rte_ml_dev *dev, const char *na
  *
  * @param dev
  *	ML device pointer.
+ * @param mode
+ *	Mode of stats to retrieve.
+ * @param model_id
+ *	Used to specify model id in model mode. Ignored in device mode.
  * @param stat_ids
  *	Array of ID numbers of the stats to be retrieved.
  * @param values
@@ -295,8 +304,9 @@ typedef int (*mldev_xstats_by_name_get_t)(struct rte_ml_dev *dev, const char *na
  *	- >= 0, number of entries filled into the values array.
  *	- < 0, error code on failure.
  */
-typedef int (*mldev_xstats_get_t)(struct rte_ml_dev *dev, const uint16_t *stat_ids,
-				  uint64_t *values, uint16_t nb_ids);
+typedef int (*mldev_xstats_get_t)(struct rte_ml_dev *dev, enum rte_ml_dev_xstats_mode mode,
+				  int32_t model_id, const uint16_t stat_ids[], uint64_t values[],
+				  uint16_t nb_ids);
 
 /**
  * @internal
@@ -305,6 +315,10 @@ typedef int (*mldev_xstats_get_t)(struct rte_ml_dev *dev, const uint16_t *stat_i
  *
  * @param dev
  *	ML device pointer.
+ * @param mode
+ *	Mode of stats to retrieve.
+ * @param model_id
+ *	Used to specify model id in model mode. Ignored in device mode.
  * @param stat_ids
  *	Array of stats IDs to be reset.
  * @param nb_ids
@@ -314,8 +328,8 @@ typedef int (*mldev_xstats_get_t)(struct rte_ml_dev *dev, const uint16_t *stat_i
  *	- 0 on success.
  *	- < 0, error code on failure.
  */
-typedef int (*mldev_xstats_reset_t)(struct rte_ml_dev *dev, const uint16_t *stat_ids,
-				    uint16_t nb_ids);
+typedef int (*mldev_xstats_reset_t)(struct rte_ml_dev *dev, enum rte_ml_dev_xstats_mode mode,
+				    int32_t model_id, const uint16_t stat_ids[], uint16_t nb_ids);
 
 /**
  * @internal

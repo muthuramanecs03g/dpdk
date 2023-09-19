@@ -120,10 +120,10 @@ config () # <dir> <builddir> <meson options>
 		return
 	fi
 	options=
-	# deprecated libs may be disabled by default, so for complete builds ensure
-	# no libs are disabled
-	if ! echo $* | grep -q -- 'disable_libs' ; then
-		options="$options -Ddisable_libs="
+	# deprecated libs are disabled by default, so for complete builds
+	# enable them
+	if ! echo $* | grep -q -- 'enable_deprecated_libs' ; then
+		options="$options -Denable_deprecated_libs=*"
 	fi
 	if echo $* | grep -qw -- '--default-library=shared' ; then
 		options="$options -Dexamples=all"
@@ -158,8 +158,8 @@ compile () # <builddir>
 install_target () # <builddir> <installdir>
 {
 	rm -rf $2
-	echo "DESTDIR=$2 $ninja_cmd -C $1 install" >&$verbose
-	DESTDIR=$2 $ninja_cmd -C $1 install >&$veryverbose
+	echo "DESTDIR=$2 $MESON install -C $1" >&$verbose
+	DESTDIR=$2 $MESON install -C $1 >&$veryverbose
 }
 
 build () # <directory> <target cc | cross file> <ABI check> [meson options]
@@ -299,6 +299,22 @@ export PKG_CONFIG_PATH=$(dirname $pc_file):$PKG_CONFIG_PATH
 libdir=$(dirname $(find $DESTDIR -name librte_eal.so))
 export LD_LIBRARY_PATH=$libdir:$LD_LIBRARY_PATH
 examples=${DPDK_BUILD_TEST_EXAMPLES:-"cmdline helloworld l2fwd l3fwd skeleton timer"}
+if [ "$examples" = 'all' ]; then
+	examples=$(find $build_path/examples -maxdepth 1 -type f -name "dpdk-*" |
+	while read target; do
+		target=${target%%:*}
+		target=${target#$build_path/examples/dpdk-}
+		if [ -e $srcdir/examples/$target/Makefile ]; then
+			echo $target
+			continue
+		fi
+		# Some examples binaries are built from an example sub
+		# directory, discover the "top level" example name.
+		find $srcdir/examples -name Makefile |
+		sed -n "s,$srcdir/examples/\([^/]*\)\(/.*\|\)/$target/Makefile,\1,p"
+	done | sort -u |
+	tr '\n' ' ')
+fi
 # if pkg-config defines the necessary flags, test building some examples
 if pkg-config --define-prefix libdpdk >/dev/null 2>&1; then
 	export PKGCONF="pkg-config --define-prefix"

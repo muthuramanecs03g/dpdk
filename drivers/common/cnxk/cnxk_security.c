@@ -155,6 +155,10 @@ ot_ipsec_sa_common_param_fill(union roc_ot_ipsec_sa_word2 *w2,
 
 		switch (auth_xfrm->auth.algo) {
 		case RTE_CRYPTO_AUTH_NULL:
+			if (w2->s.dir == ROC_IE_SA_DIR_INBOUND && ipsec_xfrm->replay_win_sz) {
+				plt_err("anti-replay can't be supported with integrity service disabled");
+				return -EINVAL;
+			}
 			w2->s.auth_type = ROC_IE_OT_SA_AUTH_NULL;
 			break;
 		case RTE_CRYPTO_AUTH_SHA1_HMAC:
@@ -274,6 +278,14 @@ ot_ipsec_inb_ctx_size(struct roc_ot_ipsec_inb_sa *sa)
 	return size;
 }
 
+static void
+ot_ipsec_update_ipv6_addr_endianness(uint64_t *addr)
+{
+	*addr = rte_be_to_cpu_64(*addr);
+	addr++;
+	*addr = rte_be_to_cpu_64(*addr);
+}
+
 static int
 ot_ipsec_inb_tunnel_hdr_fill(struct roc_ot_ipsec_inb_sa *sa,
 			     struct rte_security_ipsec_xform *ipsec_xfrm)
@@ -309,6 +321,10 @@ ot_ipsec_inb_tunnel_hdr_fill(struct roc_ot_ipsec_inb_sa *sa,
 		       sizeof(struct in6_addr));
 		memcpy(&sa->outer_hdr.ipv6.dst_addr, &tunnel->ipv6.dst_addr,
 		       sizeof(struct in6_addr));
+
+		/* IP Source and Dest are in LE/CPU endian */
+		ot_ipsec_update_ipv6_addr_endianness((uint64_t *)&sa->outer_hdr.ipv6.src_addr);
+		ot_ipsec_update_ipv6_addr_endianness((uint64_t *)&sa->outer_hdr.ipv6.dst_addr);
 
 		break;
 	default:
@@ -498,6 +514,10 @@ cnxk_ot_ipsec_outb_sa_fill(struct roc_ot_ipsec_outb_sa *sa,
 		       sizeof(struct in6_addr));
 		memcpy(&sa->outer_hdr.ipv6.dst_addr, &tunnel->ipv6.dst_addr,
 		       sizeof(struct in6_addr));
+
+		/* IP Source and Dest are in LE/CPU endian */
+		ot_ipsec_update_ipv6_addr_endianness((uint64_t *)&sa->outer_hdr.ipv6.src_addr);
+		ot_ipsec_update_ipv6_addr_endianness((uint64_t *)&sa->outer_hdr.ipv6.dst_addr);
 
 		/* Outer header flow label source */
 		if (!ipsec_xfrm->options.copy_flabel) {
@@ -1376,6 +1396,11 @@ cnxk_on_ipsec_inb_sa_create(struct rte_security_ipsec_xform *ipsec,
 	if (ret)
 		return ret;
 
+	if (crypto_xform->type != RTE_CRYPTO_SYM_XFORM_AEAD &&
+	    crypto_xform->auth.algo == RTE_CRYPTO_AUTH_NULL && ipsec->replay_win_sz) {
+		plt_err("anti-replay can't be supported with integrity service disabled");
+		return -EINVAL;
+	}
 	if (crypto_xform->type == RTE_CRYPTO_SYM_XFORM_AEAD ||
 	    auth_xform->auth.algo == RTE_CRYPTO_AUTH_NULL ||
 	    auth_xform->auth.algo == RTE_CRYPTO_AUTH_AES_GMAC) {

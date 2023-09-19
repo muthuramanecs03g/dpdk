@@ -9,6 +9,7 @@
 #include <rte_pmd_cnxk.h>
 
 #include <cn10k_ethdev.h>
+#include <cnxk_ethdev_mcs.h>
 #include <cnxk_security.h>
 #include <roc_priv.h>
 
@@ -224,6 +225,36 @@ static struct rte_cryptodev_capabilities cn10k_eth_sec_crypto_caps[] = {
 					.min = 12,
 					.max = 12,
 					.increment = 0
+				}
+			}, }
+		}, }
+	},
+	{	/* AES CCM */
+		.op = RTE_CRYPTO_OP_TYPE_SYMMETRIC,
+		{.sym = {
+			.xform_type = RTE_CRYPTO_SYM_XFORM_AEAD,
+			{.aead = {
+				.algo = RTE_CRYPTO_AEAD_AES_CCM,
+				.block_size = 16,
+				.key_size = {
+					.min = 16,
+					.max = 32,
+					.increment = 8
+				},
+				.digest_size = {
+					.min = 16,
+					.max = 16,
+					.increment = 0
+				},
+				.aad_size = {
+					.min = 8,
+					.max = 12,
+					.increment = 4
+				},
+				.iv_size = {
+					.min = 11,
+					.max = 13,
+					.increment = 1
 				}
 			}, }
 		}, }
@@ -611,7 +642,9 @@ cn10k_eth_sec_session_create(void *device,
 	if (conf->action_type != RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL)
 		return -ENOTSUP;
 
-	if (conf->protocol != RTE_SECURITY_PROTOCOL_IPSEC)
+	if (conf->protocol == RTE_SECURITY_PROTOCOL_MACSEC)
+		return cnxk_eth_macsec_session_create(dev, conf, sess);
+	else if (conf->protocol != RTE_SECURITY_PROTOCOL_IPSEC)
 		return -ENOTSUP;
 
 	if (rte_security_dynfield_register() < 0)
@@ -809,7 +842,8 @@ cn10k_eth_sec_session_create(void *device,
 		sess_priv.chksum = (!ipsec->options.ip_csum_enable << 1 |
 				    !ipsec->options.l4_csum_enable);
 		sess_priv.dec_ttl = ipsec->options.dec_ttl;
-		if (roc_feature_nix_has_inl_ipsec_mseg())
+		if (roc_feature_nix_has_inl_ipsec_mseg() &&
+		    dev->outb.cpt_eng_caps & BIT_ULL(35))
 			sess_priv.nixtx_off = 1;
 
 		/* Pointer from eth_sec -> outb_sa */
@@ -855,13 +889,18 @@ cn10k_eth_sec_session_destroy(void *device, struct rte_security_session *sess)
 {
 	struct rte_eth_dev *eth_dev = (struct rte_eth_dev *)device;
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
+	struct cnxk_macsec_sess *macsec_sess;
 	struct cnxk_eth_sec_sess *eth_sec;
 	rte_spinlock_t *lock;
 	void *sa_dptr;
 
 	eth_sec = cnxk_eth_sec_sess_get_by_sess(dev, sess);
-	if (!eth_sec)
+	if (!eth_sec) {
+		macsec_sess = cnxk_eth_macsec_sess_get_by_sess(dev, sess);
+		if (macsec_sess)
+			return cnxk_eth_macsec_session_destroy(dev, sess);
 		return -ENOENT;
+	}
 
 	lock = eth_sec->inb ? &dev->inb.lock : &dev->outb.lock;
 	rte_spinlock_lock(lock);
@@ -1019,12 +1058,17 @@ cn10k_eth_sec_session_stats_get(void *device, struct rte_security_session *sess,
 {
 	struct rte_eth_dev *eth_dev = (struct rte_eth_dev *)device;
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
+	struct cnxk_macsec_sess *macsec_sess;
 	struct cnxk_eth_sec_sess *eth_sec;
 	int rc;
 
 	eth_sec = cnxk_eth_sec_sess_get_by_sess(dev, sess);
-	if (eth_sec == NULL)
+	if (eth_sec == NULL) {
+		macsec_sess = cnxk_eth_macsec_sess_get_by_sess(dev, sess);
+		if (macsec_sess)
+			return cnxk_eth_macsec_session_stats_get(dev, macsec_sess, stats);
 		return -EINVAL;
+	}
 
 	rc = roc_nix_inl_sa_sync(&dev->nix, eth_sec->sa, eth_sec->inb,
 			    ROC_NIX_INL_SA_OP_FLUSH);
@@ -1059,9 +1103,15 @@ cn10k_eth_sec_ops_override(void)
 	init_once = 1;
 
 	/* Update platform specific ops */
+	cnxk_eth_sec_ops.macsec_sa_create = cnxk_eth_macsec_sa_create;
+	cnxk_eth_sec_ops.macsec_sc_create = cnxk_eth_macsec_sc_create;
+	cnxk_eth_sec_ops.macsec_sa_destroy = cnxk_eth_macsec_sa_destroy;
+	cnxk_eth_sec_ops.macsec_sc_destroy = cnxk_eth_macsec_sc_destroy;
 	cnxk_eth_sec_ops.session_create = cn10k_eth_sec_session_create;
 	cnxk_eth_sec_ops.session_destroy = cn10k_eth_sec_session_destroy;
 	cnxk_eth_sec_ops.capabilities_get = cn10k_eth_sec_capabilities_get;
 	cnxk_eth_sec_ops.session_update = cn10k_eth_sec_session_update;
 	cnxk_eth_sec_ops.session_stats_get = cn10k_eth_sec_session_stats_get;
+	cnxk_eth_sec_ops.macsec_sc_stats_get = cnxk_eth_macsec_sc_stats_get;
+	cnxk_eth_sec_ops.macsec_sa_stats_get = cnxk_eth_macsec_sa_stats_get;
 }

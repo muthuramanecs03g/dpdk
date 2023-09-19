@@ -49,6 +49,8 @@
 /* LPB & SPB */
 #define CNXK_NIX_NUM_POOLS_MAX 2
 
+#define CNXK_NIX_DEF_SQ_COUNT	512
+
 #define CNXK_NIX_RSS_L3_L4_SRC_DST                                             \
 	(RTE_ETH_RSS_L3_SRC_ONLY | RTE_ETH_RSS_L3_DST_ONLY |                   \
 	 RTE_ETH_RSS_L4_SRC_ONLY | RTE_ETH_RSS_L4_DST_ONLY)
@@ -285,7 +287,25 @@ struct cnxk_eth_dev_sec_outb {
 
 	/* Lock to synchronize sa setup/release */
 	rte_spinlock_t lock;
+
+	/* Engine caps */
+	uint64_t cpt_eng_caps;
 };
+
+/* MACsec session private data */
+struct cnxk_macsec_sess {
+	/* List entry */
+	TAILQ_ENTRY(cnxk_macsec_sess) entry;
+
+	/* Back pointer to session */
+	struct rte_security_session *sess;
+	enum mcs_direction dir;
+	uint64_t sci;
+	uint8_t secy_id;
+	uint8_t sc_id;
+	uint8_t flow_id;
+};
+TAILQ_HEAD(cnxk_macsec_sess_list, cnxk_macsec_sess);
 
 struct cnxk_eth_dev {
 	/* ROC NIX */
@@ -390,6 +410,10 @@ struct cnxk_eth_dev {
 	/* Reassembly dynfield/flag offsets */
 	int reass_dynfield_off;
 	int reass_dynflag_bit;
+
+	/* MCS device */
+	struct cnxk_mcs_dev *mcs_dev;
+	struct cnxk_macsec_sess_list mcs_list;
 };
 
 struct cnxk_eth_rxq_sp {
@@ -441,6 +465,7 @@ int cnxk_nix_probe(struct rte_pci_driver *pci_drv,
 		   struct rte_pci_device *pci_dev);
 int cnxk_nix_remove(struct rte_pci_device *pci_dev);
 int cnxk_nix_mtu_set(struct rte_eth_dev *eth_dev, uint16_t mtu);
+int cnxk_nix_sq_flush(struct rte_eth_dev *eth_dev);
 int cnxk_nix_mc_addr_list_configure(struct rte_eth_dev *eth_dev,
 				    struct rte_ether_addr *mc_addr_set,
 				    uint32_t nb_mc_addr);
@@ -605,6 +630,9 @@ cnxk_eth_sec_sess_get_by_sess(struct cnxk_eth_dev *dev,
 			      struct rte_security_session *sess);
 int cnxk_nix_inl_meta_pool_cb(uint64_t *aura_handle, uintptr_t *mpool, uint32_t buf_sz,
 			      uint32_t nb_bufs, bool destroy, const char *mempool_name);
+int cnxk_nix_inl_custom_meta_pool_cb(uintptr_t pmpool, uintptr_t *mpool, const char *mempool_name,
+				     uint64_t *aura_handle, uint32_t buf_sz, uint32_t nb_bufs,
+				     bool destroy);
 
 /* Congestion Management */
 int cnxk_nix_cman_info_get(struct rte_eth_dev *dev, struct rte_eth_cman_info *info);
@@ -614,6 +642,17 @@ int cnxk_nix_cman_config_init(struct rte_eth_dev *dev, struct rte_eth_cman_confi
 int cnxk_nix_cman_config_set(struct rte_eth_dev *dev, const struct rte_eth_cman_config *config);
 
 int cnxk_nix_cman_config_get(struct rte_eth_dev *dev, struct rte_eth_cman_config *config);
+
+int cnxk_mcs_dev_init(struct cnxk_eth_dev *dev, uint8_t mcs_idx);
+void cnxk_mcs_dev_fini(struct cnxk_eth_dev *dev);
+
+struct cnxk_macsec_sess *cnxk_eth_macsec_sess_get_by_sess(struct cnxk_eth_dev *dev,
+							  const struct rte_security_session *sess);
+int cnxk_mcs_flow_configure(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
+			     const struct rte_flow_item pattern[],
+			     const struct rte_flow_action actions[], struct rte_flow_error *error,
+			     void **mcs_flow);
+int cnxk_mcs_flow_destroy(struct cnxk_eth_dev *eth_dev, void *mcs_flow);
 
 /* Other private functions */
 int nix_recalc_mtu(struct rte_eth_dev *eth_dev);

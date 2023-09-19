@@ -24,17 +24,35 @@ cn10k_sso_hws_xtract_meta(struct rte_mbuf *m, const uint64_t *txq_data)
 static __rte_always_inline void
 cn10k_sso_txq_fc_wait(const struct cn10k_eth_txq *txq)
 {
+#ifdef RTE_ARCH_ARM64
+	uint64_t space;
+
+	asm volatile(PLT_CPU_FEATURE_PREAMBLE
+		     "		ldxr %[space], [%[addr]]		\n"
+		     "		cmp %[adj], %[space] 			\n"
+		     "		b.hi .Ldne%=				\n"
+		     "		sevl					\n"
+		     ".Lrty%=:	wfe					\n"
+		     "		ldxr %[space], [%[addr]]		\n"
+		     "		cmp %[adj], %[space]			\n"
+		     "		b.ls .Lrty%=				\n"
+		     ".Ldne%=:						\n"
+		     : [space] "=&r"(space)
+		     : [adj] "r"(txq->nb_sqb_bufs_adj), [addr] "r"(txq->fc_mem)
+		     : "memory");
+#else
 	while ((uint64_t)txq->nb_sqb_bufs_adj <=
 	       __atomic_load_n(txq->fc_mem, __ATOMIC_RELAXED))
 		;
+#endif
 }
 
 static __rte_always_inline int32_t
 cn10k_sso_sq_depth(const struct cn10k_eth_txq *txq)
 {
-	return (txq->nb_sqb_bufs_adj -
-		__atomic_load_n((int16_t *)txq->fc_mem, __ATOMIC_RELAXED))
-	       << txq->sqes_per_sqb_log2;
+	int32_t avail = (int32_t)txq->nb_sqb_bufs_adj -
+			(int32_t)__atomic_load_n(txq->fc_mem, __ATOMIC_RELAXED);
+	return (avail << txq->sqes_per_sqb_log2) - avail;
 }
 
 static __rte_always_inline uint16_t
@@ -43,7 +61,6 @@ cn10k_sso_tx_one(struct cn10k_sso_hws *ws, struct rte_mbuf *m, uint64_t *cmd,
 		 const uint64_t *txq_data, const uint32_t flags)
 {
 	uint8_t lnum = 0, loff = 0, shft = 0;
-	uint16_t ref_cnt = m->refcnt;
 	struct cn10k_eth_txq *txq;
 	uintptr_t laddr;
 	uint16_t segdw;
@@ -55,7 +72,7 @@ cn10k_sso_tx_one(struct cn10k_sso_hws *ws, struct rte_mbuf *m, uint64_t *cmd,
 		return 0;
 
 	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F && txq->tx_compl.ena)
-		handle_tx_completion_pkts(txq, 1, 1);
+		handle_tx_completion_pkts(txq, 1);
 
 	cn10k_nix_tx_skeleton(txq, cmd, flags, 0);
 	/* Perform header writes before barrier
@@ -98,10 +115,9 @@ cn10k_sso_tx_one(struct cn10k_sso_hws *ws, struct rte_mbuf *m, uint64_t *cmd,
 
 	roc_lmt_submit_steorl(lmt_id, pa);
 
-	if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {
-		if (ref_cnt > 1)
-			rte_io_wmb();
-	}
+	/* Memory barrier to make sure lmtst store completes */
+	rte_io_wmb();
+
 	return 1;
 }
 

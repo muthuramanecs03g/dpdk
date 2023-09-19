@@ -40,7 +40,7 @@ static uint32_t thread_loop(void *arg)
 		t->state = Thread_ERROR;
 	}
 	/* Report register happened to the control thread. */
-	__atomic_add_fetch(t->registered_count, 1, __ATOMIC_RELEASE);
+	__atomic_fetch_add(t->registered_count, 1, __ATOMIC_RELEASE);
 
 	/* Wait for release from the control thread. */
 	while (__atomic_load_n(t->registered_count, __ATOMIC_ACQUIRE) != 0)
@@ -362,7 +362,7 @@ test_ctrl_thread(void)
 	/* Create one control thread */
 	t = &ctrl_thread_context;
 	t->state = Thread_INIT;
-	if (rte_ctrl_thread_create((pthread_t *)&t->id, "test_ctrl_threads",
+	if (rte_ctrl_thread_create((pthread_t *)&t->id, "dpdk-test-ctrlt",
 					NULL, ctrl_thread_loop, t) != 0)
 		return -1;
 
@@ -412,4 +412,4 @@ test_lcores(void)
 	return TEST_SUCCESS;
 }
 
-REGISTER_TEST_COMMAND(lcores_autotest, test_lcores);
+REGISTER_FAST_TEST(lcores_autotest, true, true, test_lcores);

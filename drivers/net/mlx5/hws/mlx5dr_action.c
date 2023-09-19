@@ -18,8 +18,8 @@
 static const uint32_t action_order_arr[MLX5DR_TABLE_TYPE_MAX][MLX5DR_ACTION_TYP_MAX] = {
 	[MLX5DR_TABLE_TYPE_NIC_RX] = {
 		BIT(MLX5DR_ACTION_TYP_TAG),
-		BIT(MLX5DR_ACTION_TYP_TNL_L2_TO_L2) |
-		BIT(MLX5DR_ACTION_TYP_TNL_L3_TO_L2),
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2),
 		BIT(MLX5DR_ACTION_TYP_POP_VLAN),
 		BIT(MLX5DR_ACTION_TYP_POP_VLAN),
 		BIT(MLX5DR_ACTION_TYP_CTR),
@@ -28,12 +28,13 @@ static const uint32_t action_order_arr[MLX5DR_TABLE_TYPE_MAX][MLX5DR_ACTION_TYP_
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_MODIFY_HDR),
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L2) |
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L3),
-		BIT(MLX5DR_ACTION_TYP_FT) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3),
+		BIT(MLX5DR_ACTION_TYP_TBL) |
 		BIT(MLX5DR_ACTION_TYP_MISS) |
 		BIT(MLX5DR_ACTION_TYP_TIR) |
-		BIT(MLX5DR_ACTION_TYP_DROP),
+		BIT(MLX5DR_ACTION_TYP_DROP) |
+		BIT(MLX5DR_ACTION_TYP_DEST_ROOT),
 		BIT(MLX5DR_ACTION_TYP_LAST),
 	},
 	[MLX5DR_TABLE_TYPE_NIC_TX] = {
@@ -45,16 +46,17 @@ static const uint32_t action_order_arr[MLX5DR_TABLE_TYPE_MAX][MLX5DR_ACTION_TYP_
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_MODIFY_HDR),
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L2) |
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L3),
-		BIT(MLX5DR_ACTION_TYP_FT) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3),
+		BIT(MLX5DR_ACTION_TYP_TBL) |
 		BIT(MLX5DR_ACTION_TYP_MISS) |
-		BIT(MLX5DR_ACTION_TYP_DROP),
+		BIT(MLX5DR_ACTION_TYP_DROP) |
+		BIT(MLX5DR_ACTION_TYP_DEST_ROOT),
 		BIT(MLX5DR_ACTION_TYP_LAST),
 	},
 	[MLX5DR_TABLE_TYPE_FDB] = {
-		BIT(MLX5DR_ACTION_TYP_TNL_L2_TO_L2) |
-		BIT(MLX5DR_ACTION_TYP_TNL_L3_TO_L2),
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2),
 		BIT(MLX5DR_ACTION_TYP_POP_VLAN),
 		BIT(MLX5DR_ACTION_TYP_POP_VLAN),
 		BIT(MLX5DR_ACTION_TYP_CTR),
@@ -63,12 +65,13 @@ static const uint32_t action_order_arr[MLX5DR_TABLE_TYPE_MAX][MLX5DR_ACTION_TYP_
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_PUSH_VLAN),
 		BIT(MLX5DR_ACTION_TYP_MODIFY_HDR),
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L2) |
-		BIT(MLX5DR_ACTION_TYP_L2_TO_TNL_L3),
-		BIT(MLX5DR_ACTION_TYP_FT) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2) |
+		BIT(MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3),
+		BIT(MLX5DR_ACTION_TYP_TBL) |
 		BIT(MLX5DR_ACTION_TYP_MISS) |
 		BIT(MLX5DR_ACTION_TYP_VPORT) |
-		BIT(MLX5DR_ACTION_TYP_DROP),
+		BIT(MLX5DR_ACTION_TYP_DROP) |
+		BIT(MLX5DR_ACTION_TYP_DEST_ROOT),
 		BIT(MLX5DR_ACTION_TYP_LAST),
 	},
 };
@@ -109,7 +112,7 @@ static int mlx5dr_action_get_shared_stc_nic(struct mlx5dr_context *ctx,
 		stc_attr.remove_words.num_of_words = MLX5DR_ACTION_HDR_LEN_L2_VLAN;
 		break;
 	default:
-		DR_LOG(ERR, "No such type : stc_type\n");
+		DR_LOG(ERR, "No such type : stc_type");
 		assert(false);
 		rte_errno = EINVAL;
 		goto unlock_and_out;
@@ -272,7 +275,7 @@ int mlx5dr_action_root_build_attr(struct mlx5dr_rule_action rule_actions[],
 		action = rule_actions[i].action;
 
 		switch (action->type) {
-		case MLX5DR_ACTION_TYP_FT:
+		case MLX5DR_ACTION_TYP_TBL:
 		case MLX5DR_ACTION_TYP_TIR:
 			attr[i].type = MLX5DV_FLOW_ACTION_DEST_DEVX;
 			attr[i].obj = action->devx_obj;
@@ -289,10 +292,10 @@ int mlx5dr_action_root_build_attr(struct mlx5dr_rule_action rule_actions[],
 		case MLX5DR_ACTION_TYP_DROP:
 			attr[i].type = MLX5DV_FLOW_ACTION_DROP;
 			break;
-		case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
-		case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
-		case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
-		case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+		case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 		case MLX5DR_ACTION_TYP_MODIFY_HDR:
 			attr[i].type = MLX5DV_FLOW_ACTION_IBV_FLOW_ACTION;
 			attr[i].action = action->flow_action;
@@ -319,10 +322,12 @@ int mlx5dr_action_root_build_attr(struct mlx5dr_rule_action rule_actions[],
 	return 0;
 }
 
-static bool mlx5dr_action_fixup_stc_attr(struct mlx5dr_cmd_stc_modify_attr *stc_attr,
-					 struct mlx5dr_cmd_stc_modify_attr *fixup_stc_attr,
-					 enum mlx5dr_table_type table_type,
-					 bool is_mirror)
+static bool
+mlx5dr_action_fixup_stc_attr(struct mlx5dr_context *ctx,
+			     struct mlx5dr_cmd_stc_modify_attr *stc_attr,
+			     struct mlx5dr_cmd_stc_modify_attr *fixup_stc_attr,
+			     enum mlx5dr_table_type table_type,
+			     bool is_mirror)
 {
 	struct mlx5dr_devx_obj *devx_obj;
 	bool use_fixup = false;
@@ -343,6 +348,17 @@ static bool mlx5dr_action_fixup_stc_attr(struct mlx5dr_cmd_stc_modify_attr *stc_
 		*fixup_stc_attr = *stc_attr;
 		fixup_stc_attr->ste_table.ste_obj_id = devx_obj->id;
 		use_fixup = true;
+		break;
+
+	case MLX5_IFC_STC_ACTION_TYPE_ALLOW:
+		if (fw_tbl_type == FS_FT_FDB_TX || fw_tbl_type == FS_FT_FDB_RX) {
+			fixup_stc_attr->action_type = MLX5_IFC_STC_ACTION_TYPE_JUMP_TO_VPORT;
+			fixup_stc_attr->action_offset = stc_attr->action_offset;
+			fixup_stc_attr->stc_offset = stc_attr->stc_offset;
+			fixup_stc_attr->vport.esw_owner_vhca_id = ctx->caps->vhca_id;
+			fixup_stc_attr->vport.vport_num = ctx->caps->eswitch_manager_vport_number;
+			use_fixup = true;
+		}
 		break;
 
 	case MLX5_IFC_STC_ACTION_TYPE_JUMP_TO_VPORT:
@@ -394,7 +410,7 @@ int mlx5dr_action_alloc_single_stc(struct mlx5dr_context *ctx,
 	devx_obj_0 = mlx5dr_pool_chunk_get_base_devx_obj(stc_pool, stc);
 
 	/* According to table/action limitation change the stc_attr */
-	use_fixup = mlx5dr_action_fixup_stc_attr(stc_attr, &fixup_stc_attr, table_type, false);
+	use_fixup = mlx5dr_action_fixup_stc_attr(ctx, stc_attr, &fixup_stc_attr, table_type, false);
 	ret = mlx5dr_cmd_stc_modify(devx_obj_0, use_fixup ? &fixup_stc_attr : stc_attr);
 	if (ret) {
 		DR_LOG(ERR, "Failed to modify STC action_type %d tbl_type %d",
@@ -408,7 +424,8 @@ int mlx5dr_action_alloc_single_stc(struct mlx5dr_context *ctx,
 
 		devx_obj_1 = mlx5dr_pool_chunk_get_base_devx_obj_mirror(stc_pool, stc);
 
-		use_fixup = mlx5dr_action_fixup_stc_attr(stc_attr, &fixup_stc_attr,
+		use_fixup = mlx5dr_action_fixup_stc_attr(ctx, stc_attr,
+							 &fixup_stc_attr,
 							 table_type, true);
 		ret = mlx5dr_cmd_stc_modify(devx_obj_1, use_fixup ? &fixup_stc_attr : stc_attr);
 		if (ret) {
@@ -466,7 +483,7 @@ static uint32_t mlx5dr_action_get_mh_stc_type(__be64 pattern)
 		return MLX5_IFC_STC_ACTION_TYPE_COPY;
 	default:
 		assert(false);
-		DR_LOG(ERR, "Unsupported action type: 0x%x\n", action_type);
+		DR_LOG(ERR, "Unsupported action type: 0x%x", action_type);
 		rte_errno = ENOTSUP;
 		return MLX5_IFC_STC_ACTION_TYPE_NOP;
 	}
@@ -488,7 +505,6 @@ static void mlx5dr_action_fill_stc_attr(struct mlx5dr_action *action,
 	case MLX5DR_ACTION_TYP_MISS:
 		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_ALLOW;
 		attr->action_offset = MLX5DR_ACTION_OFFSET_HIT;
-		/* TODO Need to support default miss for FDB */
 		break;
 	case MLX5DR_ACTION_TYP_CTR:
 		attr->id = obj->id;
@@ -500,7 +516,7 @@ static void mlx5dr_action_fill_stc_attr(struct mlx5dr_action *action,
 		attr->action_offset = MLX5DR_ACTION_OFFSET_HIT;
 		attr->dest_tir_num = obj->id;
 		break;
-	case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
 	case MLX5DR_ACTION_TYP_MODIFY_HDR:
 		attr->action_offset = MLX5DR_ACTION_OFFSET_DW6;
 		if (action->modify_header.num_of_actions == 1) {
@@ -516,19 +532,24 @@ static void mlx5dr_action_fill_stc_attr(struct mlx5dr_action *action,
 			attr->modify_header.pattern_id = action->modify_header.pattern_obj->id;
 		}
 		break;
-	case MLX5DR_ACTION_TYP_FT:
+	case MLX5DR_ACTION_TYP_TBL:
 		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_JUMP_TO_FT;
 		attr->action_offset = MLX5DR_ACTION_OFFSET_HIT;
 		attr->dest_table_id = obj->id;
 		break;
-	case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
+	case MLX5DR_ACTION_TYP_DEST_ROOT:
+		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_JUMP_TO_FT;
+		attr->action_offset = MLX5DR_ACTION_OFFSET_HIT;
+		attr->dest_table_id = action->root_tbl.sa->id;
+		break;
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
 		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_HEADER_REMOVE;
 		attr->action_offset = MLX5DR_ACTION_OFFSET_DW5;
 		attr->remove_header.decap = 1;
 		attr->remove_header.start_anchor = MLX5_HEADER_ANCHOR_PACKET_START;
 		attr->remove_header.end_anchor = MLX5_HEADER_ANCHOR_INNER_MAC;
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
 		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_HEADER_INSERT;
 		attr->action_offset = MLX5DR_ACTION_OFFSET_DW6;
 		attr->insert_header.encap = 1;
@@ -536,7 +557,7 @@ static void mlx5dr_action_fill_stc_attr(struct mlx5dr_action *action,
 		attr->insert_header.arg_id = action->reformat.arg_obj->id;
 		attr->insert_header.header_size = action->reformat.header_size;
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 		attr->action_type = MLX5_IFC_STC_ACTION_TYPE_HEADER_INSERT;
 		attr->action_offset = MLX5DR_ACTION_OFFSET_DW6;
 		attr->insert_header.encap = 1;
@@ -739,7 +760,7 @@ mlx5dr_action_create_dest_table(struct mlx5dr_context *ctx,
 		return NULL;
 	}
 
-	action = mlx5dr_action_create_generic(ctx, flags, MLX5DR_ACTION_TYP_FT);
+	action = mlx5dr_action_create_generic(ctx, flags, MLX5DR_ACTION_TYP_TBL);
 	if (!action)
 		return NULL;
 
@@ -1009,7 +1030,7 @@ static int mlx5dr_action_create_dest_vport_hws(struct mlx5dr_context *ctx,
 
 	ret = mlx5dr_cmd_query_ib_port(ctx->ibv_ctx, &vport_caps, ib_port_num);
 	if (ret) {
-		DR_LOG(ERR, "Failed querying port %d\n", ib_port_num);
+		DR_LOG(ERR, "Failed querying port %d", ib_port_num);
 		return ret;
 	}
 	action->vport.vport_num = vport_caps.vport_num;
@@ -1017,7 +1038,7 @@ static int mlx5dr_action_create_dest_vport_hws(struct mlx5dr_context *ctx,
 
 	ret = mlx5dr_action_create_stcs(action, NULL);
 	if (ret) {
-		DR_LOG(ERR, "Failed creating stc for port %d\n", ib_port_num);
+		DR_LOG(ERR, "Failed creating stc for port %d", ib_port_num);
 		return ret;
 	}
 
@@ -1033,7 +1054,7 @@ mlx5dr_action_create_dest_vport(struct mlx5dr_context *ctx,
 	int ret;
 
 	if (!(flags & MLX5DR_ACTION_FLAG_HWS_FDB)) {
-		DR_LOG(ERR, "Vport action is supported for FDB only\n");
+		DR_LOG(ERR, "Vport action is supported for FDB only");
 		rte_errno = EINVAL;
 		return NULL;
 	}
@@ -1044,7 +1065,7 @@ mlx5dr_action_create_dest_vport(struct mlx5dr_context *ctx,
 
 	ret = mlx5dr_action_create_dest_vport_hws(ctx, action, ib_port_num);
 	if (ret) {
-		DR_LOG(ERR, "Failed to create vport action HWS\n");
+		DR_LOG(ERR, "Failed to create vport action HWS");
 		goto free_action;
 	}
 
@@ -1073,7 +1094,7 @@ mlx5dr_action_create_push_vlan(struct mlx5dr_context *ctx, uint32_t flags)
 
 	ret = mlx5dr_action_create_stcs(action, NULL);
 	if (ret) {
-		DR_LOG(ERR, "Failed creating stc for push vlan\n");
+		DR_LOG(ERR, "Failed creating stc for push vlan");
 		goto free_action;
 	}
 
@@ -1107,7 +1128,7 @@ mlx5dr_action_create_pop_vlan(struct mlx5dr_context *ctx, uint32_t flags)
 
 	ret = mlx5dr_action_create_stcs(action, NULL);
 	if (ret) {
-		DR_LOG(ERR, "Failed creating stc for pop vlan\n");
+		DR_LOG(ERR, "Failed creating stc for pop vlan");
 		goto free_shared;
 	}
 
@@ -1120,49 +1141,24 @@ free_action:
 	return NULL;
 }
 
-static int
-mlx5dr_action_conv_reformat_type_to_action(uint32_t reformat_type,
-					   enum mlx5dr_action_type *action_type)
-{
-	switch (reformat_type) {
-	case MLX5DR_ACTION_REFORMAT_TYPE_TNL_L2_TO_L2:
-		*action_type = MLX5DR_ACTION_TYP_TNL_L2_TO_L2;
-		break;
-	case MLX5DR_ACTION_REFORMAT_TYPE_L2_TO_TNL_L2:
-		*action_type = MLX5DR_ACTION_TYP_L2_TO_TNL_L2;
-		break;
-	case MLX5DR_ACTION_REFORMAT_TYPE_TNL_L3_TO_L2:
-		*action_type = MLX5DR_ACTION_TYP_TNL_L3_TO_L2;
-		break;
-	case MLX5DR_ACTION_REFORMAT_TYPE_L2_TO_TNL_L3:
-		*action_type = MLX5DR_ACTION_TYP_L2_TO_TNL_L3;
-		break;
-	default:
-		DR_LOG(ERR, "Invalid reformat type requested");
-		rte_errno = ENOTSUP;
-		return rte_errno;
-	}
-	return 0;
-}
-
 static void
 mlx5dr_action_conv_reformat_to_verbs(uint32_t action_type,
 				     uint32_t *verb_reformat_type)
 {
 	switch (action_type) {
-	case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
 		*verb_reformat_type =
 			MLX5DV_FLOW_ACTION_PACKET_REFORMAT_TYPE_L2_TUNNEL_TO_L2;
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
 		*verb_reformat_type =
 			MLX5DV_FLOW_ACTION_PACKET_REFORMAT_TYPE_L2_TO_L2_TUNNEL;
 		break;
-	case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
 		*verb_reformat_type =
 			MLX5DV_FLOW_ACTION_PACKET_REFORMAT_TYPE_L3_TUNNEL_TO_L2;
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 		*verb_reformat_type =
 			MLX5DV_FLOW_ACTION_PACKET_REFORMAT_TYPE_L2_TO_L3_TUNNEL;
 		break;
@@ -1172,12 +1168,12 @@ mlx5dr_action_conv_reformat_to_verbs(uint32_t action_type,
 static int
 mlx5dr_action_conv_flags_to_ft_type(uint32_t flags, enum mlx5dv_flow_table_type *ft_type)
 {
-	if (flags & MLX5DR_ACTION_FLAG_ROOT_RX) {
+	if (flags & (MLX5DR_ACTION_FLAG_ROOT_RX | MLX5DR_ACTION_FLAG_HWS_RX)) {
 		*ft_type = MLX5DV_FLOW_TABLE_TYPE_NIC_RX;
-	} else if (flags & MLX5DR_ACTION_FLAG_ROOT_TX) {
+	} else if (flags & (MLX5DR_ACTION_FLAG_ROOT_TX | MLX5DR_ACTION_FLAG_HWS_TX)) {
 		*ft_type = MLX5DV_FLOW_TABLE_TYPE_NIC_TX;
 #ifdef HAVE_MLX5DV_FLOW_MATCHER_FT_TYPE
-	} else if (flags & MLX5DR_ACTION_FLAG_ROOT_FDB) {
+	} else if (flags & (MLX5DR_ACTION_FLAG_ROOT_FDB | MLX5DR_ACTION_FLAG_HWS_FDB)) {
 		*ft_type = MLX5DV_FLOW_TABLE_TYPE_FDB;
 #endif
 	} else {
@@ -1410,7 +1406,7 @@ mlx5dr_action_handle_tunnel_l3_to_l2(struct mlx5dr_context *ctx,
 
 	if (data_sz != MLX5DR_ACTION_HDR_LEN_L2 &&
 	    data_sz != MLX5DR_ACTION_HDR_LEN_L2_W_VLAN) {
-		DR_LOG(ERR, "Data size is not supported for decap-l3\n");
+		DR_LOG(ERR, "Data size is not supported for decap-l3");
 		rte_errno = EINVAL;
 		return rte_errno;
 	}
@@ -1422,7 +1418,7 @@ mlx5dr_action_handle_tunnel_l3_to_l2(struct mlx5dr_context *ctx,
 	ret = mlx5dr_pat_arg_create_modify_header(ctx, action, mh_data_size,
 						  (__be64 *)mh_data, bulk_size);
 	if (ret) {
-		DR_LOG(ERR, "Failed allocating modify-header for decap-l3\n");
+		DR_LOG(ERR, "Failed allocating modify-header for decap-l3");
 		return ret;
 	}
 
@@ -1462,16 +1458,16 @@ mlx5dr_action_create_reformat_hws(struct mlx5dr_context *ctx,
 	int ret;
 
 	switch (action->type) {
-	case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
 		ret = mlx5dr_action_create_stcs(action, NULL);
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
 		ret = mlx5dr_action_handle_l2_to_tunnel_l2(ctx, data_sz, data, bulk_size, action);
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 		ret = mlx5dr_action_handle_l2_to_tunnel_l3(ctx, data_sz, data, bulk_size, action);
 		break;
-	case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
 		ret = mlx5dr_action_handle_tunnel_l3_to_l2(ctx, data_sz, data, bulk_size, action);
 		break;
 
@@ -1486,21 +1482,16 @@ mlx5dr_action_create_reformat_hws(struct mlx5dr_context *ctx,
 
 struct mlx5dr_action *
 mlx5dr_action_create_reformat(struct mlx5dr_context *ctx,
-			      enum mlx5dr_action_reformat_type reformat_type,
+			      enum mlx5dr_action_type reformat_type,
 			      size_t data_sz,
 			      void *inline_data,
 			      uint32_t log_bulk_size,
 			      uint32_t flags)
 {
-	enum mlx5dr_action_type action_type;
 	struct mlx5dr_action *action;
 	int ret;
 
-	ret = mlx5dr_action_conv_reformat_type_to_action(reformat_type, &action_type);
-	if (ret)
-		return NULL;
-
-	action = mlx5dr_action_create_generic(ctx, flags, action_type);
+	action = mlx5dr_action_create_generic(ctx, flags, reformat_type);
 	if (!action)
 		return NULL;
 
@@ -1520,7 +1511,7 @@ mlx5dr_action_create_reformat(struct mlx5dr_context *ctx,
 
 	if (!mlx5dr_action_is_hws_flags(flags) ||
 	    ((flags & MLX5DR_ACTION_FLAG_SHARED) && log_bulk_size)) {
-		DR_LOG(ERR, "Reformat flags don't fit HWS (flags: %x0x)\n",
+		DR_LOG(ERR, "Reformat flags don't fit HWS (flags: %x0x)",
 			flags);
 		rte_errno = EINVAL;
 		goto free_action;
@@ -1528,7 +1519,7 @@ mlx5dr_action_create_reformat(struct mlx5dr_context *ctx,
 
 	ret = mlx5dr_action_create_reformat_hws(ctx, data_sz, inline_data, log_bulk_size, action);
 	if (ret) {
-		DR_LOG(ERR, "Failed to create reformat.\n");
+		DR_LOG(ERR, "Failed to create reformat.");
 		rte_errno = EINVAL;
 		goto free_action;
 	}
@@ -1597,14 +1588,14 @@ mlx5dr_action_create_modify_header(struct mlx5dr_context *ctx,
 
 	if (!mlx5dr_action_is_hws_flags(flags) ||
 	    ((flags & MLX5DR_ACTION_FLAG_SHARED) && log_bulk_size)) {
-		DR_LOG(ERR, "Flags don't fit hws (flags: %x0x, log_bulk_size: %d)\n",
+		DR_LOG(ERR, "Flags don't fit hws (flags: %x0x, log_bulk_size: %d)",
 			flags, log_bulk_size);
 		rte_errno = EINVAL;
 		goto free_action;
 	}
 
 	if (!mlx5dr_pat_arg_verify_actions(pattern, pattern_sz / MLX5DR_MODIFY_ACTION_SIZE)) {
-		DR_LOG(ERR, "One of the actions is not supported\n");
+		DR_LOG(ERR, "One of the actions is not supported");
 		rte_errno = EINVAL;
 		goto free_action;
 	}
@@ -1620,7 +1611,7 @@ mlx5dr_action_create_modify_header(struct mlx5dr_context *ctx,
 		ret = mlx5dr_pat_arg_create_modify_header(ctx, action, pattern_sz,
 							  pattern, log_bulk_size);
 		if (ret) {
-			DR_LOG(ERR, "Failed allocating modify-header\n");
+			DR_LOG(ERR, "Failed allocating modify-header");
 			goto free_action;
 		}
 	}
@@ -1639,6 +1630,58 @@ free_action:
 	return NULL;
 }
 
+struct mlx5dr_action *
+mlx5dr_action_create_dest_root(struct mlx5dr_context *ctx,
+			       uint16_t priority,
+			       uint32_t flags)
+{
+	struct mlx5dv_steering_anchor_attr attr = {0};
+	struct mlx5dv_steering_anchor *sa;
+	struct mlx5dr_action *action;
+	int ret;
+
+	if (mlx5dr_action_is_root_flags(flags)) {
+		DR_LOG(ERR, "Action flags must be only non root (HWS)");
+		rte_errno = ENOTSUP;
+		return NULL;
+	}
+
+	if (mlx5dr_context_shared_gvmi_used(ctx)) {
+		DR_LOG(ERR, "Cannot use this action in shared GVMI context");
+		rte_errno = ENOTSUP;
+		return NULL;
+	}
+
+	if (mlx5dr_action_conv_flags_to_ft_type(flags, &attr.ft_type))
+		return NULL;
+
+	attr.priority = priority;
+
+	sa = mlx5_glue->create_steering_anchor(ctx->ibv_ctx, &attr);
+	if (!sa) {
+		DR_LOG(ERR, "Creation of steering anchor failed");
+		return NULL;
+	}
+
+	action = mlx5dr_action_create_generic(ctx, flags, MLX5DR_ACTION_TYP_DEST_ROOT);
+	if (!action)
+		goto free_steering_anchor;
+
+	action->root_tbl.sa = sa;
+
+	ret = mlx5dr_action_create_stcs(action, NULL);
+	if (ret)
+		goto free_action;
+
+	return action;
+
+free_action:
+	simple_free(action);
+free_steering_anchor:
+	mlx5_glue->destroy_steering_anchor(sa);
+	return NULL;
+}
+
 static void mlx5dr_action_destroy_hws(struct mlx5dr_action *action)
 {
 	switch (action->type) {
@@ -1651,29 +1694,33 @@ static void mlx5dr_action_destroy_hws(struct mlx5dr_action *action)
 	case MLX5DR_ACTION_TYP_TAG:
 	case MLX5DR_ACTION_TYP_DROP:
 	case MLX5DR_ACTION_TYP_CTR:
-	case MLX5DR_ACTION_TYP_FT:
-	case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
+	case MLX5DR_ACTION_TYP_TBL:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
 	case MLX5DR_ACTION_TYP_ASO_METER:
 	case MLX5DR_ACTION_TYP_ASO_CT:
 	case MLX5DR_ACTION_TYP_PUSH_VLAN:
 		mlx5dr_action_destroy_stcs(action);
 		break;
+	case MLX5DR_ACTION_TYP_DEST_ROOT:
+		mlx5dr_action_destroy_stcs(action);
+		mlx5_glue->destroy_steering_anchor(action->root_tbl.sa);
+		break;
 	case MLX5DR_ACTION_TYP_POP_VLAN:
 		mlx5dr_action_destroy_stcs(action);
 		mlx5dr_action_put_shared_stc(action, MLX5DR_CONTEXT_SHARED_STC_POP);
 		break;
-	case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
 	case MLX5DR_ACTION_TYP_MODIFY_HDR:
 		mlx5dr_action_destroy_stcs(action);
 		if (action->modify_header.num_of_actions > 1)
 			mlx5dr_pat_arg_destroy_modify_header(action->ctx, action);
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 		mlx5dr_action_destroy_stcs(action);
 		mlx5dr_action_put_shared_stc(action, MLX5DR_CONTEXT_SHARED_STC_DECAP);
 		mlx5dr_cmd_destroy_obj(action->reformat.arg_obj);
 		break;
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
 		mlx5dr_action_destroy_stcs(action);
 		mlx5dr_cmd_destroy_obj(action->reformat.arg_obj);
 		break;
@@ -1683,10 +1730,10 @@ static void mlx5dr_action_destroy_hws(struct mlx5dr_action *action)
 static void mlx5dr_action_destroy_root(struct mlx5dr_action *action)
 {
 	switch (action->type) {
-	case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
-	case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
-	case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
+	case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 	case MLX5DR_ACTION_TYP_MODIFY_HDR:
 		ibv_destroy_flow_action(action->flow_action);
 		break;
@@ -2144,7 +2191,8 @@ int mlx5dr_action_template_process(struct mlx5dr_action_template *at)
 		switch (action_type[i]) {
 		case MLX5DR_ACTION_TYP_DROP:
 		case MLX5DR_ACTION_TYP_TIR:
-		case MLX5DR_ACTION_TYP_FT:
+		case MLX5DR_ACTION_TYP_TBL:
+		case MLX5DR_ACTION_TYP_DEST_ROOT:
 		case MLX5DR_ACTION_TYP_VPORT:
 		case MLX5DR_ACTION_TYP_MISS:
 			/* Hit action */
@@ -2191,7 +2239,7 @@ int mlx5dr_action_template_process(struct mlx5dr_action_template *at)
 			setter->idx_double = i;
 			break;
 
-		case MLX5DR_ACTION_TYP_TNL_L2_TO_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_TNL_L2_TO_L2:
 			/* Single remove header to header */
 			setter = mlx5dr_action_setter_find_first(last_setter, ASF_SINGLE1 | ASF_MODIFY);
 			setter->flags |= ASF_SINGLE1 | ASF_REMOVE | ASF_REPARSE;
@@ -2199,7 +2247,7 @@ int mlx5dr_action_template_process(struct mlx5dr_action_template *at)
 			setter->idx_single = i;
 			break;
 
-		case MLX5DR_ACTION_TYP_L2_TO_TNL_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L2:
 			/* Double insert header with pointer */
 			setter = mlx5dr_action_setter_find_first(last_setter, ASF_DOUBLE);
 			setter->flags |= ASF_DOUBLE | ASF_REPARSE;
@@ -2207,7 +2255,7 @@ int mlx5dr_action_template_process(struct mlx5dr_action_template *at)
 			setter->idx_double = i;
 			break;
 
-		case MLX5DR_ACTION_TYP_L2_TO_TNL_L3:
+		case MLX5DR_ACTION_TYP_REFORMAT_L2_TO_TNL_L3:
 			/* Single remove + Double insert header with pointer */
 			setter = mlx5dr_action_setter_find_first(last_setter, ASF_SINGLE1 | ASF_DOUBLE);
 			setter->flags |= ASF_SINGLE1 | ASF_DOUBLE | ASF_REPARSE | ASF_REMOVE;
@@ -2217,7 +2265,7 @@ int mlx5dr_action_template_process(struct mlx5dr_action_template *at)
 			setter->idx_single = i;
 			break;
 
-		case MLX5DR_ACTION_TYP_TNL_L3_TO_L2:
+		case MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2:
 			/* Double modify header list with remove and push inline */
 			setter = mlx5dr_action_setter_find_first(last_setter,
 								 ASF_DOUBLE | ASF_REMOVE);

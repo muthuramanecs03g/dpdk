@@ -125,6 +125,18 @@ struct mlx5_hca_flex_attr {
 	uint8_t  header_length_mask_width;
 };
 
+__extension__
+struct mlx5_hca_crypto_mmo_attr {
+	uint32_t crypto_mmo_qp:1;
+	uint32_t gcm_256_encrypt:1;
+	uint32_t gcm_128_encrypt:1;
+	uint32_t gcm_256_decrypt:1;
+	uint32_t gcm_128_decrypt:1;
+	uint32_t gcm_auth_tag_128:1;
+	uint32_t gcm_auth_tag_96:1;
+	uint32_t log_crypto_mmo_max_size:6;
+};
+
 /* ISO C restricts enumerator values to range of 'int' */
 __extension__
 enum {
@@ -250,6 +262,7 @@ struct mlx5_hca_attr {
 	struct mlx5_hca_vdpa_attr vdpa;
 	struct mlx5_hca_flow_attr flow;
 	struct mlx5_hca_flex_attr flex;
+	struct mlx5_hca_crypto_mmo_attr crypto_mmo;
 	int log_max_qp_sz;
 	int log_max_cq_sz;
 	int log_max_qp;
@@ -282,6 +295,11 @@ struct mlx5_hca_attr {
 	uint32_t crypto_wrapped_import_method:1;
 	uint16_t esw_mgr_vport_id; /* E-Switch Mgr vport ID . */
 	uint16_t max_wqe_sz_sq;
+	uint32_t striding_rq:1;
+	uint32_t ext_stride_num_range:1;
+	uint32_t cqe_compression_128:1;
+	uint32_t multi_pkt_send_wqe:1;
+	uint32_t enhanced_multi_pkt_send_wqe:1;
 	uint32_t set_reg_c:8;
 	uint32_t nic_flow_table:1;
 	uint32_t modify_outer_ip_ecn:1;
@@ -299,6 +317,8 @@ struct mlx5_hca_attr {
 	uint32_t flow_access_aso_opc_mod:8;
 	uint32_t cross_vhca:1;
 	uint32_t lag_rx_port_affinity:1;
+	uint32_t wqe_based_flow_table_sup:1;
+	uint8_t max_header_modify_pattern_length;
 };
 
 /* LAG Context. */
@@ -539,6 +559,9 @@ struct mlx5_devx_qp_attr {
 	uint64_t wq_umem_offset;
 	uint32_t user_index:24;
 	uint32_t mmo:1;
+	uint32_t cd_master:1;
+	uint32_t cd_slave_send:1;
+	uint32_t cd_slave_recv:1;
 };
 
 struct mlx5_devx_virtio_q_couners_attr {

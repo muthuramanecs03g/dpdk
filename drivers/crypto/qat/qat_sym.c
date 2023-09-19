@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2015-2022 Intel Corporation
+ * Copyright(c) 2015-2023 Intel Corporation
  */
 
 #include <openssl/evp.h>
@@ -16,7 +16,7 @@
 #include "qat_qp.h"
 
 uint8_t qat_sym_driver_id;
-int qat_ipsec_mb_lib;
+int qat_legacy_capa;
 
 struct qat_crypto_gen_dev_ops qat_sym_gen_dev_ops[QAT_N_GENS];
 
@@ -51,6 +51,11 @@ qat_sym_init_op_cookie(void *op_cookie)
 			rte_mempool_virt2iova(cookie) +
 			offsetof(struct qat_sym_op_cookie,
 			opt.spc_gmac.cd_cipher);
+
+	cookie->digest_null_phys_addr =
+			rte_mempool_virt2iova(cookie) +
+			offsetof(struct qat_sym_op_cookie,
+			digest_null);
 }
 
 static __rte_always_inline int
@@ -97,10 +102,7 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 			opaque[0] = (uintptr_t)ctx;
 			opaque[1] = (uintptr_t)build_request;
 		}
-	}
-
-#ifdef RTE_LIB_SECURITY
-	else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION) {
+	} else if (op->sess_type == RTE_CRYPTO_OP_SECURITY_SESSION) {
 		ctx = SECURITY_GET_SESS_PRIV(op->sym->session);
 		if (unlikely(!ctx)) {
 			QAT_DP_LOG(ERR, "No session for this device");
@@ -110,7 +112,11 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 			struct rte_cryptodev *cdev;
 			struct qat_cryptodev_private *internals;
 
+#ifdef RTE_QAT_OPENSSL
 			if (unlikely(ctx->bpi_ctx == NULL)) {
+#else
+			if (unlikely(ctx->mb_mgr == NULL)) {
+#endif
 				QAT_DP_LOG(ERR, "QAT PMD only supports security"
 						" operation requests for"
 						" DOCSIS, op (%p) is not for"
@@ -150,9 +156,7 @@ qat_sym_build_request(void *in_op, uint8_t *out_msg,
 			opaque[0] = sess;
 			opaque[1] = (uintptr_t)build_request;
 		}
-	}
-#endif
-	else { /* RTE_CRYPTO_OP_SESSIONLESS */
+	} else { /* RTE_CRYPTO_OP_SESSIONLESS */
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_ARGS;
 		QAT_LOG(DEBUG, "QAT does not support sessionless operation");
 		return -1;
@@ -179,7 +183,7 @@ qat_sym_dequeue_burst(void *qp, struct rte_crypto_op **ops,
 
 int
 qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
-		struct qat_dev_cmd_param *qat_dev_cmd_param __rte_unused)
+		struct qat_dev_cmd_param *qat_dev_cmd_param)
 {
 	int i = 0, ret = 0;
 	uint16_t slice_map = 0;
@@ -250,7 +254,6 @@ qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
 
-#ifdef RTE_LIB_SECURITY
 	if (gen_dev_ops->create_security_ctx) {
 		cryptodev->security_ctx =
 			gen_dev_ops->create_security_ctx((void *)cryptodev);
@@ -265,7 +268,6 @@ qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
 	} else {
 		QAT_LOG(INFO, "Device %s rte_security support disabled", name);
 	}
-#endif
 	snprintf(capa_memz_name, RTE_CRYPTODEV_NAME_MAX_LEN,
 			"QAT_SYM_CAPA_GEN_%d",
 			qat_pci_dev->qat_dev_gen);
@@ -279,8 +281,12 @@ qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
 		if (!strcmp(qat_dev_cmd_param[i].name, SYM_ENQ_THRESHOLD_NAME))
 			internals->min_enq_burst_threshold =
 					qat_dev_cmd_param[i].val;
-		if (!strcmp(qat_dev_cmd_param[i].name, QAT_IPSEC_MB_LIB))
-			qat_ipsec_mb_lib = qat_dev_cmd_param[i].val;
+		if (!strcmp(qat_dev_cmd_param[i].name,
+				SYM_CIPHER_CRC_ENABLE_NAME))
+			internals->cipher_crc_offload_enable =
+					qat_dev_cmd_param[i].val;
+		if (!strcmp(qat_dev_cmd_param[i].name, QAT_LEGACY_CAPA))
+			qat_legacy_capa = qat_dev_cmd_param[i].val;
 		if (!strcmp(qat_dev_cmd_param[i].name, QAT_CMD_SLICE_MAP))
 			slice_map = qat_dev_cmd_param[i].val;
 		i++;
@@ -302,10 +308,8 @@ qat_sym_dev_create(struct qat_pci_device *qat_pci_dev,
 	return 0;
 
 error:
-#ifdef RTE_LIB_SECURITY
 	rte_free(cryptodev->security_ctx);
 	cryptodev->security_ctx = NULL;
-#endif
 	rte_cryptodev_pmd_destroy(cryptodev);
 	memset(&qat_dev_instance->sym_rte_dev, 0,
 		sizeof(qat_dev_instance->sym_rte_dev));
@@ -327,10 +331,8 @@ qat_sym_dev_destroy(struct qat_pci_device *qat_pci_dev)
 
 	/* free crypto device */
 	cryptodev = rte_cryptodev_pmd_get_dev(qat_pci_dev->sym_dev->dev_id);
-#ifdef RTE_LIB_SECURITY
 	rte_free(cryptodev->security_ctx);
 	cryptodev->security_ctx = NULL;
-#endif
 	rte_cryptodev_pmd_destroy(cryptodev);
 	qat_pci_devs[qat_pci_dev->qat_dev_id].sym_rte_dev.name = NULL;
 	qat_pci_dev->sym_dev = NULL;

@@ -3,25 +3,15 @@
  * All rights reserved.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * Netronome network device driver: Control BAR layout
- */
 #ifndef _NFP_CTRL_H_
 #define _NFP_CTRL_H_
 
 /*
  * Configuration BAR size.
  *
- * The configuration BAR is 8K in size, but on the NFP6000, due to
- * THB-350, 32k needs to be reserved.
+ * On the NFP6000, due to THB-350, the configuration BAR is 32K in size.
  */
-#ifdef __NFP_IS_6000
 #define NFP_NET_CFG_BAR_SZ              (32 * 1024)
-#else
-#define NFP_NET_CFG_BAR_SZ              (8 * 1024)
-#endif
 
 /* Offset in Freelist buffer where packet starts on RX */
 #define NFP_NET_RX_OFFSET               32
@@ -44,6 +34,9 @@
 /* Prepend field types */
 #define NFP_NET_META_HASH               1 /* next field carries hash type */
 #define NFP_NET_META_VLAN               4
+#define NFP_NET_META_PORTID             5
+
+#define NFP_META_PORT_ID_CTRL           ~0U
 
 /* Hash type pre-pended when a RSS hash was computed */
 #define NFP_NET_RSS_NONE                0
@@ -140,6 +133,20 @@
 
 #define NFP_NET_CFG_CTRL_CHAIN_META (NFP_NET_CFG_CTRL_RSS2 | \
 					NFP_NET_CFG_CTRL_CSUM_COMPLETE)
+
+/* Version number helper defines */
+struct nfp_net_fw_ver {
+	uint8_t minor;
+	uint8_t major;
+	uint8_t class;
+	/**
+	 * This byte can be extended for more use.
+	 * BIT0: NFD dp type, refer NFP_NET_CFG_VERSION_DP_NFDx
+	 * BIT[7:1]: reserved
+	 */
+	uint8_t extend;
+};
+
 /*
  * Read-only words (0x0030 - 0x0050):
  * @NFP_NET_CFG_VERSION:     Firmware version number
@@ -157,14 +164,6 @@
 #define NFP_NET_CFG_VERSION             0x0030
 #define   NFP_NET_CFG_VERSION_DP_NFD3   0
 #define   NFP_NET_CFG_VERSION_DP_NFDK   1
-#define   NFP_NET_CFG_VERSION_RESERVED_MASK	(0xff << 24)
-#define   NFP_NET_CFG_VERSION_CLASS_MASK  (0xff << 16)
-#define   NFP_NET_CFG_VERSION_CLASS(x)    (((x) & 0xff) << 16)
-#define   NFP_NET_CFG_VERSION_CLASS_GENERIC	0
-#define   NFP_NET_CFG_VERSION_MAJOR_MASK  (0xff <<  8)
-#define   NFP_NET_CFG_VERSION_MAJOR(x)    (((x) & 0xff) <<  8)
-#define   NFP_NET_CFG_VERSION_MINOR_MASK  (0xff <<  0)
-#define   NFP_NET_CFG_VERSION_MINOR(x)    (((x) & 0xff) <<  0)
 #define NFP_NET_CFG_STS                 0x0034
 #define   NFP_NET_CFG_STS_LINK            (0x1 << 0) /* Link up or down */
 /* Link rate */
@@ -224,11 +223,19 @@
 /* Offload definitions */
 #define NFP_NET_N_VXLAN_PORTS  (NFP_NET_CFG_VXLAN_SZ / sizeof(uint16_t))
 
-/**
- * 64B reserved for future use (0x0080 - 0x00c0)
+/*
+ * 3 words reserved for extended ctrl words (0x0098 - 0x00a4)
+ * 3 words reserved for extended cap words (0x00a4 - 0x00b0)
+ * Currently only one word is used, can be extended in future.
  */
-#define NFP_NET_CFG_RESERVED            0x0080
-#define NFP_NET_CFG_RESERVED_SZ         0x0040
+#define NFP_NET_CFG_CTRL_WORD1          0x0098
+#define NFP_NET_CFG_CTRL_PKT_TYPE         (0x1 << 0)
+
+#define NFP_NET_CFG_CAP_WORD1           0x00a4
+
+/* 16B reserved for future use (0x00b0 - 0x00c0). */
+#define NFP_NET_CFG_RESERVED            0x00b0
+#define NFP_NET_CFG_RESERVED_SZ         0x0010
 
 /*
  * RSS configuration (0x0100 - 0x01ac):
@@ -334,6 +341,15 @@
 #define NFP_NET_CFG_STATS_TX_MC_FRAMES  (NFP_NET_CFG_STATS_BASE + 0x80)
 #define NFP_NET_CFG_STATS_TX_BC_FRAMES  (NFP_NET_CFG_STATS_BASE + 0x88)
 
+#define NFP_NET_CFG_STATS_APP0_FRAMES   (NFP_NET_CFG_STATS_BASE + 0x90)
+#define NFP_NET_CFG_STATS_APP0_BYTES    (NFP_NET_CFG_STATS_BASE + 0x98)
+#define NFP_NET_CFG_STATS_APP1_FRAMES   (NFP_NET_CFG_STATS_BASE + 0xa0)
+#define NFP_NET_CFG_STATS_APP1_BYTES    (NFP_NET_CFG_STATS_BASE + 0xa8)
+#define NFP_NET_CFG_STATS_APP2_FRAMES   (NFP_NET_CFG_STATS_BASE + 0xb0)
+#define NFP_NET_CFG_STATS_APP2_BYTES    (NFP_NET_CFG_STATS_BASE + 0xb8)
+#define NFP_NET_CFG_STATS_APP3_FRAMES   (NFP_NET_CFG_STATS_BASE + 0xc0)
+#define NFP_NET_CFG_STATS_APP3_BYTES    (NFP_NET_CFG_STATS_BASE + 0xc8)
+
 /*
  * Per ring stats (0x1000 - 0x1800)
  * options, 64bit per entry
@@ -347,7 +363,73 @@
 #define NFP_NET_CFG_RXR_STATS(_x)       (NFP_NET_CFG_RXR_STATS_BASE + \
 					 ((_x) * 0x10))
 
-/* PF multiport offset */
+/**
+ * Mac stats (0x0000 - 0x0200)
+ * all counters are 64bit.
+ */
+#define NFP_MAC_STATS_BASE                0x0000
+#define NFP_MAC_STATS_SIZE                0x0200
+
+#define NFP_MAC_STATS_RX_IN_OCTS                (NFP_MAC_STATS_BASE + 0x000)
+#define NFP_MAC_STATS_RX_FRAME_TOO_LONG_ERRORS  (NFP_MAC_STATS_BASE + 0x010)
+#define NFP_MAC_STATS_RX_RANGE_LENGTH_ERRORS    (NFP_MAC_STATS_BASE + 0x018)
+#define NFP_MAC_STATS_RX_VLAN_RECEIVED_OK       (NFP_MAC_STATS_BASE + 0x020)
+#define NFP_MAC_STATS_RX_IN_ERRORS              (NFP_MAC_STATS_BASE + 0x028)
+#define NFP_MAC_STATS_RX_IN_BROADCAST_PKTS      (NFP_MAC_STATS_BASE + 0x030)
+#define NFP_MAC_STATS_RX_DROP_EVENTS            (NFP_MAC_STATS_BASE + 0x038)
+#define NFP_MAC_STATS_RX_ALIGNMENT_ERRORS       (NFP_MAC_STATS_BASE + 0x040)
+#define NFP_MAC_STATS_RX_PAUSE_MAC_CTRL_FRAMES  (NFP_MAC_STATS_BASE + 0x048)
+#define NFP_MAC_STATS_RX_FRAMES_RECEIVED_OK     (NFP_MAC_STATS_BASE + 0x050)
+#define NFP_MAC_STATS_RX_FRAME_CHECK_SEQ_ERRORS (NFP_MAC_STATS_BASE + 0x058)
+#define NFP_MAC_STATS_RX_UNICAST_PKTS           (NFP_MAC_STATS_BASE + 0x060)
+#define NFP_MAC_STATS_RX_MULTICAST_PKTS         (NFP_MAC_STATS_BASE + 0x068)
+#define NFP_MAC_STATS_RX_PKTS                   (NFP_MAC_STATS_BASE + 0x070)
+#define NFP_MAC_STATS_RX_UNDERSIZE_PKTS         (NFP_MAC_STATS_BASE + 0x078)
+#define NFP_MAC_STATS_RX_PKTS_64_OCTS           (NFP_MAC_STATS_BASE + 0x080)
+#define NFP_MAC_STATS_RX_PKTS_65_TO_127_OCTS    (NFP_MAC_STATS_BASE + 0x088)
+#define NFP_MAC_STATS_RX_PKTS_512_TO_1023_OCTS  (NFP_MAC_STATS_BASE + 0x090)
+#define NFP_MAC_STATS_RX_PKTS_1024_TO_1518_OCTS (NFP_MAC_STATS_BASE + 0x098)
+#define NFP_MAC_STATS_RX_JABBERS                (NFP_MAC_STATS_BASE + 0x0a0)
+#define NFP_MAC_STATS_RX_FRAGMENTS              (NFP_MAC_STATS_BASE + 0x0a8)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS2    (NFP_MAC_STATS_BASE + 0x0b0)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS3    (NFP_MAC_STATS_BASE + 0x0b8)
+#define NFP_MAC_STATS_RX_PKTS_128_TO_255_OCTS   (NFP_MAC_STATS_BASE + 0x0c0)
+#define NFP_MAC_STATS_RX_PKTS_256_TO_511_OCTS   (NFP_MAC_STATS_BASE + 0x0c8)
+#define NFP_MAC_STATS_RX_PKTS_1519_TO_MAX_OCTS  (NFP_MAC_STATS_BASE + 0x0d0)
+#define NFP_MAC_STATS_RX_OVERSIZE_PKTS          (NFP_MAC_STATS_BASE + 0x0d8)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS0    (NFP_MAC_STATS_BASE + 0x0e0)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS1    (NFP_MAC_STATS_BASE + 0x0e8)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS4    (NFP_MAC_STATS_BASE + 0x0f0)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS5    (NFP_MAC_STATS_BASE + 0x0f8)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS6    (NFP_MAC_STATS_BASE + 0x100)
+#define NFP_MAC_STATS_RX_PAUSE_FRAMES_CLASS7    (NFP_MAC_STATS_BASE + 0x108)
+#define NFP_MAC_STATS_RX_MAC_CTRL_FRAMES_REC    (NFP_MAC_STATS_BASE + 0x110)
+#define NFP_MAC_STATS_RX_MAC_HEAD_DROP          (NFP_MAC_STATS_BASE + 0x118)
+#define NFP_MAC_STATS_TX_QUEUE_DROP             (NFP_MAC_STATS_BASE + 0x138)
+#define NFP_MAC_STATS_TX_OUT_OCTS               (NFP_MAC_STATS_BASE + 0x140)
+#define NFP_MAC_STATS_TX_VLAN_TRANSMITTED_OK    (NFP_MAC_STATS_BASE + 0x150)
+#define NFP_MAC_STATS_TX_OUT_ERRORS             (NFP_MAC_STATS_BASE + 0x158)
+#define NFP_MAC_STATS_TX_BROADCAST_PKTS         (NFP_MAC_STATS_BASE + 0x160)
+#define NFP_MAC_STATS_TX_PKTS_64_OCTS           (NFP_MAC_STATS_BASE + 0x168)
+#define NFP_MAC_STATS_TX_PKTS_256_TO_511_OCTS   (NFP_MAC_STATS_BASE + 0x170)
+#define NFP_MAC_STATS_TX_PKTS_512_TO_1023_OCTS  (NFP_MAC_STATS_BASE + 0x178)
+#define NFP_MAC_STATS_TX_PAUSE_MAC_CTRL_FRAMES  (NFP_MAC_STATS_BASE + 0x180)
+#define NFP_MAC_STATS_TX_FRAMES_TRANSMITTED_OK  (NFP_MAC_STATS_BASE + 0x188)
+#define NFP_MAC_STATS_TX_UNICAST_PKTS           (NFP_MAC_STATS_BASE + 0x190)
+#define NFP_MAC_STATS_TX_MULTICAST_PKTS         (NFP_MAC_STATS_BASE + 0x198)
+#define NFP_MAC_STATS_TX_PKTS_65_TO_127_OCTS    (NFP_MAC_STATS_BASE + 0x1a0)
+#define NFP_MAC_STATS_TX_PKTS_128_TO_255_OCTS   (NFP_MAC_STATS_BASE + 0x1a8)
+#define NFP_MAC_STATS_TX_PKTS_1024_TO_1518_OCTS (NFP_MAC_STATS_BASE + 0x1b0)
+#define NFP_MAC_STATS_TX_PKTS_1519_TO_MAX_OCTS  (NFP_MAC_STATS_BASE + 0x1b8)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS0    (NFP_MAC_STATS_BASE + 0x1c0)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS1    (NFP_MAC_STATS_BASE + 0x1c8)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS4    (NFP_MAC_STATS_BASE + 0x1d0)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS5    (NFP_MAC_STATS_BASE + 0x1d8)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS2    (NFP_MAC_STATS_BASE + 0x1e0)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS3    (NFP_MAC_STATS_BASE + 0x1e8)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS6    (NFP_MAC_STATS_BASE + 0x1f0)
+#define NFP_MAC_STATS_TX_PAUSE_FRAMES_CLASS7    (NFP_MAC_STATS_BASE + 0x1f8)
+
 #define NFP_PF_CSR_SLICE_SIZE	(32 * 1024)
 
 /*
@@ -364,9 +446,3 @@ nfp_net_cfg_ctrl_rss(uint32_t hw_cap)
 }
 
 #endif /* _NFP_CTRL_H_ */
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */

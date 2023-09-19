@@ -506,6 +506,7 @@ mlx5_hws_cnt_pool_get(struct mlx5_hws_cnt_pool *cpool, uint32_t *queue,
 		__hws_cnt_query_raw(cpool, *cnt_id,
 				    &cpool->pool[iidx].reset.hits,
 				    &cpool->pool[iidx].reset.bytes);
+		cpool->pool[iidx].share = 0;
 		MLX5_ASSERT(!cpool->pool[iidx].in_used);
 		cpool->pool[iidx].in_used = true;
 		cpool->pool[iidx].age_idx = age_idx;
@@ -551,6 +552,22 @@ mlx5_hws_cnt_pool_get(struct mlx5_hws_cnt_pool *cpool, uint32_t *queue,
 	cpool->pool[iidx].in_used = true;
 	cpool->pool[iidx].age_idx = age_idx;
 	return 0;
+}
+
+/**
+ * Check if counter pool allocated for HWS is shared between ports.
+ *
+ * @param[in] priv
+ *   Pointer to the port private data structure.
+ *
+ * @return
+ *   True if counter pools is shared between ports. False otherwise.
+ */
+static __rte_always_inline bool
+mlx5_hws_cnt_is_pool_shared(struct mlx5_priv *priv)
+{
+	return priv && priv->hws_cpool &&
+	    (priv->shared_refcnt || priv->hws_cpool->cfg.host_cpool != NULL);
 }
 
 static __rte_always_inline unsigned int

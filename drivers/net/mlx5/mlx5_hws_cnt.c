@@ -192,8 +192,8 @@ mlx5_hws_aging_check(struct mlx5_priv *priv, struct mlx5_hws_cnt_pool *cpool)
 			}
 			param->accumulator_hits = 0;
 		}
-		if (__atomic_add_fetch(&param->sec_since_last_hit, time_delta,
-				       __ATOMIC_RELAXED) <=
+		if (__atomic_fetch_add(&param->sec_since_last_hit, time_delta,
+				       __ATOMIC_RELAXED) + time_delta <=
 		   __atomic_load_n(&param->timeout, __ATOMIC_RELAXED))
 			continue;
 		/* Prepare the relevant ring for this AGE parameter */
@@ -419,8 +419,7 @@ mlx5_hws_cnt_pool_init(struct mlx5_dev_ctx_shared *sh,
 		goto error;
 	}
 	for (qidx = 0; qidx < ccfg->q_num; qidx++) {
-		snprintf(mz_name, sizeof(mz_name), "%s_cache/%u", pcfg->name,
-				qidx);
+		snprintf(mz_name, sizeof(mz_name), "%s_qc/%x", pcfg->name, qidx);
 		cntp->cache->qcache[qidx] = rte_ring_create(mz_name, ccfg->size,
 				SOCKET_ID_ANY,
 				RING_F_SP_ENQ | RING_F_SC_DEQ |
@@ -439,8 +438,7 @@ error:
 int
 mlx5_hws_cnt_service_thread_create(struct mlx5_dev_ctx_shared *sh)
 {
-#define CNT_THREAD_NAME_MAX 256
-	char name[CNT_THREAD_NAME_MAX];
+	char name[RTE_MAX_THREAD_NAME_LEN];
 	rte_cpuset_t cpuset;
 	int ret;
 	uint32_t service_core = sh->cnt_svc->service_core;
@@ -453,8 +451,7 @@ mlx5_hws_cnt_service_thread_create(struct mlx5_dev_ctx_shared *sh)
 		DRV_LOG(ERR, "Failed to create HW steering's counter service thread.");
 		return -ENOSYS;
 	}
-	snprintf(name, CNT_THREAD_NAME_MAX - 1, "%s/svc@%d",
-		 sh->ibdev_name, service_core);
+	snprintf(name, RTE_MAX_THREAD_NAME_LEN, "dpdk-mlx5-%d", service_core);
 	rte_thread_set_name((rte_thread_t){(uintptr_t)sh->cnt_svc->service_thread},
 		name);
 	CPU_SET(service_core, &cpuset);
@@ -612,12 +609,10 @@ mlx5_hws_cnt_pool_create(struct rte_eth_dev *dev,
 	int ret = 0;
 	size_t sz;
 
-	mp_name = mlx5_malloc(MLX5_MEM_ZERO, RTE_MEMZONE_NAMESIZE, 0,
-			SOCKET_ID_ANY);
+	mp_name = mlx5_malloc(MLX5_MEM_ZERO, RTE_MEMZONE_NAMESIZE, 0, SOCKET_ID_ANY);
 	if (mp_name == NULL)
 		goto error;
-	snprintf(mp_name, RTE_MEMZONE_NAMESIZE, "MLX5_HWS_CNT_POOL_%u",
-			dev->data->port_id);
+	snprintf(mp_name, RTE_MEMZONE_NAMESIZE, "MLX5_HWS_CNT_P_%x", dev->data->port_id);
 	pcfg.name = mp_name;
 	pcfg.request_num = pattr->nb_counters;
 	pcfg.alloc_factor = HWS_CNT_ALLOC_FACTOR_DEFAULT;

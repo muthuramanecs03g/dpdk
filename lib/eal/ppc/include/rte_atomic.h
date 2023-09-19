@@ -60,23 +60,23 @@ static inline int rte_atomic16_test_and_set(rte_atomic16_t *v)
 static inline void
 rte_atomic16_inc(rte_atomic16_t *v)
 {
-	__atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline void
 rte_atomic16_dec(rte_atomic16_t *v)
 {
-	__atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline int rte_atomic16_inc_and_test(rte_atomic16_t *v)
 {
-	return __atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE) + 1 == 0;
 }
 
 static inline int rte_atomic16_dec_and_test(rte_atomic16_t *v)
 {
-	return __atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE) - 1 == 0;
 }
 
 static inline uint16_t
@@ -102,23 +102,23 @@ static inline int rte_atomic32_test_and_set(rte_atomic32_t *v)
 static inline void
 rte_atomic32_inc(rte_atomic32_t *v)
 {
-	__atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline void
 rte_atomic32_dec(rte_atomic32_t *v)
 {
-	__atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline int rte_atomic32_inc_and_test(rte_atomic32_t *v)
 {
-	return __atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE) + 1 == 0;
 }
 
 static inline int rte_atomic32_dec_and_test(rte_atomic32_t *v)
 {
-	return __atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE) - 1 == 0;
 }
 
 static inline uint32_t
@@ -157,47 +157,47 @@ rte_atomic64_set(rte_atomic64_t *v, int64_t new_value)
 static inline void
 rte_atomic64_add(rte_atomic64_t *v, int64_t inc)
 {
-	__atomic_add_fetch(&v->cnt, inc, __ATOMIC_ACQUIRE);
+	__atomic_fetch_add(&v->cnt, inc, __ATOMIC_ACQUIRE);
 }
 
 static inline void
 rte_atomic64_sub(rte_atomic64_t *v, int64_t dec)
 {
-	__atomic_sub_fetch(&v->cnt, dec, __ATOMIC_ACQUIRE);
+	__atomic_fetch_sub(&v->cnt, dec, __ATOMIC_ACQUIRE);
 }
 
 static inline void
 rte_atomic64_inc(rte_atomic64_t *v)
 {
-	__atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline void
 rte_atomic64_dec(rte_atomic64_t *v)
 {
-	__atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE);
+	__atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE);
 }
 
 static inline int64_t
 rte_atomic64_add_return(rte_atomic64_t *v, int64_t inc)
 {
-	return __atomic_add_fetch(&v->cnt, inc, __ATOMIC_ACQUIRE);
+	return __atomic_fetch_add(&v->cnt, inc, __ATOMIC_ACQUIRE) + inc;
 }
 
 static inline int64_t
 rte_atomic64_sub_return(rte_atomic64_t *v, int64_t dec)
 {
-	return __atomic_sub_fetch(&v->cnt, dec, __ATOMIC_ACQUIRE);
+	return __atomic_fetch_sub(&v->cnt, dec, __ATOMIC_ACQUIRE) - dec;
 }
 
 static inline int rte_atomic64_inc_and_test(rte_atomic64_t *v)
 {
-	return __atomic_add_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_add(&v->cnt, 1, __ATOMIC_ACQUIRE) + 1 == 0;
 }
 
 static inline int rte_atomic64_dec_and_test(rte_atomic64_t *v)
 {
-	return __atomic_sub_fetch(&v->cnt, 1, __ATOMIC_ACQUIRE) == 0;
+	return __atomic_fetch_sub(&v->cnt, 1, __ATOMIC_ACQUIRE) - 1 == 0;
 }
 
 static inline int rte_atomic64_test_and_set(rte_atomic64_t *v)

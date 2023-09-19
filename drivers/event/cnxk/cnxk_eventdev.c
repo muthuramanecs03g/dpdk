@@ -39,7 +39,11 @@ cnxk_sso_xaq_allocate(struct cnxk_sso_evdev *dev)
 	uint32_t xae_cnt;
 	int rc;
 
-	xae_cnt = dev->sso.iue;
+	if (dev->num_events > 0)
+		xae_cnt = dev->num_events;
+	else
+		xae_cnt = dev->sso.iue;
+
 	if (dev->xae_cnt)
 		xae_cnt += dev->xae_cnt;
 	if (dev->adptr_xae_cnt)
@@ -145,7 +149,8 @@ cnxk_sso_restore_links(const struct rte_eventdev *event_dev,
 }
 
 int
-cnxk_sso_dev_validate(const struct rte_eventdev *event_dev)
+cnxk_sso_dev_validate(const struct rte_eventdev *event_dev, uint32_t deq_depth,
+		      uint32_t enq_depth)
 {
 	struct rte_event_dev_config *conf = &event_dev->data->dev_conf;
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
@@ -173,12 +178,12 @@ cnxk_sso_dev_validate(const struct rte_eventdev *event_dev)
 		return -EINVAL;
 	}
 
-	if (conf->nb_event_port_dequeue_depth > 1) {
+	if (conf->nb_event_port_dequeue_depth > deq_depth) {
 		plt_err("Unsupported event port deq depth requested");
 		return -EINVAL;
 	}
 
-	if (conf->nb_event_port_enqueue_depth > 1) {
+	if (conf->nb_event_port_enqueue_depth > enq_depth) {
 		plt_err("Unsupported event port enq depth requested");
 		return -EINVAL;
 	}
@@ -188,6 +193,7 @@ cnxk_sso_dev_validate(const struct rte_eventdev *event_dev)
 
 	dev->nb_event_queues = conf->nb_event_queues;
 	dev->nb_event_ports = conf->nb_event_ports;
+	dev->num_events = conf->nb_events_limit;
 
 	return 0;
 }
@@ -322,9 +328,9 @@ int
 cnxk_sso_timeout_ticks(struct rte_eventdev *event_dev, uint64_t ns,
 		       uint64_t *tmo_ticks)
 {
-	RTE_SET_USED(event_dev);
-	*tmo_ticks = NSEC2TICK(ns, rte_get_timer_hz());
+	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
 
+	*tmo_ticks = dev->deq_tmo_ns ? ns / dev->deq_tmo_ns : 0;
 	return 0;
 }
 
@@ -630,6 +636,14 @@ cnxk_sso_init(struct rte_eventdev *event_dev)
 	}
 
 	dev = cnxk_sso_pmd_priv(event_dev);
+	dev->fc_cache_space = rte_zmalloc("fc_cache", PLT_CACHE_LINE_SIZE,
+					  PLT_CACHE_LINE_SIZE);
+	if (dev->fc_cache_space == NULL) {
+		plt_memzone_free(mz);
+		plt_err("Failed to reserve memory for XAQ fc cache");
+		return -ENOMEM;
+	}
+
 	pci_dev = container_of(event_dev->dev, struct rte_pci_device, device);
 	dev->sso.pci_dev = pci_dev;
 
@@ -678,4 +692,18 @@ int
 cnxk_sso_remove(struct rte_pci_device *pci_dev)
 {
 	return rte_event_pmd_pci_remove(pci_dev, cnxk_sso_fini);
+}
+
+void
+cn9k_sso_set_rsrc(void *arg)
+{
+	struct cnxk_sso_evdev *dev = arg;
+
+	if (dev->dual_ws)
+		dev->max_event_ports = dev->sso.max_hws / CN9K_DUAL_WS_NB_WS;
+	else
+		dev->max_event_ports = dev->sso.max_hws;
+	dev->max_event_queues = dev->sso.max_hwgrp > RTE_EVENT_MAX_QUEUES_PER_DEV ?
+					RTE_EVENT_MAX_QUEUES_PER_DEV :
+					dev->sso.max_hwgrp;
 }

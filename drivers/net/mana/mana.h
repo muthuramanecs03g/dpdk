@@ -142,19 +142,6 @@ struct gdma_header {
 #define COMPLETION_QUEUE_OWNER_MASK \
 	((1 << (COMPLETION_QUEUE_ENTRY_OWNER_BITS_SIZE)) - 1)
 
-struct gdma_comp {
-	struct gdma_header gdma_header;
-
-	/* Filled by GDMA core */
-	uint32_t completion_data[GDMA_COMP_DATA_SIZE_IN_UINT32];
-
-	/* Filled by GDMA core */
-	uint32_t work_queue_number;
-
-	/* Filled by GDMA core */
-	bool send_work_queue;
-};
-
 struct gdma_hardware_completion_entry {
 	char dma_client_data[GDMA_COMP_DATA_SIZE];
 	union {
@@ -366,6 +353,7 @@ struct mana_priv {
 struct mana_txq_desc {
 	struct rte_mbuf *pkt;
 	uint32_t wqe_size_in_bu;
+	bool suppress_tx_cqe;
 };
 
 struct mana_rxq_desc {
@@ -391,6 +379,11 @@ struct mana_gdma_queue {
 
 #define MANA_MR_BTREE_PER_QUEUE_N	64
 
+struct gdma_comp {
+	/* Filled by GDMA core */
+	char *cqe_data;
+};
+
 struct mana_txq {
 	struct mana_priv *priv;
 	uint32_t num_desc;
@@ -399,6 +392,7 @@ struct mana_txq {
 
 	struct mana_gdma_queue gdma_sq;
 	struct mana_gdma_queue gdma_cq;
+	struct gdma_comp *gdma_comp_buf;
 
 	uint32_t tx_vp_offset;
 
@@ -408,7 +402,7 @@ struct mana_txq {
 	/* desc_ring_head is where we put pending requests to ring,
 	 * completion pull off desc_ring_tail
 	 */
-	uint32_t desc_ring_head, desc_ring_tail;
+	uint32_t desc_ring_head, desc_ring_tail, desc_ring_len;
 
 	struct mana_mr_btree mr_btree;
 	struct mana_stats stats;
@@ -433,6 +427,11 @@ struct mana_rxq {
 
 	struct mana_gdma_queue gdma_rq;
 	struct mana_gdma_queue gdma_cq;
+	struct gdma_comp *gdma_comp_buf;
+
+	uint32_t comp_buf_len;
+	uint32_t comp_buf_idx;
+	uint32_t backlog_idx;
 
 	struct mana_stats stats;
 	struct mana_mr_btree mr_btree;
@@ -447,6 +446,9 @@ extern int mana_logtype_init;
 	rte_log(RTE_LOG_ ## level, mana_logtype_driver, "%s(): " fmt "\n", \
 		__func__, ## args)
 
+#define DP_LOG(level, fmt, args...) \
+	RTE_LOG_DP(level, PMD, fmt, ## args)
+
 #define PMD_INIT_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_init, "%s(): " fmt "\n",\
 		__func__, ## args)
@@ -455,11 +457,11 @@ extern int mana_logtype_init;
 
 int mana_ring_doorbell(void *db_page, enum gdma_queue_types queue_type,
 		       uint32_t queue_id, uint32_t tail, uint8_t arm);
-int mana_rq_ring_doorbell(struct mana_rxq *rxq, uint8_t arm);
+int mana_rq_ring_doorbell(struct mana_rxq *rxq);
 
 int gdma_post_work_request(struct mana_gdma_queue *queue,
 			   struct gdma_work_request *work_req,
-			   struct gdma_posted_wqe_info *wqe_info);
+			   uint32_t *wqe_size_in_bu);
 uint8_t *gdma_get_wqe_pointer(struct mana_gdma_queue *queue);
 
 uint16_t mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **rx_pkts,
@@ -473,8 +475,9 @@ uint16_t mana_rx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 			       uint16_t pkts_n);
 
-int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
-			       struct gdma_comp *comp);
+uint32_t gdma_poll_completion_queue(struct mana_gdma_queue *cq,
+				    struct gdma_comp *gdma_comp,
+				    uint32_t max_comp);
 
 int mana_start_rx_queues(struct rte_eth_dev *dev);
 int mana_start_tx_queues(struct rte_eth_dev *dev);

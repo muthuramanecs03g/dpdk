@@ -20,7 +20,6 @@
  * dump and destroy on graph and node operations such as clone,
  * edge update, and edge shrink, etc. The API also allows to create the stats
  * cluster to monitor per graph and per node stats.
- *
  */
 
 #include <stdbool.h>
@@ -95,7 +94,6 @@ struct rte_graph_cluster_node_stats; /**< Node stats within cluster of graphs */
  *   Number of objects processed.
  *
  * @see rte_graph_walk()
- *
  */
 typedef uint16_t (*rte_node_process_t)(struct rte_graph *graph,
 				       struct rte_node *node, void **objs,
@@ -169,6 +167,16 @@ struct rte_graph_param {
 	bool pcap_enable; /**< Pcap enable. */
 	uint64_t num_pkt_to_capture; /**< Number of packets to capture. */
 	char *pcap_filename; /**< Filename in which packets to be captured.*/
+
+	union {
+		struct {
+			uint64_t rsvd; /**< Reserved for rtc model. */
+		} rtc;
+		struct {
+			uint32_t wq_size_max; /**< Maximum size of workqueue for dispatch model. */
+			uint32_t mp_capacity; /**< Capacity of memory pool for dispatch model. */
+		} dispatch;
+	};
 };
 
 /**
@@ -183,7 +191,6 @@ struct rte_graph_cluster_stats_param {
 	/**< Stats print callback function. NULL value allowed, in that case,
 	 *   default print stat function used.
 	 */
-	RTE_STD_C11
 	union {
 		void *cookie;
 		FILE *f; /**< File pointer to dump the stats when fn == NULL. */
@@ -208,6 +215,15 @@ struct rte_graph_cluster_node_stats {
 	uint64_t prev_calls;	/**< Previous number of calls. */
 	uint64_t prev_objs;	/**< Previous number of processed objs. */
 	uint64_t prev_cycles;	/**< Previous number of cycles. */
+
+	union {
+		struct {
+			uint64_t sched_objs;
+			/**< Previous number of scheduled objs for dispatch model. */
+			uint64_t sched_fail;
+			/**< Previous number of failed schedule objs for dispatch model. */
+		} dispatch;
+	};
 
 	uint64_t realloc_count; /**< Realloc count. */
 
@@ -248,6 +264,28 @@ __rte_experimental
 int rte_graph_destroy(rte_graph_t id);
 
 /**
+ * Clone Graph.
+ *
+ * Clone a graph from static graph (graph created from rte_graph_create()). And
+ * all cloned graphs attached to the parent graph MUST be destroyed together
+ * for fast schedule design limitation (stop ALL graph walk firstly).
+ *
+ * @param id
+ *   Static graph id to clone from.
+ * @param name
+ *   Name of the new graph. The library prepends the parent graph name to the
+ * user-specified name. The final graph name will be,
+ * "parent graph name" + "-" + name.
+ * @param prm
+ *   Graph parameter, includes model-specific parameters in this graph.
+ *
+ * @return
+ *   Valid graph id on success, RTE_GRAPH_ID_INVALID otherwise.
+ */
+__rte_experimental
+rte_graph_t rte_graph_clone(rte_graph_t id, const char *name, struct rte_graph_param *prm);
+
+/**
  * Get graph id from graph name.
  *
  * @param name
@@ -284,6 +322,28 @@ char *rte_graph_id_to_name(rte_graph_t id);
  */
 __rte_experimental
 int rte_graph_export(const char *name, FILE *f);
+
+/**
+ * Bind graph with specific lcore for mcore dispatch model.
+ *
+ * @param id
+ *   Graph id to get the pointer of graph object
+ * @param lcore
+ * The lcore where the graph will run on
+ * @return
+ *   0 on success, error otherwise.
+ */
+__rte_experimental
+int rte_graph_model_mcore_dispatch_core_bind(rte_graph_t id, int lcore);
+
+/**
+ * Unbind graph with lcore for mcore dispatch model
+ *
+ * @param id
+ * Graph id to get the pointer of graph object
+ */
+__rte_experimental
+void rte_graph_model_mcore_dispatch_core_unbind(rte_graph_t id);
 
 /**
  * Get graph object from its name.

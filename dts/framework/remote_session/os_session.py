@@ -4,15 +4,27 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from ipaddress import IPv4Interface, IPv6Interface
 from pathlib import PurePath
+from typing import Type, TypeVar, Union
 
-from framework.config import Architecture, NodeConfiguration
+from framework.config import Architecture, NodeConfiguration, NodeInfo
 from framework.logger import DTSLOG
+from framework.remote_session.remote import InteractiveShell
 from framework.settings import SETTINGS
 from framework.testbed_model import LogicalCore
-from framework.utils import EnvVarsDict, MesonArgs
+from framework.testbed_model.hw.port import Port
+from framework.utils import MesonArgs
 
-from .remote import CommandResult, RemoteSession, create_remote_session
+from .remote import (
+    CommandResult,
+    InteractiveRemoteSession,
+    RemoteSession,
+    create_interactive_session,
+    create_remote_session,
+)
+
+InteractiveShellType = TypeVar("InteractiveShellType", bound=InteractiveShell)
 
 
 class OSSession(ABC):
@@ -26,6 +38,7 @@ class OSSession(ABC):
     name: str
     _logger: DTSLOG
     remote_session: RemoteSession
+    interactive_session: InteractiveRemoteSession
 
     def __init__(
         self,
@@ -37,6 +50,7 @@ class OSSession(ABC):
         self.name = name
         self._logger = logger
         self.remote_session = create_remote_session(node_config, name, logger)
+        self.interactive_session = create_interactive_session(node_config, logger)
 
     def close(self, force: bool = False) -> None:
         """
@@ -53,16 +67,50 @@ class OSSession(ABC):
     def send_command(
         self,
         command: str,
-        timeout: float,
+        timeout: float = SETTINGS.timeout,
+        privileged: bool = False,
         verify: bool = False,
-        env: EnvVarsDict | None = None,
+        env: dict | None = None,
     ) -> CommandResult:
         """
         An all-purpose API in case the command to be executed is already
         OS-agnostic, such as when the path to the executed command has been
         constructed beforehand.
         """
+        if privileged:
+            command = self._get_privileged_command(command)
+
         return self.remote_session.send_command(command, timeout, verify, env)
+
+    def create_interactive_shell(
+        self,
+        shell_cls: Type[InteractiveShellType],
+        eal_parameters: str,
+        timeout: float,
+        privileged: bool,
+    ) -> InteractiveShellType:
+        """
+        See "create_interactive_shell" in SutNode
+        """
+        return shell_cls(
+            self.interactive_session.session,
+            self._logger,
+            self._get_privileged_command if privileged else None,
+            eal_parameters,
+            timeout,
+        )
+
+    @staticmethod
+    @abstractmethod
+    def _get_privileged_command(command: str) -> str:
+        """Modify the command so that it executes with administrative privileges.
+
+        Args:
+            command: The command to modify.
+
+        Returns:
+            The modified command that executes with administrative privileges.
+        """
 
     @abstractmethod
     def guess_dpdk_remote_dir(self, remote_dir) -> PurePath:
@@ -90,17 +138,35 @@ class OSSession(ABC):
         """
 
     @abstractmethod
-    def copy_file(
+    def copy_from(
         self,
         source_file: str | PurePath,
         destination_file: str | PurePath,
-        source_remote: bool = False,
     ) -> None:
+        """Copy a file from the remote Node to the local filesystem.
+
+        Copy source_file from the remote Node associated with this remote
+        session to destination_file on the local filesystem.
+
+        Args:
+            source_file: the file on the remote Node.
+            destination_file: a file or directory path on the local filesystem.
         """
+
+    @abstractmethod
+    def copy_to(
+        self,
+        source_file: str | PurePath,
+        destination_file: str | PurePath,
+    ) -> None:
+        """Copy a file from local filesystem to the remote Node.
+
         Copy source_file from local filesystem to destination_file
-        on the remote Node associated with the remote session.
-        If source_remote is True, reverse the direction - copy source_file from the
-        associated remote Node to destination_file on local storage.
+        on the remote Node associated with this remote session.
+
+        Args:
+            source_file: the file on the local filesystem.
+            destination_file: a file or directory path on the remote Node.
         """
 
     @abstractmethod
@@ -128,7 +194,7 @@ class OSSession(ABC):
     @abstractmethod
     def build_dpdk(
         self,
-        env_vars: EnvVarsDict,
+        env_vars: dict,
         meson_args: MesonArgs,
         remote_dpdk_dir: str | PurePath,
         remote_dpdk_build_dir: str | PurePath,
@@ -172,4 +238,47 @@ class OSSession(ABC):
         Get the node's Hugepage Size, configure the specified amount of hugepages
         if needed and mount the hugepages if needed.
         If force_first_numa is True, configure hugepages just on the first socket.
+        """
+
+    @abstractmethod
+    def get_compiler_version(self, compiler_name: str) -> str:
+        """
+        Get installed version of compiler used for DPDK
+        """
+
+    @abstractmethod
+    def get_node_info(self) -> NodeInfo:
+        """
+        Collect information about the node
+        """
+
+    @abstractmethod
+    def update_ports(self, ports: list[Port]) -> None:
+        """
+        Get additional information about ports:
+            Logical name (e.g. enp7s0) if applicable
+            Mac address
+        """
+
+    @abstractmethod
+    def configure_port_state(self, port: Port, enable: bool) -> None:
+        """
+        Enable/disable port.
+        """
+
+    @abstractmethod
+    def configure_port_ip_address(
+        self,
+        address: Union[IPv4Interface, IPv6Interface],
+        port: Port,
+        delete: bool,
+    ) -> None:
+        """
+        Configure (add or delete) an IP address of the input port.
+        """
+
+    @abstractmethod
+    def configure_ipv4_forwarding(self, enable: bool) -> None:
+        """
+        Enable IPv4 forwarding in the underlying OS.
         """

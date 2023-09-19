@@ -172,8 +172,12 @@ enum rte_crypto_cipher_algorithm {
 	/**< ShangMi 4 (SM4) algorithm in ECB mode */
 	RTE_CRYPTO_CIPHER_SM4_CBC,
 	/**< ShangMi 4 (SM4) algorithm in CBC mode */
-	RTE_CRYPTO_CIPHER_SM4_CTR
+	RTE_CRYPTO_CIPHER_SM4_CTR,
 	/**< ShangMi 4 (SM4) algorithm in CTR mode */
+	RTE_CRYPTO_CIPHER_SM4_OFB,
+	/**< ShangMi 4 (SM4) algorithm in OFB mode */
+	RTE_CRYPTO_CIPHER_SM4_CFB
+	/**< ShangMi 4 (SM4) algorithm in CFB mode */
 };
 
 /** Cipher algorithm name strings */
@@ -242,7 +246,7 @@ struct rte_crypto_cipher_xform {
 	 *    (key1 || key2).
 	 *  - Each key can be either 128 bits (16 bytes) or 256 bits (32 bytes).
 	 *  - Both keys must have the same size.
-	 **/
+	 */
 	struct {
 		uint16_t offset;
 		/**< Starting point for Initialisation Vector or Counter,
@@ -381,6 +385,8 @@ enum rte_crypto_auth_algorithm {
 	/**< 128 bit SHAKE algorithm. */
 	RTE_CRYPTO_AUTH_SHAKE_256,
 	/**< 256 bit SHAKE algorithm. */
+	RTE_CRYPTO_AUTH_SM3_HMAC,
+	/** < HMAC using ShangMi 3 (SM3) algorithm */
 };
 
 /** Authentication algorithm name strings */
@@ -588,7 +594,6 @@ struct rte_crypto_sym_xform {
 	/**< next xform in chain */
 	enum rte_crypto_sym_xform_type type
 	; /**< xform type */
-	RTE_STD_C11
 	union {
 		struct rte_crypto_auth_xform auth;
 		/**< Authentication / hash xform */
@@ -635,7 +640,6 @@ struct rte_crypto_sym_op {
 	struct rte_mbuf *m_src;	/**< source mbuf */
 	struct rte_mbuf *m_dst;	/**< destination mbuf */
 
-	RTE_STD_C11
 	union {
 		void *session;
 		/**< Handle for the initialised crypto/security session context */
@@ -643,7 +647,6 @@ struct rte_crypto_sym_op {
 		/**< Session-less API crypto operation parameters */
 	};
 
-	RTE_STD_C11
 	union {
 		struct {
 			struct {

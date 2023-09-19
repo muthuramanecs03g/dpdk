@@ -52,7 +52,6 @@
  * Used to store port and queue ID of interrupting Rx queue
  */
 union queue_data {
-	RTE_STD_C11
 	void *ptr;
 	struct {
 		uint16_t port;
@@ -1620,7 +1619,7 @@ rxa_create_intr_thread(struct event_eth_rx_adapter *rx_adapter)
 	rte_spinlock_init(&rx_adapter->intr_ring_lock);
 
 	snprintf(thread_name, RTE_MAX_THREAD_NAME_LEN,
-			"rx-intr-thread-%d", rx_adapter->id);
+			"dpdk-evt-rx%d", rx_adapter->id);
 
 	err = rte_ctrl_thread_create(&rx_adapter->rx_intr_thread, thread_name,
 				NULL, rxa_intr_thread, rx_adapter);
@@ -3466,30 +3465,14 @@ rte_event_eth_rx_adapter_instance_get(uint16_t eth_dev_id,
 static int
 rxa_caps_check(struct event_eth_rx_adapter *rxa)
 {
-	uint16_t eth_dev_id;
-	uint32_t caps = 0;
-	int ret;
-
 	if (!rxa->nb_queues)
 		return -EINVAL;
 
-	/* The eth_dev used is always of same type.
-	 * Hence eth_dev_id is taken from first entry of poll array.
-	 */
-	eth_dev_id = rxa->eth_rx_poll[0].eth_dev_id;
-	ret = rte_event_eth_rx_adapter_caps_get(rxa->eventdev_id,
-						eth_dev_id,
-						&caps);
-	if (ret) {
-		RTE_EDEV_LOG_ERR("Failed to get adapter caps edev %" PRIu8
-			"eth port %" PRIu16, rxa->eventdev_id, eth_dev_id);
-		return ret;
-	}
+	/* Check if there is at least one non-internal ethernet port. */
+	if (rxa->service_inited)
+		return 0;
 
-	if (caps & RTE_EVENT_ETH_RX_ADAPTER_CAP_INTERNAL_PORT)
-		return -ENOTSUP;
-
-	return 0;
+	return -ENOTSUP;
 }
 
 int
@@ -3597,6 +3580,8 @@ handle_rxa_stats(const char *cmd __rte_unused,
 	RXA_ADD_DICT(rx_adptr_stats, rx_enq_block_cycles);
 	RXA_ADD_DICT(rx_adptr_stats, rx_enq_end_ts);
 	RXA_ADD_DICT(rx_adptr_stats, rx_intr_packets);
+	RXA_ADD_DICT(rx_adptr_stats, rx_event_buf_count);
+	RXA_ADD_DICT(rx_adptr_stats, rx_event_buf_size);
 
 	return 0;
 }

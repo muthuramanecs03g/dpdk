@@ -48,6 +48,14 @@
 #define MLX5_HW_INV_QUEUE UINT32_MAX
 
 /*
+ * The default ipool threshold value indicates which per_core_cache
+ * value to set.
+ */
+#define MLX5_HW_IPOOL_SIZE_THRESHOLD (1 << 19)
+/* The default min local cache size. */
+#define MLX5_HW_IPOOL_CACHE_MIN (1 << 9)
+
+/*
  * Number of modification commands.
  * The maximal actions amount in FW is some constant, and it is 16 in the
  * latest releases. In some old releases, it will be limited to 8.
@@ -346,11 +354,12 @@ struct mlx5_lb_ctx {
 };
 
 /* HW steering queue job descriptor type. */
-enum {
+enum mlx5_hw_job_type {
 	MLX5_HW_Q_JOB_TYPE_CREATE, /* Flow create job type. */
 	MLX5_HW_Q_JOB_TYPE_DESTROY, /* Flow destroy job type. */
-	MLX5_HW_Q_JOB_TYPE_UPDATE,
-	MLX5_HW_Q_JOB_TYPE_QUERY,
+	MLX5_HW_Q_JOB_TYPE_UPDATE, /* Flow update job type. */
+	MLX5_HW_Q_JOB_TYPE_QUERY, /* Flow query job type. */
+	MLX5_HW_Q_JOB_TYPE_UPDATE_QUERY, /* Flow update and query job type. */
 };
 
 #define MLX5_HW_MAX_ITEMS (16)
@@ -368,14 +377,15 @@ struct mlx5_hw_q_job {
 	struct rte_flow_item *items;
 	union {
 		struct {
-			/* Pointer to ct query user memory. */
-			struct rte_flow_action_conntrack *profile;
-			/* Pointer to ct ASO query out memory. */
-			void *out_data;
-		} __rte_packed;
+			/* User memory for query output */
+			void *user;
+			/* Data extracted from hardware */
+			void *hw;
+		} __rte_packed query;
 		struct rte_flow_item_ethdev port_spec;
 		struct rte_flow_item_tag tag_spec;
 	} __rte_packed;
+	struct rte_flow_hw *upd_flow; /* Flow with updated values. */
 };
 
 /* HW steering job descriptor LIFO pool. */
@@ -592,6 +602,7 @@ struct mlx5_aso_sq_elem {
 			char *query_data;
 		};
 		void *user_data;
+		struct mlx5_quota *quota_obj;
 	};
 };
 
@@ -1186,6 +1197,7 @@ struct mlx5_dev_txpp {
 	uint64_t err_clock_queue; /* Clock Queue errors. */
 	uint64_t err_ts_past; /* Timestamp in the past. */
 	uint64_t err_ts_future; /* Timestamp in the distant future. */
+	uint64_t err_ts_order; /* Timestamp not in ascending order. */
 };
 
 /* Sample ID information of eCPRI flex parser structure. */
@@ -1377,7 +1389,7 @@ struct mlx5_dev_ctx_shared {
 	uint32_t tunnel_header_0_1:1; /* tunnel_header_0_1 is supported. */
 	uint32_t tunnel_header_2_3:1; /* tunnel_header_2_3 is supported. */
 	uint32_t misc5_cap:1; /* misc5 matcher parameter is supported. */
-	uint32_t dr_drop_action_en:1; /* Use DR drop action. */
+	uint32_t dr_root_drop_action_en:1; /* DR drop action is usable on root tables. */
 	uint32_t drop_action_check_flag:1; /* Check Flag for drop action. */
 	uint32_t flow_priority_check_flag:1; /* Check Flag for flow priority. */
 	uint32_t metadata_regc_check_flag:1; /* Check Flag for metadata REGC. */
@@ -1497,6 +1509,7 @@ struct mlx5_mtr_config {
 
 /* RSS description. */
 struct mlx5_flow_rss_desc {
+	bool symmetric_hash_function; /**< Symmetric hash function */
 	uint32_t level;
 	uint32_t queue_num; /**< Number of entries in @p queue. */
 	uint64_t types; /**< Specific RSS hash types (see RTE_ETH_RSS_*). */
@@ -1522,7 +1535,6 @@ struct mlx5_rxq_obj {
 	LIST_ENTRY(mlx5_rxq_obj) next; /* Pointer to the next element. */
 	struct mlx5_rxq_ctrl *rxq_ctrl; /* Back pointer to parent. */
 	int fd; /* File descriptor for event channel */
-	RTE_STD_C11
 	union {
 		struct {
 			void *wq; /* Work Queue. */
@@ -1542,7 +1554,6 @@ struct mlx5_rxq_obj {
 struct mlx5_ind_table_obj {
 	LIST_ENTRY(mlx5_ind_table_obj) next; /* Pointer to the next element. */
 	uint32_t refcnt; /* Reference counter. */
-	RTE_STD_C11
 	union {
 		void *ind_table; /**< Indirection table. */
 		struct mlx5_devx_obj *rqt; /* DevX RQT object. */
@@ -1557,7 +1568,6 @@ struct mlx5_hrxq {
 	struct mlx5_list_entry entry; /* List entry. */
 	uint32_t standalone:1; /* This object used in shared action. */
 	struct mlx5_ind_table_obj *ind_table; /* Indirection table. */
-	RTE_STD_C11
 	union {
 		void *qp; /* Verbs queue pair. */
 		struct mlx5_devx_obj *tir; /* DevX TIR object. */
@@ -1565,6 +1575,7 @@ struct mlx5_hrxq {
 #if defined(HAVE_IBV_FLOW_DV_SUPPORT) || !defined(HAVE_INFINIBAND_VERBS_H)
 	void *action; /* DV QP action pointer. */
 #endif
+	bool symmetric_hash_function; /* Symmetric hash function */
 	uint32_t hws_flags; /* Hw steering flags. */
 	uint64_t hash_fields; /* Verbs Hash fields. */
 	uint32_t rss_key_len; /* Hash key length in bytes. */
@@ -1576,7 +1587,6 @@ struct mlx5_hrxq {
 struct mlx5_txq_obj {
 	LIST_ENTRY(mlx5_txq_obj) next; /* Pointer to the next element. */
 	struct mlx5_txq_ctrl *txq_ctrl; /* Pointer to the control queue. */
-	RTE_STD_C11
 	union {
 		struct {
 			void *cq; /* Completion Queue. */
@@ -1636,6 +1646,7 @@ struct mlx5_obj_ops {
 	int (*hrxq_modify)(struct rte_eth_dev *dev, struct mlx5_hrxq *hrxq,
 			   const uint8_t *rss_key,
 			   uint64_t hash_fields,
+			   bool symmetric_hash_function,
 			   const struct mlx5_ind_table_obj *ind_tbl);
 	void (*hrxq_destroy)(struct mlx5_hrxq *hrxq);
 	int (*drop_action_create)(struct rte_eth_dev *dev);
@@ -1686,6 +1697,33 @@ struct mlx5_flow_hw_attr {
 
 struct mlx5_flow_hw_ctrl_rx;
 
+enum mlx5_quota_state {
+	MLX5_QUOTA_STATE_FREE,	/* quota not in use */
+	MLX5_QUOTA_STATE_READY, /* quota is ready   */
+	MLX5_QUOTA_STATE_WAIT	/* quota waits WR completion */
+};
+
+struct mlx5_quota {
+	uint8_t state; /* object state */
+	uint8_t mode;  /* metering mode */
+	/**
+	 * Keep track of application update types.
+	 * PMD does not allow 2 consecutive ADD updates.
+	 */
+	enum rte_flow_update_quota_op last_update;
+};
+
+/* Bulk management structure for flow quota. */
+struct mlx5_quota_ctx {
+	uint32_t nb_quotas; /* Total number of quota objects */
+	struct mlx5dr_action *dr_action; /* HWS action */
+	struct mlx5_devx_obj *devx_obj; /* DEVX ranged object. */
+	struct mlx5_pmd_mr mr; /* MR for READ from MTR ASO */
+	struct mlx5_aso_mtr_dseg **read_buf; /* Buffers for READ */
+	struct mlx5_aso_sq *sq; /* SQs for sync/async ACCESS_ASO WRs */
+	struct mlx5_indexed_pool *quota_ipool; /* Manage quota objects */
+};
+
 struct mlx5_priv {
 	struct rte_eth_dev_data *dev_data;  /* Pointer to device data. */
 	struct mlx5_dev_ctx_shared *sh; /* Shared device context. */
@@ -1706,8 +1744,10 @@ struct mlx5_priv {
 	unsigned int mtr_en:1; /* Whether support meter. */
 	unsigned int mtr_reg_share:1; /* Whether support meter REG_C share. */
 	unsigned int lb_used:1; /* Loopback queue is referred to. */
+	unsigned int rmv_notified:1; /* Notified about removal event */
 	uint32_t mark_enabled:1; /* If mark action is enabled on rxqs. */
 	uint32_t num_lag_ports:4; /* Number of ports can be bonded. */
+	uint32_t tunnel_enabled:1; /* If tunnel offloading is enabled on rxqs. */
 	uint16_t domain_id; /* Switch domain identifier. */
 	uint16_t vport_id; /* Associated VF vport index (if any). */
 	uint32_t vport_meta_tag; /* Used for vport index match ove VF LAG. */
@@ -1776,6 +1816,7 @@ struct mlx5_priv {
 	struct mlx5_flow_meter_policy *mtr_policy_arr; /* Policy array. */
 	struct mlx5_l3t_tbl *mtr_idx_tbl; /* Meter index lookup table. */
 	struct mlx5_mtr_bulk mtr_bulk; /* Meter index mapping for HWS */
+	struct mlx5_quota_ctx quota_ctx; /* Quota index mapping for HWS */
 	uint8_t skip_default_rss_reta; /* Skip configuration of default reta. */
 	uint8_t fdb_def_rule; /* Whether fdb jump to table 1 is configured. */
 	struct mlx5_mp_id mp_id; /* ID of a multi-process process */
@@ -1814,6 +1855,8 @@ struct mlx5_priv {
 	struct mlx5dr_action *hw_drop[2];
 	/* HW steering global tag action. */
 	struct mlx5dr_action *hw_tag[2];
+	/* HW steering global send to kernel action. */
+	struct mlx5dr_action *hw_send_to_kernel;
 	/* HW steering create ongoing rte flow table list header. */
 	LIST_HEAD(flow_hw_tbl_ongo, rte_flow_template_table) flow_hw_tbl_ongo;
 	struct mlx5_indexed_pool *acts_ipool; /* Action data indexed pool. */
@@ -2116,7 +2159,9 @@ int mlx5_flow_query_counter(struct rte_eth_dev *dev, struct rte_flow *flow,
 int mlx5_flow_dev_dump_ipool(struct rte_eth_dev *dev, struct rte_flow *flow,
 		FILE *file, struct rte_flow_error *error);
 #endif
-void mlx5_flow_rxq_dynf_metadata_set(struct rte_eth_dev *dev);
+int mlx5_flow_rx_metadata_negotiate(struct rte_eth_dev *dev,
+	uint64_t *features);
+void mlx5_flow_rxq_dynf_set(struct rte_eth_dev *dev);
 int mlx5_flow_get_aged_flows(struct rte_eth_dev *dev, void **contexts,
 			uint32_t nb_contexts, struct rte_flow_error *error);
 int mlx5_validate_action_ct(struct rte_eth_dev *dev,
@@ -2273,6 +2318,15 @@ int mlx5_aso_ct_queue_init(struct mlx5_dev_ctx_shared *sh,
 			   uint32_t nb_queues);
 int mlx5_aso_ct_queue_uninit(struct mlx5_dev_ctx_shared *sh,
 			     struct mlx5_aso_ct_pools_mng *ct_mng);
+int
+mlx5_aso_sq_create(struct mlx5_common_device *cdev, struct mlx5_aso_sq *sq,
+		   void *uar, uint16_t log_desc_n);
+void
+mlx5_aso_destroy_sq(struct mlx5_aso_sq *sq);
+void
+mlx5_aso_mtr_init_sq(struct mlx5_aso_sq *sq);
+void
+mlx5_aso_cqe_err_handle(struct mlx5_aso_sq *sq);
 
 /* mlx5_flow_flex.c */
 
@@ -2309,6 +2363,31 @@ struct mlx5_list_entry *mlx5_flex_parser_clone_cb(void *list_ctx,
 						  void *ctx);
 void mlx5_flex_parser_clone_free_cb(void *tool_ctx,
 				    struct mlx5_list_entry *entry);
+
+int
+mlx5_flow_quota_destroy(struct rte_eth_dev *dev);
+int
+mlx5_flow_quota_init(struct rte_eth_dev *dev, uint32_t nb_quotas);
+struct rte_flow_action_handle *
+mlx5_quota_alloc(struct rte_eth_dev *dev, uint32_t queue,
+		 const struct rte_flow_action_quota *conf,
+		 struct mlx5_hw_q_job *job, bool push,
+		 struct rte_flow_error *error);
+void
+mlx5_quota_async_completion(struct rte_eth_dev *dev, uint32_t queue,
+			    struct mlx5_hw_q_job *job);
+int
+mlx5_quota_query_update(struct rte_eth_dev *dev, uint32_t queue,
+			struct rte_flow_action_handle *handle,
+			const struct rte_flow_action *update,
+			struct rte_flow_query_quota *query,
+			struct mlx5_hw_q_job *async_job, bool push,
+			struct rte_flow_error *error);
+int mlx5_quota_query(struct rte_eth_dev *dev, uint32_t queue,
+		     const struct rte_flow_action_handle *handle,
+		     struct rte_flow_query_quota *query,
+		     struct mlx5_hw_q_job *async_job, bool push,
+		     struct rte_flow_error *error);
 
 int mlx5_alloc_srh_flex_parser(struct rte_eth_dev *dev);
 

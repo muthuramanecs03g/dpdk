@@ -173,7 +173,7 @@ Create the graph object
 ~~~~~~~~~~~~~~~~~~~~~~~
 Now that the nodes are linked, Its time to create a graph by including
 the required nodes. The application can provide a set of node patterns to
-form a graph object. The ``famish()`` API used underneath for the pattern
+form a graph object. The ``fnmatch()`` API used underneath for the pattern
 matching to include the required nodes. After the graph create any changes to
 nodes or graph is not allowed.
 
@@ -189,13 +189,70 @@ In the above example, A graph object will be created with ethdev Rx
 node of port 0 and queue 0, all ipv4* nodes in the system,
 and ethdev tx node of all ports.
 
-Multicore graph processing
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-In the current graph library implementation, specifically,
-``rte_graph_walk()`` and ``rte_node_enqueue*`` fast path API functions
-are designed to work on single-core to have better performance.
-The fast path API works on graph object, So the multi-core graph
-processing strategy would be to create graph object PER WORKER.
+Graph models
+~~~~~~~~~~~~
+There are two different kinds of graph walking models. User can select the model using
+``rte_graph_worker_model_set()`` API. If the application decides to use only one model,
+the fast path check can be avoided by defining the model with RTE_GRAPH_MODEL_SELECT.
+For example:
+
+.. code-block:: c
+
+  #define RTE_GRAPH_MODEL_SELECT RTE_GRAPH_MODEL_RTC
+  #include "rte_graph_worker.h"
+
+RTC (Run-To-Completion)
+^^^^^^^^^^^^^^^^^^^^^^^
+This is the default graph walking model. Specifically, ``rte_graph_walk_rtc()`` and
+``rte_node_enqueue*`` fast path API functions are designed to work on single-core to
+have better performance. The fast path API works on graph object, So the multi-core
+graph processing strategy would be to create graph object PER WORKER.
+
+Example:
+
+Graph: node-0 -> node-1 -> node-2 @Core0.
+
+.. code-block:: diff
+
+    + - - - - - - - - - - - - - - - - - - - - - +
+    '                  Core #0                  '
+    '                                           '
+    ' +--------+     +---------+     +--------+ '
+    ' | Node-0 | --> | Node-1  | --> | Node-2 | '
+    ' +--------+     +---------+     +--------+ '
+    '                                           '
+    + - - - - - - - - - - - - - - - - - - - - - +
+
+Dispatch model
+^^^^^^^^^^^^^^
+The dispatch model enables a cross-core dispatching mechanism which employs
+a scheduling work-queue to dispatch streams to other worker cores which
+being associated with the destination node.
+
+Use ``rte_graph_model_mcore_dispatch_lcore_affinity_set()`` to set lcore affinity
+with the node.
+Each worker core will have a graph repetition. Use ``rte_graph_clone()`` to clone
+graph for each worker and use``rte_graph_model_mcore_dispatch_core_bind()`` to
+bind graph with the worker core.
+
+Example:
+
+Graph topo: node-0 -> Core1; node-1 -> node-2; node-2 -> node-3.
+Config graph: node-0 @Core0; node-1/3 @Core1; node-2 @Core2.
+
+.. code-block:: diff
+
+    + - - - - - -+     +- - - - - - - - - - - - - +     + - - - - - -+
+    '  Core #0   '     '          Core #1         '     '  Core #2   '
+    '            '     '                          '     '            '
+    ' +--------+ '     ' +--------+    +--------+ '     ' +--------+ '
+    ' | Node-0 | - - - ->| Node-1 |    | Node-3 |<- - - - | Node-2 | '
+    ' +--------+ '     ' +--------+    +--------+ '     ' +--------+ '
+    '            '     '     |                    '     '      ^     '
+    + - - - - - -+     +- - -|- - - - - - - - - - +     + - - -|- - -+
+                             |                                 |
+                             + - - - - - - - - - - - - - - - - +
+
 
 In fast path
 ~~~~~~~~~~~~
@@ -337,8 +394,16 @@ to enable fastpath services.
 Inbuilt Nodes
 -------------
 
-DPDK provides a set of nodes for data processing. The following section
-details the documentation for the same.
+DPDK provides a set of nodes for data processing.
+The following diagram depicts inbuilt nodes data flow.
+
+.. _figure_graph_inbuit_node_flow:
+
+.. figure:: img/graph_inbuilt_node_flow.*
+
+   Inbuilt nodes data flow
+
+Following section details the documentation for individual inbuilt node.
 
 ethdev_rx
 ~~~~~~~~~
@@ -388,7 +453,48 @@ to determine the L2 header to be written to the packet before sending
 the packet out to a particular ethdev_tx node.
 ``rte_node_ip4_rewrite_add()`` is control path API to add next-hop info.
 
+ip6_lookup
+~~~~~~~~~~
+This node is an intermediate node that does LPM lookup for the received
+IPv6 packets and the result determines each packets next node.
+
+On successful LPM lookup, the result contains the ``next_node`` ID
+and `next-hop`` ID with which the packet needs to be further processed.
+
+On LPM lookup failure, objects are redirected to ``pkt_drop`` node.
+``rte_node_ip6_route_add()`` is control path API to add IPv6 routes.
+To achieve home run, node use ``rte_node_stream_move()``
+as mentioned in above sections.
+
+ip6_rewrite
+~~~~~~~~~~~
+This node gets packets from ``ip6_lookup`` node with next-hop ID
+for each packet is embedded in ``node_mbuf_priv1(mbuf)->nh``.
+This ID is used to determine the L2 header to be written to the packet
+before sending the packet out to a particular ``ethdev_tx`` node.
+``rte_node_ip6_rewrite_add()`` is control path API to add next-hop info.
+
 null
 ~~~~
 This node ignores the set of objects passed to it and reports that all are
 processed.
+
+kernel_tx
+~~~~~~~~~
+This node is an exit node that forwards the packets to kernel.
+It will be used to forward any control plane traffic to kernel stack from DPDK.
+It uses a raw socket interface to transmit the packets,
+it uses the packet's destination IP address in sockaddr_in address structure
+and ``sendto`` function to send data on the raw socket.
+After sending the burst of packets to kernel,
+this node frees up the packet buffers.
+
+kernel_rx
+~~~~~~~~~
+This node is a source node which receives packets from kernel
+and forwards to any of the intermediate nodes.
+It uses the raw socket interface to receive packets from kernel.
+Uses ``poll`` function to poll on the socket fd
+for ``POLLIN`` events to read the packets from raw socket
+to stream buffer and does ``rte_node_next_stream_move()``
+when there are received packets.

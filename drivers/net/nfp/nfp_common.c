@@ -5,14 +5,6 @@
  * Small portions derived from code Copyright(c) 2010-2015 Intel Corporation.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * @file dpdk/pmd/nfp_common.c
- *
- * Netronome vNIC DPDK Poll-Mode Driver: Common files
- */
-
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_log.h>
@@ -44,13 +36,131 @@
 #include "nfp_logs.h"
 #include "nfp_cpp_bridge.h"
 
+#include "nfd3/nfp_nfd3.h"
+#include "nfdk/nfp_nfdk.h"
+
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
-#include <errno.h>
+
+enum nfp_xstat_group {
+	NFP_XSTAT_GROUP_NET,
+	NFP_XSTAT_GROUP_MAC
+};
+struct nfp_xstat {
+	char name[RTE_ETH_XSTATS_NAME_SIZE];
+	int offset;
+	enum nfp_xstat_group group;
+};
+
+#define NFP_XSTAT_NET(_name, _offset) {                 \
+	.name = _name,                                  \
+	.offset = NFP_NET_CFG_STATS_##_offset,          \
+	.group = NFP_XSTAT_GROUP_NET,                   \
+}
+
+#define NFP_XSTAT_MAC(_name, _offset) {                 \
+	.name = _name,                                  \
+	.offset = NFP_MAC_STATS_##_offset,              \
+	.group = NFP_XSTAT_GROUP_MAC,                   \
+}
+
+static const struct nfp_xstat nfp_net_xstats[] = {
+	/**
+	 * Basic xstats available on both VF and PF.
+	 * Note that in case new statistics of group NFP_XSTAT_GROUP_NET
+	 * are added to this array, they must appear before any statistics
+	 * of group NFP_XSTAT_GROUP_MAC.
+	 */
+	NFP_XSTAT_NET("rx_good_packets_mc", RX_MC_FRAMES),
+	NFP_XSTAT_NET("tx_good_packets_mc", TX_MC_FRAMES),
+	NFP_XSTAT_NET("rx_good_packets_bc", RX_BC_FRAMES),
+	NFP_XSTAT_NET("tx_good_packets_bc", TX_BC_FRAMES),
+	NFP_XSTAT_NET("rx_good_bytes_uc", RX_UC_OCTETS),
+	NFP_XSTAT_NET("tx_good_bytes_uc", TX_UC_OCTETS),
+	NFP_XSTAT_NET("rx_good_bytes_mc", RX_MC_OCTETS),
+	NFP_XSTAT_NET("tx_good_bytes_mc", TX_MC_OCTETS),
+	NFP_XSTAT_NET("rx_good_bytes_bc", RX_BC_OCTETS),
+	NFP_XSTAT_NET("tx_good_bytes_bc", TX_BC_OCTETS),
+	NFP_XSTAT_NET("tx_missed_erros", TX_DISCARDS),
+	NFP_XSTAT_NET("bpf_pass_pkts", APP0_FRAMES),
+	NFP_XSTAT_NET("bpf_pass_bytes", APP0_BYTES),
+	NFP_XSTAT_NET("bpf_app1_pkts", APP1_FRAMES),
+	NFP_XSTAT_NET("bpf_app1_bytes", APP1_BYTES),
+	NFP_XSTAT_NET("bpf_app2_pkts", APP2_FRAMES),
+	NFP_XSTAT_NET("bpf_app2_bytes", APP2_BYTES),
+	NFP_XSTAT_NET("bpf_app3_pkts", APP3_FRAMES),
+	NFP_XSTAT_NET("bpf_app3_bytes", APP3_BYTES),
+	/**
+	 * MAC xstats available only on PF. These statistics are not available for VFs as the
+	 * PF is not initialized when the VF is initialized as it is still bound to the kernel
+	 * driver. As such, the PMD cannot obtain a CPP handle and access the rtsym_table in order
+	 * to get the pointer to the start of the MAC statistics counters.
+	 */
+	NFP_XSTAT_MAC("mac.rx_octets", RX_IN_OCTS),
+	NFP_XSTAT_MAC("mac.rx_frame_too_long_errors", RX_FRAME_TOO_LONG_ERRORS),
+	NFP_XSTAT_MAC("mac.rx_range_length_errors", RX_RANGE_LENGTH_ERRORS),
+	NFP_XSTAT_MAC("mac.rx_vlan_received_ok", RX_VLAN_RECEIVED_OK),
+	NFP_XSTAT_MAC("mac.rx_errors", RX_IN_ERRORS),
+	NFP_XSTAT_MAC("mac.rx_broadcast_pkts", RX_IN_BROADCAST_PKTS),
+	NFP_XSTAT_MAC("mac.rx_drop_events", RX_DROP_EVENTS),
+	NFP_XSTAT_MAC("mac.rx_alignment_errors", RX_ALIGNMENT_ERRORS),
+	NFP_XSTAT_MAC("mac.rx_pause_mac_ctrl_frames", RX_PAUSE_MAC_CTRL_FRAMES),
+	NFP_XSTAT_MAC("mac.rx_frames_received_ok", RX_FRAMES_RECEIVED_OK),
+	NFP_XSTAT_MAC("mac.rx_frame_check_sequence_errors", RX_FRAME_CHECK_SEQ_ERRORS),
+	NFP_XSTAT_MAC("mac.rx_unicast_pkts", RX_UNICAST_PKTS),
+	NFP_XSTAT_MAC("mac.rx_multicast_pkts", RX_MULTICAST_PKTS),
+	NFP_XSTAT_MAC("mac.rx_pkts", RX_PKTS),
+	NFP_XSTAT_MAC("mac.rx_undersize_pkts", RX_UNDERSIZE_PKTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_64_octets", RX_PKTS_64_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_65_to_127_octets", RX_PKTS_65_TO_127_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_128_to_255_octets", RX_PKTS_128_TO_255_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_256_to_511_octets", RX_PKTS_256_TO_511_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_512_to_1023_octets", RX_PKTS_512_TO_1023_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_1024_to_1518_octets", RX_PKTS_1024_TO_1518_OCTS),
+	NFP_XSTAT_MAC("mac.rx_pkts_1519_to_max_octets", RX_PKTS_1519_TO_MAX_OCTS),
+	NFP_XSTAT_MAC("mac.rx_jabbers", RX_JABBERS),
+	NFP_XSTAT_MAC("mac.rx_fragments", RX_FRAGMENTS),
+	NFP_XSTAT_MAC("mac.rx_oversize_pkts", RX_OVERSIZE_PKTS),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class0", RX_PAUSE_FRAMES_CLASS0),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class1", RX_PAUSE_FRAMES_CLASS1),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class2", RX_PAUSE_FRAMES_CLASS2),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class3", RX_PAUSE_FRAMES_CLASS3),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class4", RX_PAUSE_FRAMES_CLASS4),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class5", RX_PAUSE_FRAMES_CLASS5),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class6", RX_PAUSE_FRAMES_CLASS6),
+	NFP_XSTAT_MAC("mac.rx_pause_frames_class7", RX_PAUSE_FRAMES_CLASS7),
+	NFP_XSTAT_MAC("mac.rx_mac_ctrl_frames_received", RX_MAC_CTRL_FRAMES_REC),
+	NFP_XSTAT_MAC("mac.rx_mac_head_drop", RX_MAC_HEAD_DROP),
+	NFP_XSTAT_MAC("mac.tx_queue_drop", TX_QUEUE_DROP),
+	NFP_XSTAT_MAC("mac.tx_octets", TX_OUT_OCTS),
+	NFP_XSTAT_MAC("mac.tx_vlan_transmitted_ok", TX_VLAN_TRANSMITTED_OK),
+	NFP_XSTAT_MAC("mac.tx_errors", TX_OUT_ERRORS),
+	NFP_XSTAT_MAC("mac.tx_broadcast_pkts", TX_BROADCAST_PKTS),
+	NFP_XSTAT_MAC("mac.tx_pause_mac_ctrl_frames", TX_PAUSE_MAC_CTRL_FRAMES),
+	NFP_XSTAT_MAC("mac.tx_frames_transmitted_ok", TX_FRAMES_TRANSMITTED_OK),
+	NFP_XSTAT_MAC("mac.tx_unicast_pkts", TX_UNICAST_PKTS),
+	NFP_XSTAT_MAC("mac.tx_multicast_pkts", TX_MULTICAST_PKTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_64_octets", TX_PKTS_64_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_65_to_127_octets", TX_PKTS_65_TO_127_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_128_to_255_octets", TX_PKTS_128_TO_255_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_256_to_511_octets", TX_PKTS_256_TO_511_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_512_to_1023_octets", TX_PKTS_512_TO_1023_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_1024_to_1518_octets", TX_PKTS_1024_TO_1518_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pkts_1519_to_max_octets", TX_PKTS_1519_TO_MAX_OCTS),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class0", TX_PAUSE_FRAMES_CLASS0),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class1", TX_PAUSE_FRAMES_CLASS1),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class2", TX_PAUSE_FRAMES_CLASS2),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class3", TX_PAUSE_FRAMES_CLASS3),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class4", TX_PAUSE_FRAMES_CLASS4),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class5", TX_PAUSE_FRAMES_CLASS5),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class6", TX_PAUSE_FRAMES_CLASS6),
+	NFP_XSTAT_MAC("mac.tx_pause_frames_class7", TX_PAUSE_FRAMES_CLASS7),
+};
 
 static const uint32_t nfp_net_link_speed_nfp2rte[] = {
 	[NFP_NET_CFG_STS_LINK_RATE_UNSUPPORTED] = RTE_ETH_SPEED_NUM_NONE,
@@ -77,32 +187,27 @@ nfp_net_link_speed_rte2nfp(uint16_t speed)
 }
 
 static void
-nfp_net_notify_port_speed(struct rte_eth_dev *dev)
+nfp_net_notify_port_speed(struct nfp_net_hw *hw, struct rte_eth_link *link)
 {
-	struct nfp_net_hw *hw;
-	struct nfp_eth_table *eth_table;
-	uint32_t nn_link_status;
-
-	hw = NFP_NET_DEV_PRIVATE_TO_HW(dev->data->dev_private);
-	eth_table = hw->pf_dev->nfp_eth_table;
-
 	/**
 	 * Read the link status from NFP_NET_CFG_STS. If the link is down
 	 * then write the link speed NFP_NET_CFG_STS_LINK_RATE_UNKNOWN to
 	 * NFP_NET_CFG_STS_NSP_LINK_RATE.
 	 */
-	nn_link_status = nn_cfg_readw(hw, NFP_NET_CFG_STS);
-	if ((nn_link_status & NFP_NET_CFG_STS_LINK) == 0) {
+	if (link->link_status == RTE_ETH_LINK_DOWN) {
 		nn_cfg_writew(hw, NFP_NET_CFG_STS_NSP_LINK_RATE, NFP_NET_CFG_STS_LINK_RATE_UNKNOWN);
 		return;
 	}
 	/**
-	 * Link is up so read the link speed from the eth_table and write to
+	 * Link is up so write the link speed from the eth_table to
 	 * NFP_NET_CFG_STS_NSP_LINK_RATE.
 	 */
 	nn_cfg_writew(hw, NFP_NET_CFG_STS_NSP_LINK_RATE,
-		      nfp_net_link_speed_rte2nfp(eth_table->ports[hw->idx].speed));
+		      nfp_net_link_speed_rte2nfp(link->link_speed));
 }
+
+/* The length of firmware version string */
+#define FW_VER_LEN        32
 
 static int
 __nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t update)
@@ -146,25 +251,27 @@ __nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t update)
 	return 0;
 }
 
-/*
- * Reconfigure the NIC
- * @nn:    device to reconfigure
- * @ctrl:    The value for the ctrl field in the BAR config
- * @update:  The value for the update field in the BAR config
+/**
+ * Reconfigure the NIC.
  *
  * Write the update word to the BAR and ping the reconfig queue. Then poll
  * until the firmware has acknowledged the update by zeroing the update word.
+ *
+ * @param hw
+ *   Device to reconfigure.
+ * @param ctrl
+ *   The value for the ctrl field in the BAR config.
+ * @param update
+ *   The value for the update field in the BAR config.
+ *
+ * @return
+ *   - (0) if OK to reconfigure the device.
+ *   - (EIO) if I/O err and fail to reconfigure the device.
  */
 int
 nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t ctrl, uint32_t update)
 {
-	uint32_t err;
-
-	PMD_DRV_LOG(DEBUG, "nfp_net_reconfig: ctrl=%08x update=%08x",
-		    ctrl, update);
-
-	if (hw->pf_dev != NULL && hw->pf_dev->app_fw_id == NFP_APP_FW_CORE_NIC)
-		nfp_net_notify_port_speed(hw->eth_dev);
+	int ret;
 
 	rte_spinlock_lock(&hw->reconfig_lock);
 
@@ -173,18 +280,59 @@ nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t ctrl, uint32_t update)
 
 	rte_wmb();
 
-	err = __nfp_net_reconfig(hw, update);
+	ret = __nfp_net_reconfig(hw, update);
 
 	rte_spinlock_unlock(&hw->reconfig_lock);
 
-	if (err != 0) {
-		PMD_INIT_LOG(ERR, "Error nfp_net reconfig for ctrl: %x update: %x",
-			     ctrl, update);
+	if (ret != 0) {
+		PMD_DRV_LOG(ERR, "Error nfp net reconfig: ctrl=%#08x update=%#08x",
+				ctrl, update);
 		return -EIO;
 	}
 
 	return 0;
+}
 
+/**
+ * Reconfigure the NIC for the extend ctrl BAR.
+ *
+ * Write the update word to the BAR and ping the reconfig queue. Then poll
+ * until the firmware has acknowledged the update by zeroing the update word.
+ *
+ * @param hw
+ *   Device to reconfigure.
+ * @param ctrl_ext
+ *   The value for the first word of extend ctrl field in the BAR config.
+ * @param update
+ *   The value for the update field in the BAR config.
+ *
+ * @return
+ *   - (0) if OK to reconfigure the device.
+ *   - (EIO) if I/O err and fail to reconfigure the device.
+ */
+int
+nfp_net_ext_reconfig(struct nfp_net_hw *hw, uint32_t ctrl_ext, uint32_t update)
+{
+	int ret;
+
+	rte_spinlock_lock(&hw->reconfig_lock);
+
+	nn_cfg_writel(hw, NFP_NET_CFG_CTRL_WORD1, ctrl_ext);
+	nn_cfg_writel(hw, NFP_NET_CFG_UPDATE, update);
+
+	rte_wmb();
+
+	ret = __nfp_net_reconfig(hw, update);
+
+	rte_spinlock_unlock(&hw->reconfig_lock);
+
+	if (ret != 0) {
+		PMD_DRV_LOG(ERR, "Error nft net ext reconfig: ctrl_ext=%#08x update=%#08x",
+				ctrl_ext, update);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 /*
@@ -246,8 +394,7 @@ void
 nfp_net_log_device_information(const struct nfp_net_hw *hw)
 {
 	PMD_INIT_LOG(INFO, "VER: %u.%u, Maximum supported MTU: %d",
-			NFD_CFG_MAJOR_VERSION_of(hw->ver),
-			NFD_CFG_MINOR_VERSION_of(hw->ver), hw->max_mtu);
+			hw->ver.major, hw->ver.minor, hw->max_mtu);
 
 	PMD_INIT_LOG(INFO, "CAP: %#x, %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s", hw->cap,
 			hw->cap & NFP_NET_CFG_CTRL_PROMISC   ? "PROMISC "   : "",
@@ -341,17 +488,6 @@ void
 nfp_net_cfg_queue_setup(struct nfp_net_hw *hw)
 {
 	hw->qcp_cfg = hw->tx_bar + NFP_QCP_QUEUE_ADDR_SZ;
-}
-
-#define ETH_ADDR_LEN	6
-
-void
-nfp_eth_copy_mac(uint8_t *dst, const uint8_t *src)
-{
-	int i;
-
-	for (i = 0; i < ETH_ADDR_LEN; i++)
-		dst[i] = src[i];
 }
 
 void
@@ -591,10 +727,13 @@ nfp_net_promisc_disable(struct rte_eth_dev *dev)
 int
 nfp_net_link_update(struct rte_eth_dev *dev, __rte_unused int wait_to_complete)
 {
+	int ret;
+	uint32_t i;
+	uint32_t nn_link_status;
 	struct nfp_net_hw *hw;
 	struct rte_eth_link link;
-	uint16_t nn_link_status;
-	int ret;
+	struct nfp_eth_table *nfp_eth_table;
+
 
 	PMD_DRV_LOG(DEBUG, "Link update");
 
@@ -609,18 +748,31 @@ nfp_net_link_update(struct rte_eth_dev *dev, __rte_unused int wait_to_complete)
 		link.link_status = RTE_ETH_LINK_UP;
 
 	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
+	link.link_speed = RTE_ETH_SPEED_NUM_NONE;
 
-	/**
-	 * Shift and mask nn_link_status so that it is effectively the value
-	 * at offset NFP_NET_CFG_STS_NSP_LINK_RATE.
-	 */
-	nn_link_status = (nn_link_status >> NFP_NET_CFG_STS_LINK_RATE_SHIFT) &
-			 NFP_NET_CFG_STS_LINK_RATE_MASK;
-
-	if (nn_link_status >= RTE_DIM(nfp_net_link_speed_nfp2rte))
-		link.link_speed = RTE_ETH_SPEED_NUM_NONE;
-	else
-		link.link_speed = nfp_net_link_speed_nfp2rte[nn_link_status];
+	if (link.link_status == RTE_ETH_LINK_UP) {
+		if (hw->pf_dev != NULL) {
+			nfp_eth_table = hw->pf_dev->nfp_eth_table;
+			if (nfp_eth_table != NULL) {
+				uint32_t speed = nfp_eth_table->ports[hw->idx].speed;
+				for (i = 0; i < RTE_DIM(nfp_net_link_speed_nfp2rte); i++) {
+					if (nfp_net_link_speed_nfp2rte[i] == speed) {
+						link.link_speed = speed;
+						break;
+					}
+				}
+			}
+		} else {
+			/**
+			 * Shift and mask nn_link_status so that it is effectively the value
+			 * at offset NFP_NET_CFG_STS_NSP_LINK_RATE.
+			 */
+			nn_link_status = (nn_link_status >> NFP_NET_CFG_STS_LINK_RATE_SHIFT) &
+					NFP_NET_CFG_STS_LINK_RATE_MASK;
+			if (nn_link_status < RTE_DIM(nfp_net_link_speed_nfp2rte))
+				link.link_speed = nfp_net_link_speed_nfp2rte[nn_link_status];
+		}
+	}
 
 	ret = rte_eth_linkstatus_set(dev, &link);
 	if (ret == 0) {
@@ -629,6 +781,15 @@ nfp_net_link_update(struct rte_eth_dev *dev, __rte_unused int wait_to_complete)
 		else
 			PMD_DRV_LOG(INFO, "NIC Link is Down");
 	}
+
+	/**
+	 * Notify the port to update the speed value in the CTRL BAR from NSP.
+	 * Not applicable for VFs as the associated PF is still attached to the
+	 * kernel driver.
+	 */
+	if (hw->pf_dev != NULL)
+		nfp_net_notify_port_speed(hw, &link);
+
 	return ret;
 }
 
@@ -792,6 +953,199 @@ nfp_net_stats_reset(struct rte_eth_dev *dev)
 	return 0;
 }
 
+uint32_t
+nfp_net_xstats_size(const struct rte_eth_dev *dev)
+{
+	/* If the device is a VF, then there will be no MAC stats */
+	struct nfp_net_hw *hw = NFP_NET_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	const uint32_t size = RTE_DIM(nfp_net_xstats);
+
+	if (hw->mac_stats == NULL) {
+		uint32_t count;
+		for (count = 0; count < size; count++) {
+			if (nfp_net_xstats[count].group == NFP_XSTAT_GROUP_MAC)
+				break;
+		}
+		return count;
+	}
+
+	return size;
+}
+
+static const struct nfp_xstat *
+nfp_net_xstats_info(const struct rte_eth_dev *dev,
+		uint32_t index)
+{
+	if (index >= nfp_net_xstats_size(dev)) {
+		PMD_DRV_LOG(ERR, "xstat index out of bounds");
+		return NULL;
+	}
+
+	return &nfp_net_xstats[index];
+}
+
+static uint64_t
+nfp_net_xstats_value(const struct rte_eth_dev *dev,
+		uint32_t index,
+		bool raw)
+{
+	uint64_t value;
+	struct nfp_net_hw *hw;
+	struct nfp_xstat xstat;
+
+	hw = NFP_NET_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	xstat = nfp_net_xstats[index];
+
+	if (xstat.group == NFP_XSTAT_GROUP_MAC)
+		value = nn_readq(hw->mac_stats + xstat.offset);
+	else
+		value = nn_cfg_readq(hw, xstat.offset);
+
+	if (raw)
+		return value;
+
+	/**
+	 * A baseline value of each statistic counter is recorded when stats are "reset".
+	 * Thus, the value returned by this function need to be decremented by this
+	 * baseline value. The result is the count of this statistic since the last time
+	 * it was "reset".
+	 */
+	return value - hw->eth_xstats_base[index].value;
+}
+
+int
+nfp_net_xstats_get_names(struct rte_eth_dev *dev,
+		struct rte_eth_xstat_name *xstats_names,
+		unsigned int size)
+{
+	/* NOTE: All callers ensure dev is always set. */
+	uint32_t id;
+	uint32_t nfp_size;
+	uint32_t read_size;
+
+	nfp_size = nfp_net_xstats_size(dev);
+
+	if (xstats_names == NULL)
+		return nfp_size;
+
+	/* Read at most NFP xstats number of names. */
+	read_size = RTE_MIN(size, nfp_size);
+
+	for (id = 0; id < read_size; id++)
+		rte_strlcpy(xstats_names[id].name, nfp_net_xstats[id].name,
+				RTE_ETH_XSTATS_NAME_SIZE);
+
+	return read_size;
+}
+
+int
+nfp_net_xstats_get(struct rte_eth_dev *dev,
+		struct rte_eth_xstat *xstats,
+		unsigned int n)
+{
+	/* NOTE: All callers ensure dev is always set. */
+	uint32_t id;
+	uint32_t nfp_size;
+	uint32_t read_size;
+
+	nfp_size = nfp_net_xstats_size(dev);
+
+	if (xstats == NULL)
+		return nfp_size;
+
+	/* Read at most NFP xstats number of values. */
+	read_size = RTE_MIN(n, nfp_size);
+
+	for (id = 0; id < read_size; id++) {
+		xstats[id].id = id;
+		xstats[id].value = nfp_net_xstats_value(dev, id, false);
+	}
+
+	return read_size;
+}
+
+int
+nfp_net_xstats_get_names_by_id(struct rte_eth_dev *dev,
+		const uint64_t *ids,
+		struct rte_eth_xstat_name *xstats_names,
+		unsigned int size)
+{
+	/**
+	 * NOTE: The only caller rte_eth_xstats_get_names_by_id() ensures dev,
+	 * ids, xstats_names and size are valid, and non-NULL.
+	 */
+	uint32_t i;
+	uint32_t read_size;
+
+	/* Read at most NFP xstats number of names. */
+	read_size = RTE_MIN(size, nfp_net_xstats_size(dev));
+
+	for (i = 0; i < read_size; i++) {
+		const struct nfp_xstat *xstat;
+
+		/* Make sure ID is valid for device. */
+		xstat = nfp_net_xstats_info(dev, ids[i]);
+		if (xstat == NULL)
+			return -EINVAL;
+
+		rte_strlcpy(xstats_names[i].name, xstat->name,
+				RTE_ETH_XSTATS_NAME_SIZE);
+	}
+
+	return read_size;
+}
+
+int
+nfp_net_xstats_get_by_id(struct rte_eth_dev *dev,
+		const uint64_t *ids,
+		uint64_t *values,
+		unsigned int n)
+{
+	/**
+	 * NOTE: The only caller rte_eth_xstats_get_by_id() ensures dev,
+	 * ids, values and n are valid, and non-NULL.
+	 */
+	uint32_t i;
+	uint32_t read_size;
+
+	/* Read at most NFP xstats number of values. */
+	read_size = RTE_MIN(n, nfp_net_xstats_size(dev));
+
+	for (i = 0; i < read_size; i++) {
+		const struct nfp_xstat *xstat;
+
+		/* Make sure index is valid for device. */
+		xstat = nfp_net_xstats_info(dev, ids[i]);
+		if (xstat == NULL)
+			return -EINVAL;
+
+		values[i] = nfp_net_xstats_value(dev, ids[i], false);
+	}
+
+	return read_size;
+}
+
+int
+nfp_net_xstats_reset(struct rte_eth_dev *dev)
+{
+	uint32_t id;
+	uint32_t read_size;
+	struct nfp_net_hw *hw;
+
+	hw = NFP_NET_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	read_size = nfp_net_xstats_size(dev);
+
+	for (id = 0; id < read_size; id++) {
+		hw->eth_xstats_base[id].id = id;
+		hw->eth_xstats_base[id].value = nfp_net_xstats_value(dev, id, true);
+	}
+	/**
+	 * Successfully reset xstats, now call function to reset basic stats
+	 * return value is then based on the success of that function
+	 */
+	return nfp_net_stats_reset(dev);
+}
+
 int
 nfp_net_rx_desc_limits(struct nfp_net_hw *hw,
 		uint16_t *min_rx_desc,
@@ -822,22 +1176,10 @@ nfp_net_tx_desc_limits(struct nfp_net_hw *hw,
 {
 	uint16_t tx_dpp;
 
-	switch (NFD_CFG_CLASS_VER_of(hw->ver)) {
-	case NFP_NET_CFG_VERSION_DP_NFD3:
-		tx_dpp = NFD3_TX_DESC_PER_SIMPLE_PKT;
-		break;
-	case NFP_NET_CFG_VERSION_DP_NFDK:
-		if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 5) {
-			PMD_DRV_LOG(ERR, "NFDK must use ABI 5 or newer, found: %d",
-				NFD_CFG_MAJOR_VERSION_of(hw->ver));
-			return -EINVAL;
-		}
+	if (hw->ver.extend == NFP_NET_CFG_VERSION_DP_NFD3)
+		tx_dpp = NFD3_TX_DESC_PER_PKT;
+	else
 		tx_dpp = NFDK_TX_DESC_PER_SIMPLE_PKT;
-		break;
-	default:
-		PMD_DRV_LOG(ERR, "The version of firmware is not correct.");
-		return -EINVAL;
-	}
 
 	*max_tx_desc = NFP_NET_MAX_TX_DESC / tx_dpp;
 
@@ -979,6 +1321,52 @@ nfp_net_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 	return 0;
 }
 
+int
+nfp_net_common_init(struct rte_pci_device *pci_dev,
+		struct nfp_net_hw *hw)
+{
+	const int stride = 4;
+
+	hw->device_id = pci_dev->id.device_id;
+	hw->vendor_id = pci_dev->id.vendor_id;
+	hw->subsystem_device_id = pci_dev->id.subsystem_device_id;
+	hw->subsystem_vendor_id = pci_dev->id.subsystem_vendor_id;
+
+	hw->max_rx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_RXRINGS);
+	hw->max_tx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_TXRINGS);
+	if (hw->max_rx_queues == 0 || hw->max_tx_queues == 0) {
+		PMD_INIT_LOG(ERR, "Device %s can not be used, there are no valid queue "
+				"pairs for use", pci_dev->name);
+		return -ENODEV;
+	}
+
+	nfp_net_cfg_read_version(hw);
+	if (!nfp_net_is_valid_nfd_version(hw->ver))
+		return -EINVAL;
+
+	if (nfp_net_check_dma_mask(hw, pci_dev->name) != 0)
+		return -ENODEV;
+
+	/* Get some of the read-only fields from the config BAR */
+	hw->cap = nn_cfg_readl(hw, NFP_NET_CFG_CAP);
+	hw->max_mtu = nn_cfg_readl(hw, NFP_NET_CFG_MAX_MTU);
+	hw->flbufsz = DEFAULT_FLBUF_SIZE;
+
+	nfp_net_init_metadata_format(hw);
+
+	/* read the Rx offset configured from firmware */
+	if (hw->ver.major < 2)
+		hw->rx_offset = NFP_NET_RX_OFFSET;
+	else
+		hw->rx_offset = nn_cfg_readl(hw, NFP_NET_CFG_RX_OFFSET_ADDR);
+
+	hw->ctrl = 0;
+	hw->stride_rx = stride;
+	hw->stride_tx = stride;
+
+	return 0;
+}
+
 const uint32_t *
 nfp_net_supported_ptypes_get(struct rte_eth_dev *dev)
 {
@@ -1101,7 +1489,7 @@ nfp_net_irq_unmask(struct rte_eth_dev *dev)
 void
 nfp_net_dev_interrupt_delayed_handler(void *param)
 {
-	struct rte_eth_dev *dev = (struct rte_eth_dev *)param;
+	struct rte_eth_dev *dev = param;
 
 	nfp_net_link_update(dev, 0);
 	rte_eth_dev_callback_process(dev, RTE_ETH_EVENT_INTR_LSC, NULL);
@@ -1117,7 +1505,7 @@ nfp_net_dev_interrupt_handler(void *param)
 {
 	int64_t timeout;
 	struct rte_eth_link link;
-	struct rte_eth_dev *dev = (struct rte_eth_dev *)param;
+	struct rte_eth_dev *dev = param;
 
 	PMD_DRV_LOG(DEBUG, "We got a LSC interrupt!!!");
 
@@ -1537,7 +1925,7 @@ nfp_net_stop_rx_queue(struct rte_eth_dev *dev)
 	struct nfp_net_rxq *this_rx_q;
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
-		this_rx_q = (struct nfp_net_rxq *)dev->data->rx_queues[i];
+		this_rx_q = dev->data->rx_queues[i];
 		nfp_net_reset_rx_queue(this_rx_q);
 	}
 }
@@ -1549,7 +1937,7 @@ nfp_net_close_rx_queue(struct rte_eth_dev *dev)
 	struct nfp_net_rxq *this_rx_q;
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
-		this_rx_q = (struct nfp_net_rxq *)dev->data->rx_queues[i];
+		this_rx_q = dev->data->rx_queues[i];
 		nfp_net_reset_rx_queue(this_rx_q);
 		nfp_net_rx_queue_release(dev, i);
 	}
@@ -1562,7 +1950,7 @@ nfp_net_stop_tx_queue(struct rte_eth_dev *dev)
 	struct nfp_net_txq *this_tx_q;
 
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
-		this_tx_q = (struct nfp_net_txq *)dev->data->tx_queues[i];
+		this_tx_q = dev->data->tx_queues[i];
 		nfp_net_reset_tx_queue(this_tx_q);
 	}
 }
@@ -1574,7 +1962,7 @@ nfp_net_close_tx_queue(struct rte_eth_dev *dev)
 	struct nfp_net_txq *this_tx_q;
 
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
-		this_tx_q = (struct nfp_net_txq *)dev->data->tx_queues[i];
+		this_tx_q = dev->data->tx_queues[i];
 		nfp_net_reset_tx_queue(this_tx_q);
 		nfp_net_tx_queue_release(dev, i);
 	}
@@ -1619,11 +2007,10 @@ nfp_net_set_vxlan_port(struct nfp_net_hw *hw,
 int
 nfp_net_check_dma_mask(struct nfp_net_hw *hw, char *name)
 {
-	if (NFD_CFG_CLASS_VER_of(hw->ver) == NFP_NET_CFG_VERSION_DP_NFD3 &&
+	if (hw->ver.extend == NFP_NET_CFG_VERSION_DP_NFD3 &&
 			rte_mem_check_dma_mask(40) != 0) {
-		PMD_DRV_LOG(ERR,
-			"The device %s can't be used: restricted dma mask to 40 bits!",
-			name);
+		PMD_DRV_LOG(ERR, "Device %s can't be used: restricted dma mask to 40 bits!",
+				name);
 		return -ENODEV;
 	}
 
@@ -1638,7 +2025,7 @@ nfp_net_init_metadata_format(struct nfp_net_hw *hw)
 	 * single metadata if only RSS(v1) is supported by hw capability, and RSS(v2)
 	 * also indicate that we are using chained metadata.
 	 */
-	if (NFD_CFG_MAJOR_VERSION_of(hw->ver) == 4) {
+	if (hw->ver.major == 4) {
 		hw->meta_format = NFP_NET_METAFORMAT_CHAINED;
 	} else if ((hw->cap & NFP_NET_CFG_CTRL_CHAIN_META) != 0) {
 		hw->meta_format = NFP_NET_METAFORMAT_CHAINED;
@@ -1653,9 +2040,138 @@ nfp_net_init_metadata_format(struct nfp_net_hw *hw)
 	}
 }
 
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */
+void
+nfp_net_cfg_read_version(struct nfp_net_hw *hw)
+{
+	union {
+		uint32_t whole;
+		struct nfp_net_fw_ver split;
+	} version;
+
+	version.whole = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
+	hw->ver = version.split;
+}
+
+static void
+nfp_net_get_nsp_info(struct nfp_net_hw *hw, char *nsp_version)
+{
+	struct nfp_nsp *nsp;
+
+	nsp = nfp_nsp_open(hw->cpp);
+	if (nsp == NULL)
+		return;
+
+	snprintf(nsp_version, FW_VER_LEN, "%hu.%hu",
+			nfp_nsp_get_abi_ver_major(nsp),
+			nfp_nsp_get_abi_ver_minor(nsp));
+
+	nfp_nsp_close(nsp);
+}
+
+static void
+nfp_net_get_mip_name(struct nfp_net_hw *hw, char *mip_name)
+{
+	struct nfp_mip *mip;
+
+	mip = nfp_mip_open(hw->cpp);
+	if (mip == NULL)
+		return;
+
+	snprintf(mip_name, FW_VER_LEN, "%s", nfp_mip_name(mip));
+
+	nfp_mip_close(mip);
+}
+
+static void
+nfp_net_get_app_name(struct nfp_net_hw *hw, char *app_name)
+{
+	switch (hw->pf_dev->app_fw_id) {
+	case NFP_APP_FW_CORE_NIC:
+		snprintf(app_name, FW_VER_LEN, "%s", "nic");
+		break;
+	case NFP_APP_FW_FLOWER_NIC:
+		snprintf(app_name, FW_VER_LEN, "%s", "flower");
+		break;
+	default:
+		snprintf(app_name, FW_VER_LEN, "%s", "unknown");
+		break;
+	}
+}
+
+int
+nfp_net_firmware_version_get(struct rte_eth_dev *dev,
+		char *fw_version,
+		size_t fw_size)
+{
+	struct nfp_net_hw *hw;
+	char mip_name[FW_VER_LEN];
+	char app_name[FW_VER_LEN];
+	char nsp_version[FW_VER_LEN];
+	char vnic_version[FW_VER_LEN];
+
+	if (fw_size < FW_VER_LEN)
+		return FW_VER_LEN;
+
+	hw = NFP_NET_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	snprintf(vnic_version, FW_VER_LEN, "%d.%d.%d.%d",
+			hw->ver.extend, hw->ver.class,
+			hw->ver.major, hw->ver.minor);
+
+	nfp_net_get_nsp_info(hw, nsp_version);
+	nfp_net_get_mip_name(hw, mip_name);
+	nfp_net_get_app_name(hw, app_name);
+
+	snprintf(fw_version, FW_VER_LEN, "%s %s %s %s",
+			vnic_version, nsp_version, mip_name, app_name);
+
+	return 0;
+}
+
+int
+nfp_repr_firmware_version_get(struct rte_eth_dev *dev,
+		char *fw_version,
+		size_t fw_size)
+{
+	struct nfp_net_hw *hw;
+	char mip_name[FW_VER_LEN];
+	char app_name[FW_VER_LEN];
+	char nsp_version[FW_VER_LEN];
+	struct nfp_flower_representor *repr;
+
+	if (fw_size < FW_VER_LEN)
+		return FW_VER_LEN;
+
+	repr = dev->data->dev_private;
+	hw = repr->app_fw_flower->pf_hw;
+
+	nfp_net_get_nsp_info(hw, nsp_version);
+	nfp_net_get_mip_name(hw, mip_name);
+	nfp_net_get_app_name(hw, app_name);
+
+	snprintf(fw_version, FW_VER_LEN, "* %s %s %s",
+			nsp_version, mip_name, app_name);
+
+	return 0;
+}
+
+bool
+nfp_net_is_valid_nfd_version(struct nfp_net_fw_ver version)
+{
+	uint8_t nfd_version = version.extend;
+
+	if (nfd_version == NFP_NET_CFG_VERSION_DP_NFD3)
+		return true;
+
+	if (nfd_version == NFP_NET_CFG_VERSION_DP_NFDK) {
+		if (version.major < 5) {
+			PMD_INIT_LOG(ERR, "NFDK must use ABI 5 or newer, found: %d",
+					version.major);
+			return false;
+		}
+
+		return true;
+	}
+
+	return false;
+}

@@ -76,6 +76,8 @@ Hash algorithms:
 * ``RTE_CRYPTO_AUTH_AES_GMAC``
 * ``RTE_CRYPTO_AUTH_ZUC_EIA3``
 * ``RTE_CRYPTO_AUTH_AES_CMAC``
+* ``RTE_CRYPTO_AUTH_SM3``
+* ``RTE_CRYPTO_AUTH_SM3_HMAC``
 
 Supported AEAD algorithms:
 
@@ -234,6 +236,18 @@ These are the build configuration options affecting QAT, and their default value
 Both QAT SYM PMD and QAT ASYM PMD have an external dependency on libcrypto, so are not
 built by default.
 
+Ubuntu
+
+.. code-block:: console
+
+   apt install libssl-dev
+
+RHEL
+
+.. code-block:: console
+
+   dnf install openssl-devel
+
 The QAT compressdev PMD has no external dependencies, so is built by default.
 
 The number of VFs per PF varies - see table below. If multiple QAT packages are
@@ -272,6 +286,21 @@ allocated while for GEN1 devices, 12 buffers are allocated, plus 1472 bytes over
 	larger than the input size).
 
 
+Running QAT PMD with insecure crypto algorithms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A few insecure crypto algorithms are deprecated from QAT drivers.
+This needs to be reflected in DPDK QAT PMD.
+DPDK QAT PMD has by default disabled all the insecure crypto algorithms from Gen 1, 2, 3 and 4.
+A PMD devarg is used to enable the capability.
+
+- qat_legacy_capa
+
+To use this feature the user must set the devarg on process start as a device additional devarg::
+
+  -a b1:01.2,qat_legacy_capa=1
+
+
 Running QAT PMD with minimum threshold for burst size
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -294,18 +323,38 @@ by comma. When the same parameter is used more than once first occurrence of the
 is used.
 Maximum threshold that can be set is 32.
 
-Running QAT PMD with Intel IPSEC MB library for symmetric precomputes function
+
+Running QAT PMD with Cipher-CRC offload feature
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Support has been added to the QAT symmetric crypto PMD for combined Cipher-CRC offload,
+primarily for the Crypto-CRC DOCSIS security protocol, on GEN2/GEN3/GEN4 QAT devices.
+
+The following devarg enables a Cipher-CRC offload capability check to determine
+if the feature is supported on the QAT device.
+
+- qat_sym_cipher_crc_enable
+
+When enabled, a capability check for the combined Cipher-CRC offload feature is triggered
+to the QAT firmware during queue pair initialization. If supported by the firmware,
+any subsequent runtime Crypto-CRC DOCSIS security protocol requests handled by the QAT PMD
+are offloaded to the QAT device by setting up the content descriptor and request accordingly.
+If not supported, the CRC is calculated by the QAT PMD using the NET CRC API.
+
+To use this feature the user must set the devarg on process start as a device additional devarg::
+
+ -a 03:01.1,qat_sym_cipher_crc_enable=1
+
+
+Running QAT PMD with Intel IPsec MB library for symmetric precomputes function
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The QAT PMD use Openssl library for partial hash calculation in symmetirc precomputes function by
-default, the following parameter is allow QAT PMD switch over to multi-buffer job API if Intel
-IPSEC MB library installed on system.
-
-- qat_ipsec_mb_lib
-
-To use this feature the user must set the parameter on process start as a device additional parameter::
-
-  -a 03:01.1,qat_ipsec_mb_lib=1
+The QAT PMD uses Intel IPsec MB library for partial hash calculation
+in symmetric precomputes function by default,
+the minimum required version of IPsec MB library is v1.4.
+If this version of IPsec is not met, it will fallback to use OpenSSL.
+ARM will always default to using OpenSSL
+as ARM IPsec MB does not support the necessary algorithms.
 
 
 Device and driver naming

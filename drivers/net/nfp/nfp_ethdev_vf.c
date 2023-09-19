@@ -5,14 +5,6 @@
  * Small portions derived from code Copyright(c) 2010-2015 Intel Corporation.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * @file dpdk/pmd/nfp_ethdev_vf.c
- *
- * Netronome vNIC  VF DPDK Poll-Mode Driver: Main entry point
- */
-
 #include <rte_alarm.h>
 
 #include "nfpcore/nfp_mip.h"
@@ -22,6 +14,8 @@
 #include "nfp_ctrl.h"
 #include "nfp_rxtx.h"
 #include "nfp_logs.h"
+#include "nfd3/nfp_nfd3.h"
+#include "nfdk/nfp_nfdk.h"
 
 static void
 nfp_netvf_read_mac(struct nfp_net_hw *hw)
@@ -29,10 +23,10 @@ nfp_netvf_read_mac(struct nfp_net_hw *hw)
 	uint32_t tmp;
 
 	tmp = rte_be_to_cpu_32(nn_cfg_readl(hw, NFP_NET_CFG_MACADDR));
-	memcpy(&hw->mac_addr[0], &tmp, 4);
+	memcpy(&hw->mac_addr.addr_bytes[0], &tmp, 4);
 
 	tmp = rte_be_to_cpu_32(nn_cfg_readl(hw, NFP_NET_CFG_MACADDR + 4));
-	memcpy(&hw->mac_addr[4], &tmp, 2);
+	memcpy(&hw->mac_addr.addr_bytes[4], &tmp, 2);
 }
 
 static int
@@ -227,6 +221,11 @@ static const struct eth_dev_ops nfp_netvf_eth_dev_ops = {
 	.link_update		= nfp_net_link_update,
 	.stats_get		= nfp_net_stats_get,
 	.stats_reset		= nfp_net_stats_reset,
+	.xstats_get             = nfp_net_xstats_get,
+	.xstats_reset           = nfp_net_xstats_reset,
+	.xstats_get_names       = nfp_net_xstats_get_names,
+	.xstats_get_by_id       = nfp_net_xstats_get_by_id,
+	.xstats_get_names_by_id = nfp_net_xstats_get_names_by_id,
 	.dev_infos_get		= nfp_net_infos_get,
 	.dev_supported_ptypes_get = nfp_net_supported_ptypes_get,
 	.mtu_set		= nfp_net_dev_mtu_set,
@@ -244,31 +243,18 @@ static const struct eth_dev_ops nfp_netvf_eth_dev_ops = {
 	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
 };
 
-static inline int
-nfp_netvf_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
+static inline void
+nfp_netvf_ethdev_ops_mount(struct nfp_net_hw *hw,
+		struct rte_eth_dev *eth_dev)
 {
-	switch (NFD_CFG_CLASS_VER_of(hw->ver)) {
-	case NFP_NET_CFG_VERSION_DP_NFD3:
-		eth_dev->tx_pkt_burst = &nfp_net_nfd3_xmit_pkts;
-		break;
-	case NFP_NET_CFG_VERSION_DP_NFDK:
-		if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 5) {
-			PMD_DRV_LOG(ERR, "NFDK must use ABI 5 or newer, found: %d",
-				NFD_CFG_MAJOR_VERSION_of(hw->ver));
-			return -EINVAL;
-		}
-		eth_dev->tx_pkt_burst = &nfp_net_nfdk_xmit_pkts;
-		break;
-	default:
-		PMD_DRV_LOG(ERR, "The version of firmware is not correct.");
-		return -EINVAL;
-	}
+	if (hw->ver.extend == NFP_NET_CFG_VERSION_DP_NFD3)
+		eth_dev->tx_pkt_burst = nfp_net_nfd3_xmit_pkts;
+	else
+		eth_dev->tx_pkt_burst = nfp_net_nfdk_xmit_pkts;
 
 	eth_dev->dev_ops = &nfp_netvf_eth_dev_ops;
 	eth_dev->rx_queue_count = nfp_net_rx_queue_count;
 	eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
-
-	return 0;
 }
 
 static int
@@ -280,7 +266,6 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	uint64_t tx_bar_off = 0, rx_bar_off = 0;
 	uint32_t start_q;
-	int stride = 4;
 	int port = 0;
 	int err;
 
@@ -290,7 +275,7 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	hw = NFP_NET_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
 
-	hw->ctrl_bar = (uint8_t *)pci_dev->mem_resource[0].addr;
+	hw->ctrl_bar = pci_dev->mem_resource[0].addr;
 	if (hw->ctrl_bar == NULL) {
 		PMD_DRV_LOG(ERR,
 			"hw->ctrl_bar is NULL. BAR0 not configured");
@@ -299,13 +284,11 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	PMD_INIT_LOG(DEBUG, "ctrl bar: %p", hw->ctrl_bar);
 
-	hw->ver = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
+	err = nfp_net_common_init(pci_dev, hw);
+	if (err != 0)
+		return err;
 
-	if (nfp_net_check_dma_mask(hw, pci_dev->name) != 0)
-		return -ENODEV;
-
-	if (nfp_netvf_ethdev_ops_mount(hw, eth_dev))
-		return -EINVAL;
+	nfp_netvf_ethdev_ops_mount(hw, eth_dev);
 
 	/* For secondary processes, the primary has done all the work */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -313,24 +296,12 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
 
-	hw->device_id = pci_dev->id.device_id;
-	hw->vendor_id = pci_dev->id.vendor_id;
-	hw->subsystem_device_id = pci_dev->id.subsystem_device_id;
-	hw->subsystem_vendor_id = pci_dev->id.subsystem_vendor_id;
-
-	PMD_INIT_LOG(DEBUG, "nfp_net: device (%u:%u) %u:%u:%u:%u",
-		     pci_dev->id.vendor_id, pci_dev->id.device_id,
-		     pci_dev->addr.domain, pci_dev->addr.bus,
-		     pci_dev->addr.devid, pci_dev->addr.function);
-
-	hw->max_rx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_RXRINGS);
-	hw->max_tx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_TXRINGS);
-	if (hw->max_rx_queues == 0 || hw->max_tx_queues == 0) {
-		PMD_DRV_LOG(ERR,
-			    "Device %s can not be used, there are no valid queue "
-			    "pairs for use, please try to generate less VFs",
-			    pci_dev->name);
-		return -ENODEV;
+	hw->eth_xstats_base = rte_malloc("rte_eth_xstat", sizeof(struct rte_eth_xstat) *
+			nfp_net_xstats_size(eth_dev), 0);
+	if (hw->eth_xstats_base == NULL) {
+		PMD_INIT_LOG(ERR, "no memory for xstats base values on device %s!",
+				pci_dev->device.name);
+		return -ENOMEM;
 	}
 
 	/* Work out where in the BAR the queues start. */
@@ -360,28 +331,11 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 		     hw->ctrl_bar, hw->tx_bar, hw->rx_bar);
 
 	nfp_net_cfg_queue_setup(hw);
-
-	/* Get some of the read-only fields from the config BAR */
-	hw->cap = nn_cfg_readl(hw, NFP_NET_CFG_CAP);
-	hw->max_mtu = nn_cfg_readl(hw, NFP_NET_CFG_MAX_MTU);
 	hw->mtu = RTE_ETHER_MTU;
-	hw->flbufsz = DEFAULT_FLBUF_SIZE;
 
 	/* VLAN insertion is incompatible with LSOv2 */
 	if (hw->cap & NFP_NET_CFG_CTRL_LSO2)
 		hw->cap &= ~NFP_NET_CFG_CTRL_TXVLAN;
-
-	nfp_net_init_metadata_format(hw);
-
-	if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 2)
-		hw->rx_offset = NFP_NET_RX_OFFSET;
-	else
-		hw->rx_offset = nn_cfg_readl(hw, NFP_NET_CFG_RX_OFFSET_ADDR);
-
-	hw->ctrl = 0;
-
-	hw->stride_rx = stride;
-	hw->stride_tx = stride;
 
 	nfp_net_log_device_information(hw);
 
@@ -394,23 +348,22 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 	if (eth_dev->data->mac_addrs == NULL) {
 		PMD_INIT_LOG(ERR, "Failed to space for MAC address");
 		err = -ENOMEM;
-		goto dev_err_queues_map;
+		goto dev_err_ctrl_map;
 	}
 
 	nfp_netvf_read_mac(hw);
 
-	tmp_ether_addr = (struct rte_ether_addr *)&hw->mac_addr;
+	tmp_ether_addr = &hw->mac_addr;
 	if (!rte_is_valid_assigned_ether_addr(tmp_ether_addr)) {
 		PMD_INIT_LOG(INFO, "Using random mac address for port %d",
 				   port);
 		/* Using random mac addresses for VFs */
-		rte_eth_random_addr(&hw->mac_addr[0]);
-		nfp_net_write_mac(hw, (uint8_t *)&hw->mac_addr);
+		rte_eth_random_addr(&hw->mac_addr.addr_bytes[0]);
+		nfp_net_write_mac(hw, &hw->mac_addr.addr_bytes[0]);
 	}
 
 	/* Copying mac address to DPDK eth_dev struct */
-	rte_ether_addr_copy((struct rte_ether_addr *)hw->mac_addr,
-			&eth_dev->data->mac_addrs[0]);
+	rte_ether_addr_copy(&hw->mac_addr, eth_dev->data->mac_addrs);
 
 	if ((hw->cap & NFP_NET_CFG_CTRL_LIVE_ADDR) == 0)
 		eth_dev->data->dev_flags |= RTE_ETH_DEV_NOLIVE_MAC_ADDR;
@@ -418,11 +371,10 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	PMD_INIT_LOG(INFO, "port %d VendorID=0x%x DeviceID=0x%x "
-		     "mac=%02x:%02x:%02x:%02x:%02x:%02x",
+		     "mac=" RTE_ETHER_ADDR_PRT_FMT,
 		     eth_dev->data->port_id, pci_dev->id.vendor_id,
 		     pci_dev->id.device_id,
-		     hw->mac_addr[0], hw->mac_addr[1], hw->mac_addr[2],
-		     hw->mac_addr[3], hw->mac_addr[4], hw->mac_addr[5]);
+		     RTE_ETHER_ADDR_BYTES(&hw->mac_addr));
 
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
 		/* Registering LSC interrupt handler */
@@ -437,8 +389,6 @@ nfp_netvf_init(struct rte_eth_dev *eth_dev)
 
 	return 0;
 
-dev_err_queues_map:
-		nfp_cpp_area_free(hw->hwqueues_area);
 dev_err_ctrl_map:
 		nfp_cpp_area_free(hw->ctrl_area);
 
@@ -495,9 +445,3 @@ static struct rte_pci_driver rte_nfp_net_vf_pmd = {
 RTE_PMD_REGISTER_PCI(net_nfp_vf, rte_nfp_net_vf_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_nfp_vf, pci_id_nfp_vf_net_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_nfp_vf, "* igb_uio | uio_pci_generic | vfio");
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */

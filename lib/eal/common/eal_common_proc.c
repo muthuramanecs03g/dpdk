@@ -80,7 +80,6 @@ struct pending_request {
 	struct rte_mp_msg *request;
 	struct rte_mp_msg *reply;
 	int reply_received;
-	RTE_STD_C11
 	union {
 		struct {
 			struct async_request_param *param;
@@ -322,6 +321,15 @@ retry:
 }
 
 static void
+cleanup_msg_fds(const struct rte_mp_msg *msg)
+{
+	int i;
+
+	for (i = 0; i < msg->num_fds; i++)
+		close(msg->fds[i]);
+}
+
+static void
 process_msg(struct mp_msg_internal *m, struct sockaddr_un *s)
 {
 	struct pending_request *pending_req;
@@ -349,8 +357,10 @@ process_msg(struct mp_msg_internal *m, struct sockaddr_un *s)
 			else if (pending_req->type == REQUEST_TYPE_ASYNC)
 				req = async_reply_handle_thread_unsafe(
 						pending_req);
-		} else
+		} else {
 			RTE_LOG(ERR, EAL, "Drop mp reply: %s\n", msg->name);
+			cleanup_msg_fds(msg);
+		}
 		pthread_mutex_unlock(&pending_requests.lock);
 
 		if (req != NULL)
@@ -380,6 +390,7 @@ process_msg(struct mp_msg_internal *m, struct sockaddr_un *s)
 			RTE_LOG(ERR, EAL, "Cannot find action: %s\n",
 				msg->name);
 		}
+		cleanup_msg_fds(msg);
 	} else if (action(msg, s->sun_path) < 0) {
 		RTE_LOG(ERR, EAL, "Fail to handle message: %s\n", msg->name);
 	}
@@ -635,7 +646,7 @@ rte_mp_channel_init(void)
 		return -1;
 	}
 
-	if (rte_ctrl_thread_create(&mp_handle_tid, "rte_mp_handle",
+	if (rte_ctrl_thread_create(&mp_handle_tid, "dpdk-mp-msg",
 			NULL, mp_handle, NULL) < 0) {
 		RTE_LOG(ERR, EAL, "failed to create mp thread: %s\n",
 			strerror(errno));
@@ -669,7 +680,6 @@ rte_mp_channel_cleanup(void)
  * Return -1, as fail to send message and it's caused by the local side.
  * Return 0, as fail to send message and it's caused by the remote side.
  * Return 1, as succeed to send message.
- *
  */
 static int
 send_msg(const char *dst_path, struct rte_mp_msg *msg, int type)

@@ -388,6 +388,8 @@ The command line options are:
        10 - 10Mbps (not supported)
        100 - 100Mbps (not supported)
        1000 - 1Gbps
+       2500 - 2.5Gbps
+       5000 - 5Gbps
        10000 - 10Gbps
        25000 - 25Gbps
        40000 - 40Gbps
@@ -486,6 +488,15 @@ The command line options are:
       allocated area
     * xmemhuge: create and populate mempool using externally and anonymously
       allocated hugepage area
+
+*   ``--noisy-forward-mode=mode``
+
+    Set the noisy vnf forwarding mode where ``mode`` is one of the following::
+
+       io (the default)
+       mac
+       macswap
+       5tswap
 
 *   ``--noisy-tx-sw-buffer-size``
 

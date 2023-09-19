@@ -12,6 +12,9 @@
 #define ROC_AE_CPT_BLOCK_TYPE1 0
 #define ROC_AE_CPT_BLOCK_TYPE2 1
 
+#define ROC_LOADFVC_MAJOR_OP 0x01UL
+#define ROC_LOADFVC_MINOR_OP 0x08UL
+
 /* Default engine groups */
 #define ROC_CPT_DFLT_ENG_GRP_SE	   0UL
 #define ROC_CPT_DFLT_ENG_GRP_SE_IE 1UL
@@ -178,8 +181,7 @@ int __roc_api roc_cpt_inline_ipsec_cfg(struct dev *dev, uint8_t slot,
 int __roc_api roc_cpt_inline_ipsec_inb_cfg_read(struct roc_cpt *roc_cpt,
 					struct roc_cpt_inline_ipsec_inb_cfg *cfg);
 int __roc_api roc_cpt_inline_ipsec_inb_cfg(struct roc_cpt *roc_cpt,
-					   uint16_t param1, uint16_t param2,
-					   uint16_t opcode);
+					   struct roc_cpt_inline_ipsec_inb_cfg *cfg);
 int __roc_api roc_cpt_afs_print(struct roc_cpt *roc_cpt);
 int __roc_api roc_cpt_lfs_print(struct roc_cpt *roc_cpt);
 void __roc_api roc_cpt_iq_disable(struct roc_cpt_lf *lf);

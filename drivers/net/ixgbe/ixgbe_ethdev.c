@@ -236,7 +236,7 @@ static int ixgbe_dev_interrupt_get_status(struct rte_eth_dev *dev);
 static int ixgbe_dev_interrupt_action(struct rte_eth_dev *dev);
 static void ixgbe_dev_interrupt_handler(void *param);
 static void ixgbe_dev_interrupt_delayed_handler(void *param);
-static void *ixgbe_dev_setup_link_thread_handler(void *param);
+static uint32_t ixgbe_dev_setup_link_thread_handler(void *param);
 static int ixgbe_dev_wait_setup_link_complete(struct rte_eth_dev *dev,
 					      uint32_t timeout_ms);
 
@@ -1127,7 +1127,8 @@ eth_ixgbe_dev_init(struct rte_eth_dev *eth_dev, void *init_params __rte_unused)
 		return 0;
 	}
 
-	rte_atomic32_clear(&ad->link_thread_running);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_clear(&ad->link_thread_running, __ATOMIC_SEQ_CST);
 	ixgbe_parse_devargs(eth_dev->data->dev_private,
 			    pci_dev->device.devargs);
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
@@ -1625,7 +1626,8 @@ eth_ixgbevf_dev_init(struct rte_eth_dev *eth_dev)
 		return 0;
 	}
 
-	rte_atomic32_clear(&ad->link_thread_running);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_clear(&ad->link_thread_running, __ATOMIC_SEQ_CST);
 	ixgbevf_parse_devargs(eth_dev->data->dev_private,
 			      pci_dev->device.devargs);
 
@@ -4186,7 +4188,8 @@ ixgbe_dev_wait_setup_link_complete(struct rte_eth_dev *dev, uint32_t timeout_ms)
 	struct ixgbe_adapter *ad = dev->data->dev_private;
 	uint32_t timeout = timeout_ms ? timeout_ms : WARNING_TIMEOUT;
 
-	while (rte_atomic32_read(&ad->link_thread_running)) {
+	/* NOTE: review for potential ordering optimization */
+	while (__atomic_load_n(&ad->link_thread_running, __ATOMIC_SEQ_CST)) {
 		msec_delay(1);
 		timeout--;
 
@@ -4203,7 +4206,7 @@ ixgbe_dev_wait_setup_link_complete(struct rte_eth_dev *dev, uint32_t timeout_ms)
 	return 1;
 }
 
-static void *
+static uint32_t
 ixgbe_dev_setup_link_thread_handler(void *param)
 {
 	struct rte_eth_dev *dev = (struct rte_eth_dev *)param;
@@ -4214,7 +4217,7 @@ ixgbe_dev_setup_link_thread_handler(void *param)
 	u32 speed;
 	bool autoneg = false;
 
-	pthread_detach(pthread_self());
+	rte_thread_detach(rte_thread_self());
 	speed = hw->phy.autoneg_advertised;
 	if (!speed)
 		ixgbe_get_link_capabilities(hw, &speed, &autoneg);
@@ -4222,8 +4225,9 @@ ixgbe_dev_setup_link_thread_handler(void *param)
 	ixgbe_setup_link(hw, speed, true);
 
 	intr->flags &= ~IXGBE_FLAG_NEED_LINK_CONFIG;
-	rte_atomic32_clear(&ad->link_thread_running);
-	return NULL;
+	/* NOTE: review for potential ordering optimization */
+	__atomic_clear(&ad->link_thread_running, __ATOMIC_SEQ_CST);
+	return 0;
 }
 
 /*
@@ -4317,20 +4321,22 @@ ixgbe_dev_link_update_share(struct rte_eth_dev *dev,
 	if (link_up == 0) {
 		if (ixgbe_get_media_type(hw) == ixgbe_media_type_fiber) {
 			ixgbe_dev_wait_setup_link_complete(dev, 0);
-			if (rte_atomic32_test_and_set(&ad->link_thread_running)) {
+			/* NOTE: review for potential ordering optimization */
+			if (!__atomic_test_and_set(&ad->link_thread_running, __ATOMIC_SEQ_CST)) {
 				/* To avoid race condition between threads, set
 				 * the IXGBE_FLAG_NEED_LINK_CONFIG flag only
 				 * when there is no link thread running.
 				 */
 				intr->flags |= IXGBE_FLAG_NEED_LINK_CONFIG;
-				if (rte_ctrl_thread_create(&ad->link_thread_tid,
-					"ixgbe-link-handler",
+				if (rte_thread_create_control(&ad->link_thread_tid,
+					"dpdk-ixgbe-link",
 					NULL,
 					ixgbe_dev_setup_link_thread_handler,
 					dev) < 0) {
 					PMD_DRV_LOG(ERR,
 						"Create link thread failed!");
-					rte_atomic32_clear(&ad->link_thread_running);
+					/* NOTE: review for potential ordering optimization */
+					__atomic_clear(&ad->link_thread_running, __ATOMIC_SEQ_CST);
 				}
 			} else {
 				PMD_DRV_LOG(ERR,
@@ -5946,6 +5952,7 @@ ixgbe_set_ivar_map(struct ixgbe_hw *hw, int8_t direction,
 	} else if ((hw->mac.type == ixgbe_mac_82599EB) ||
 			(hw->mac.type == ixgbe_mac_X540) ||
 			(hw->mac.type == ixgbe_mac_X550) ||
+			(hw->mac.type == ixgbe_mac_X550EM_a) ||
 			(hw->mac.type == ixgbe_mac_X550EM_x)) {
 		if (direction == -1) {
 			/* other causes */

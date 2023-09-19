@@ -834,7 +834,7 @@ prepare_aead_op(void)
 			RTE_LOG(ERR, USER1, "Not enough memory\n");
 			return -ENOMEM;
 		}
-		env.digest_len = vec.cipher_auth.digest.len;
+		env.digest_len = vec.aead.digest.len;
 
 		sym->aead.data.length = vec.pt.len;
 		sym->aead.digest.data = env.digest;
@@ -843,7 +843,7 @@ prepare_aead_op(void)
 		ret = prepare_data_mbufs(&vec.ct);
 		if (ret < 0)
 			return ret;
-
+		env.digest_len = vec.aead.digest.len;
 		sym->aead.data.length = vec.ct.len;
 		sym->aead.digest.data = vec.aead.digest.val;
 		sym->aead.digest.phys_addr = rte_malloc_virt2iova(
@@ -2034,7 +2034,7 @@ fips_mct_tdes_test(void)
 		}
 
 		for (k = 0; k < 24; k++)
-			val_key.val[k] = (__builtin_popcount(val_key.val[k]) &
+			val_key.val[k] = (rte_popcount32(val_key.val[k]) &
 					0x1) ?
 					val_key.val[k] : (val_key.val[k] ^ 0x1);
 
@@ -2618,6 +2618,7 @@ error_one_case:
 	if (env.digest) {
 		rte_free(env.digest);
 		env.digest = NULL;
+		env.digest_len = 0;
 	}
 	rte_pktmbuf_free(env.mbuf);
 

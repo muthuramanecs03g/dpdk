@@ -73,7 +73,7 @@ static bool mlx5dr_pat_compare_pattern(enum mlx5dr_action_type cur_type,
 		return false;
 
 	 /* All decap-l3 look the same, only change is the num of actions */
-	if (type == MLX5DR_ACTION_TYP_TNL_L3_TO_L2)
+	if (type == MLX5DR_ACTION_TYP_REFORMAT_TNL_L3_TO_L2)
 		return true;
 
 	for (i = 0; i < num_of_actions; i++) {
@@ -449,7 +449,7 @@ bool mlx5dr_pat_arg_verify_actions(__be64 pattern[], uint16_t num_of_actions)
 		u8 action_id =
 			MLX5_GET(set_action_in, &pattern[i], action_type);
 		if (action_id >= MLX5_MODIFICATION_TYPE_MAX) {
-			DR_LOG(ERR, "Invalid action %u\n", action_id);
+			DR_LOG(ERR, "Invalid action %u", action_id);
 			return false;
 		}
 	}
@@ -468,7 +468,7 @@ int mlx5dr_pat_arg_create_modify_header(struct mlx5dr_context *ctx,
 
 	num_of_actions = pattern_sz / MLX5DR_MODIFY_ACTION_SIZE;
 	if (num_of_actions == 0) {
-		DR_LOG(ERR, "Invalid number of actions %u\n", num_of_actions);
+		DR_LOG(ERR, "Invalid number of actions %u", num_of_actions);
 		rte_errno = EINVAL;
 		return rte_errno;
 	}

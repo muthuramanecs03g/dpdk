@@ -531,12 +531,12 @@ mlx5_rx_queue_stop(struct rte_eth_dev *dev, uint16_t idx)
 	 * synchronized, that might be broken on RQ restart
 	 * and cause Rx malfunction, so queue stopping is
 	 * not supported if vectorized Rx burst is engaged.
-	 * The routine pointer depends on the process
-	 * type, should perform check there.
+	 * The routine pointer depends on the process type,
+	 * should perform check there. MPRQ is not supported as well.
 	 */
-	if (pkt_burst == mlx5_rx_burst_vec) {
-		DRV_LOG(ERR, "Rx queue stop is not supported "
-			"for vectorized Rx");
+	if (pkt_burst != mlx5_rx_burst) {
+		DRV_LOG(ERR, "Rx queue stop is only supported "
+			"for non-vectorized single-packet Rx");
 		rte_errno = EINVAL;
 		return -EINVAL;
 	}
@@ -1604,23 +1604,38 @@ mlx5_mprq_prepare(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	} else {
 		*actual_log_stride_num = config->mprq.log_stride_num;
 	}
-	if (config->mprq.log_stride_size) {
-		/* Checks if chosen size of stride is in supported range. */
-		if (config->mprq.log_stride_size > log_max_stride_size ||
-		    config->mprq.log_stride_size < log_min_stride_size) {
-			*actual_log_stride_size = log_def_stride_size;
-			DRV_LOG(WARNING,
-				"Port %u Rx queue %u size of a stride for Multi-Packet RQ is out of range, setting default value (%u)",
-				dev->data->port_id, idx,
-				RTE_BIT32(log_def_stride_size));
-		} else {
-			*actual_log_stride_size = config->mprq.log_stride_size;
-		}
+	/* Checks if chosen size of stride is in supported range. */
+	if (config->mprq.log_stride_size > log_max_stride_size ||
+	    config->mprq.log_stride_size < log_min_stride_size) {
+		*actual_log_stride_size = log_def_stride_size;
+		DRV_LOG(WARNING,
+			"Port %u Rx queue %u size of a stride for Multi-Packet RQ is out of range, setting default value (%u)",
+			dev->data->port_id, idx,
+			RTE_BIT32(log_def_stride_size));
 	} else {
-		if (min_mbuf_size <= RTE_BIT32(log_max_stride_size))
+		*actual_log_stride_size = config->mprq.log_stride_size;
+	}
+	/* Make the stride fit the mbuf size by default. */
+	if (*actual_log_stride_size == MLX5_MPRQ_DEFAULT_LOG_STRIDE_SIZE) {
+		if (min_mbuf_size <= RTE_BIT32(log_max_stride_size)) {
+			DRV_LOG(WARNING,
+				"Port %u Rx queue %u size of a stride for Multi-Packet RQ is adjusted to match the mbuf size (%u)",
+				dev->data->port_id, idx, min_mbuf_size);
 			*actual_log_stride_size = log2above(min_mbuf_size);
-		else
+		} else {
 			goto unsupport;
+		}
+	}
+	/* Make sure the stride size is greater than the headroom. */
+	if (RTE_BIT32(*actual_log_stride_size) < RTE_PKTMBUF_HEADROOM) {
+		if (RTE_BIT32(log_max_stride_size) > RTE_PKTMBUF_HEADROOM) {
+			DRV_LOG(WARNING,
+				"Port %u Rx queue %u size of a stride for Multi-Packet RQ is adjusted to accommodate the headroom (%u)",
+				dev->data->port_id, idx, RTE_PKTMBUF_HEADROOM);
+			*actual_log_stride_size = log2above(RTE_PKTMBUF_HEADROOM);
+		} else {
+			goto unsupport;
+		}
 	}
 	log_stride_wqe_size = *actual_log_stride_num + *actual_log_stride_size;
 	/* Check if WQE buffer size is supported by hardware. */
@@ -2042,7 +2057,7 @@ mlx5_rxq_deref(struct rte_eth_dev *dev, uint16_t idx)
 
 	if (rxq == NULL)
 		return 0;
-	return __atomic_sub_fetch(&rxq->refcnt, 1, __ATOMIC_RELAXED);
+	return __atomic_fetch_sub(&rxq->refcnt, 1, __ATOMIC_RELAXED) - 1;
 }
 
 /**
@@ -2141,7 +2156,7 @@ mlx5_ext_rxq_deref(struct rte_eth_dev *dev, uint16_t idx)
 {
 	struct mlx5_external_rxq *rxq = mlx5_ext_rxq_get(dev, idx);
 
-	return __atomic_sub_fetch(&rxq->refcnt, 1, __ATOMIC_RELAXED);
+	return __atomic_fetch_sub(&rxq->refcnt, 1, __ATOMIC_RELAXED) - 1;
 }
 
 /**
@@ -2462,7 +2477,7 @@ mlx5_ind_table_obj_release(struct rte_eth_dev *dev,
 	unsigned int ret;
 
 	rte_rwlock_write_lock(&priv->ind_tbls_lock);
-	ret = __atomic_sub_fetch(&ind_tbl->refcnt, 1, __ATOMIC_RELAXED);
+	ret = __atomic_fetch_sub(&ind_tbl->refcnt, 1, __ATOMIC_RELAXED) - 1;
 	if (!ret)
 		LIST_REMOVE(ind_tbl, next);
 	rte_rwlock_write_unlock(&priv->ind_tbls_lock);
@@ -2759,6 +2774,7 @@ mlx5_hrxq_match_cb(void *tool_ctx __rte_unused, struct mlx5_list_entry *entry,
 	struct mlx5_hrxq *hrxq = container_of(entry, typeof(*hrxq), entry);
 
 	return (hrxq->rss_key_len != rss_desc->key_len ||
+	    hrxq->symmetric_hash_function != rss_desc->symmetric_hash_function ||
 	    memcmp(hrxq->rss_key, rss_desc->key, rss_desc->key_len) ||
 	    hrxq->hws_flags != rss_desc->hws_flags ||
 	    hrxq->hash_fields != rss_desc->hash_fields ||
@@ -2792,7 +2808,7 @@ mlx5_hrxq_match_cb(void *tool_ctx __rte_unused, struct mlx5_list_entry *entry,
 int
 mlx5_hrxq_modify(struct rte_eth_dev *dev, uint32_t hrxq_idx,
 		 const uint8_t *rss_key, uint32_t rss_key_len,
-		 uint64_t hash_fields,
+		 uint64_t hash_fields, bool symmetric_hash_function,
 		 const uint16_t *queues, uint32_t queues_n)
 {
 	int err;
@@ -2837,8 +2853,8 @@ mlx5_hrxq_modify(struct rte_eth_dev *dev, uint32_t hrxq_idx,
 		return -rte_errno;
 	}
 	MLX5_ASSERT(priv->obj_ops.hrxq_modify);
-	ret = priv->obj_ops.hrxq_modify(dev, hrxq, rss_key,
-					hash_fields, ind_tbl);
+	ret = priv->obj_ops.hrxq_modify(dev, hrxq, rss_key, hash_fields,
+					symmetric_hash_function, ind_tbl);
 	if (ret) {
 		rte_errno = errno;
 		goto error;
@@ -2938,6 +2954,7 @@ __mlx5_hrxq_create(struct rte_eth_dev *dev,
 	hrxq->rss_key_len = rss_key_len;
 	hrxq->hash_fields = rss_desc->hash_fields;
 	hrxq->hws_flags = rss_desc->hws_flags;
+	hrxq->symmetric_hash_function = rss_desc->symmetric_hash_function;
 	memcpy(hrxq->rss_key, rss_key, rss_key_len);
 	ret = priv->obj_ops.hrxq_new(dev, hrxq, rss_desc->tunnel);
 	if (ret < 0)

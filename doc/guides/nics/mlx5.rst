@@ -110,6 +110,7 @@ Features
   and source only, destination only or both.
 - Several RSS hash keys, one for each flow type.
 - Default RSS operation with no hash key specification.
+- Symmetric RSS function.
 - Configurable RETA table.
 - Link flow control (pause frame).
 - Support for multiple MAC addresses.
@@ -147,12 +148,14 @@ Features
 - Matching on GTP extension header with raw encap/decap action.
 - Matching on Geneve TLV option header with raw encap/decap action.
 - Matching on ESP header SPI field.
+- Matching on InfiniBand BTH.
 - Modify IPv4/IPv6 ECN field.
 - RSS support in sample action.
 - E-Switch mirroring and jump.
 - E-Switch mirroring and modify.
 - 21844 flow priorities for ingress or egress flow groups greater than 0 and for any transfer
   flow group.
+- Flow quota.
 - Flow metering, including meter policy API.
 - Flow meter hierarchy.
 - Flow meter mark.
@@ -202,6 +205,9 @@ Limitations
 - Available descriptor threshold event:
 
   - Does not support shared Rx queue and hairpin Rx queue.
+
+- The symmetric RSS function is supported by swapping source and destination
+  addresses and ports.
 
 - Host shaper:
 
@@ -477,6 +483,14 @@ Limitations
   - The input buffer, providing the removal size, is not validated.
   - The buffer size must match the length of the headers to be removed.
 
+- Outer UDP checksum calculation for encapsulation flow actions:
+
+  - Currently available NVIDIA NICs and DPUs do not have a capability to calculate
+    the UDP checksum in the header added using encapsulation flow actions.
+
+    Applications are required to use 0 in UDP checksum field in such flow actions.
+    Resulting packet will have outer UDP checksum equal to 0.
+
 - ICMP(code/type/identifier/sequence number) / ICMP6(code/type/identifier/sequence number) matching,
   IP-in-IP and MPLS flow matching are all mutually exclusive features which cannot be supported together
   (see :ref:`mlx5_firmware_config`).
@@ -537,6 +551,8 @@ Limitations
 
   - Supports the 'set' and 'add' operations for ``RTE_FLOW_ACTION_TYPE_MODIFY_FIELD`` action.
   - Modification of an arbitrary place in a packet via the special ``RTE_FLOW_FIELD_START`` Field ID is not supported.
+  - Modification of the MPLS header is supported only in HWS and only to copy from,
+    the encapsulation level is always 0.
   - Modification of the 802.1Q Tag, VXLAN Network or GENEVE Network ID's is not supported.
   - Encapsulation levels are not supported, can modify outermost header fields only.
   - Offsets cannot skip past the boundary of a field.
@@ -588,6 +604,16 @@ Limitations
 
   - Hairpin between two ports could only manual binding and explicit Tx flow mode. For single port hairpin, all the combinations of auto/manual binding and explicit/implicit Tx flow mode could be supported.
   - Hairpin in switchdev SR-IOV mode is not supported till now.
+
+- Quota:
+
+  - Quota implemented for HWS / template API.
+  - Maximal value for quota SET and ADD operations in INT32_MAX (2GB).
+  - Application cannot use 2 consecutive ADD updates.
+    Next tokens update after ADD must always be SET.
+  - Quota flow action cannot be used with Meter or CT flow actions in the same rule.
+  - Quota flow action and item supported in non-root HWS tables.
+  - Maximal number of HW quota and HW meter objects <= 16e6.
 
 - Meter:
 
@@ -1603,6 +1629,14 @@ shortened below as "OFED".
    |                       | | ConnectX-5    | | ConnectX-5    |
    +-----------------------+-----------------+-----------------+
 
+.. table:: Minimal SW/HW versions for flow template API
+
+   +-----------------+--------------------+--------------------+
+   | DPDK            | NIC                | Firmware           |
+   +=================+====================+====================+
+   | 22.11           | ConnectX-6 Dx      | xx.35.1012         |
+   +-----------------+--------------------+--------------------+
+
 Notes for metadata
 ------------------
 
@@ -1887,9 +1921,15 @@ The procedure below is an example of using a ConnectX-5 adapter card (pf0) with 
         $ ip link set p0 vf 0 trust on
         $ ip link set p0 vf 1 trust on
 
-#. Configure all VFs using mlxreg::
+#. Configure all VFs using ``mlxreg``:
 
-   $ mlxreg -d /dev/mst/mt4121_pciconf0 --reg_name VHCA_TRUST_LEVEL --yes --set "all_vhca=0x1,trust_level=0x1"
+   - For MFT >= 4.21::
+
+     $ mlxreg -d /dev/mst/mt4121_pciconf0 --reg_name VHCA_TRUST_LEVEL --yes --indexes 'all_vhca=0x1,vhca_id=0x0' --set 'trust_level=0x1'
+
+   - For MFT < 4.21::
+
+     $ mlxreg -d /dev/mst/mt4121_pciconf0 --reg_name VHCA_TRUST_LEVEL --yes --set "all_vhca=0x1,trust_level=0x1"
 
    .. note::
 
@@ -1898,6 +1938,81 @@ The procedure below is an example of using a ConnectX-5 adapter card (pf0) with 
 #. For each VF PCIe, using the following command to bind the driver::
 
    $ echo "0000:82:00.2" >> /sys/bus/pci/drivers/mlx5_core/bind
+
+How to trace Tx datapath
+------------------------
+
+The mlx5 PMD provides Tx datapath tracing capability with extra debug information:
+when and how packets were scheduled,
+and when the actual sending was completed by the NIC hardware.
+
+Steps to enable Tx datapath tracing:
+
+#. Build DPDK application with enabled datapath tracing
+
+   The Meson option ``--enable_trace_fp=true`` and
+   the C flag ``ALLOW_EXPERIMENTAL_API`` should be specified.
+
+   .. code-block:: console
+
+      meson configure --buildtype=debug -Denable_trace_fp=true
+         -Dc_args='-DRTE_LIBRTE_MLX5_DEBUG -DRTE_ENABLE_ASSERT -DALLOW_EXPERIMENTAL_API' build
+
+#. Configure the NIC
+
+   If the sending completion timings are important,
+   the NIC should be configured to provide realtime timestamps.
+   The non-volatile settings parameter  ``REAL_TIME_CLOCK_ENABLE`` should be configured as ``1``.
+
+   .. code-block:: console
+
+      mlxconfig -d /dev/mst/mt4125_pciconf0 s REAL_TIME_CLOCK_ENABLE=1
+
+   The ``mlxconfig`` utility is part of the MFT package.
+
+#. Run application with EAL parameter enabling tracing in mlx5 Tx datapath
+
+   By default all tracepoints are disabled.
+   To analyze Tx datapath and its timings: ``--trace=pmd.net.mlx5.tx``.
+
+#. Commit the tracing data to the storage (with ``rte_trace_save()`` API call).
+
+#. Install or build the ``babeltrace2`` package
+
+   The Python script analyzing gathered trace data uses the ``babeltrace2`` library.
+   The package should be either installed or built from source as shown below.
+
+   .. code-block:: console
+
+      git clone https://github.com/efficios/babeltrace.git
+      cd babeltrace
+      ./bootstrap
+      ./configure -help
+      ./configure --disable-api-doc --disable-man-pages
+                  --disable-python-bindings-doc --enable-python-plugins
+                  --enable-python-binding
+
+#. Run analyzing script
+
+   ``mlx5_trace.py`` is used to combine related events (packet firing and completion)
+   and to show the results in human-readable view.
+
+   The analyzing script is located in the DPDK source tree: ``drivers/net/mlx5/tools``.
+
+   It requires Python 3.6 and ``babeltrace2`` package.
+
+   The parameter of the script is the trace data folder.
+
+   .. code-block:: console
+
+      mlx5_trace.py /var/log/rte-2023-01-23-AM-11-52-39
+
+#. Interpreting the script output data
+
+   All the timings are given in nanoseconds.
+   The list of Tx bursts per port/queue is presented in the output.
+   Each list element contains the list of built WQEs with specific opcodes.
+   Each WQE contains the list of the encompassed packets to send.
 
 Host shaper
 -----------

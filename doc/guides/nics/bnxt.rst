@@ -916,6 +916,7 @@ Shown below are DPDK LTS releases and their supported firmware versions:
 * ``DPDK Release 19.11`` ... Firmware 219.0.103 or later
 * ``DPDK Release 20.11`` ... Firmware 219.0.103 or later
 * ``DPDK Release 21.11`` ... Firmware 221.0.101 or later
+* ``DPDK Release 22.11`` ... Firmware 226.0.131 or later
 
 Supported APIs
 --------------
@@ -1019,8 +1020,7 @@ Listed below are the rte_flow functions supported:
 rte_flow Items
 ~~~~~~~~~~~~~~
 
-Refer to "Table 1.2 rte_flow items availability in networking drivers" in
-`Overview of Networking Drivers <https://doc.dpdk.org/guides/nics/overview.html>`.
+Refer to :ref:`rte_flow items availability in networking drivers`.
 
 Listed below are the rte_flow items supported:
 
@@ -1045,8 +1045,7 @@ Listed below are the rte_flow items supported:
 rte_flow Actions
 ~~~~~~~~~~~~~~~~
 
-Refer to "Table 1.3 rte_flow actions availability in networking drivers" in
-`Overview of Networking Drivers <https://doc.dpdk.org/guides/nics/overview.html>`.
+Refer to :ref:`rte_flow actions availability in networking drivers`.
 
 Listed below are the rte_flow actions supported:
 

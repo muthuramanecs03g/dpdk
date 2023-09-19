@@ -9,6 +9,7 @@ INPUT                   = @TOPDIR@/doc/api/doxy-api-index.md \
                           @TOPDIR@/drivers/crypto/scheduler \
                           @TOPDIR@/drivers/dma/dpaa2 \
                           @TOPDIR@/drivers/event/dlb2 \
+                          @TOPDIR@/drivers/mempool/cnxk \
                           @TOPDIR@/drivers/mempool/dpaa2 \
                           @TOPDIR@/drivers/net/ark \
                           @TOPDIR@/drivers/net/bnxt \
@@ -39,7 +40,6 @@ INPUT                   = @TOPDIR@/doc/api/doxy-api-index.md \
                           @TOPDIR@/lib/ethdev \
                           @TOPDIR@/lib/eventdev \
                           @TOPDIR@/lib/fib \
-                          @TOPDIR@/lib/flow_classify \
                           @TOPDIR@/lib/gpudev \
                           @TOPDIR@/lib/graph \
                           @TOPDIR@/lib/gro \
@@ -48,9 +48,9 @@ INPUT                   = @TOPDIR@/doc/api/doxy-api-index.md \
                           @TOPDIR@/lib/ip_frag \
                           @TOPDIR@/lib/ipsec \
                           @TOPDIR@/lib/jobstats \
-                          @TOPDIR@/lib/kni \
                           @TOPDIR@/lib/kvargs \
                           @TOPDIR@/lib/latencystats \
+                          @TOPDIR@/lib/log \
                           @TOPDIR@/lib/lpm \
                           @TOPDIR@/lib/mbuf \
                           @TOPDIR@/lib/member \
@@ -62,6 +62,7 @@ INPUT                   = @TOPDIR@/doc/api/doxy-api-index.md \
                           @TOPDIR@/lib/net \
                           @TOPDIR@/lib/pcapng \
                           @TOPDIR@/lib/pci \
+                          @TOPDIR@/lib/pdcp \
                           @TOPDIR@/lib/pdump \
                           @TOPDIR@/lib/pipeline \
                           @TOPDIR@/lib/port \
@@ -111,7 +112,6 @@ GENERATE_DEPRECATEDLIST = YES
 VERBATIM_HEADERS        = NO
 ALPHABETICAL_INDEX      = NO
 
-HTML_TIMESTAMP          = NO
 HTML_DYNAMIC_SECTIONS   = YES
 HTML_EXTRA_STYLESHEET   = @TOPDIR@/doc/api/custom.css
 SEARCHENGINE            = YES

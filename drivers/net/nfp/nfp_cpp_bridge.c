@@ -5,13 +5,8 @@
  * Small portions derived from code Copyright(c) 2010-2015 Intel Corporation.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * @file dpdk/pmd/nfp_cpp_bridge.c
- *
- * Netronome vNIC DPDK Poll-Mode Driver: CPP Bridge
- */
+#include <unistd.h>
+#include <sys/ioctl.h>
 
 #include <rte_service_component.h>
 
@@ -21,8 +16,6 @@
 
 #include "nfp_logs.h"
 #include "nfp_cpp_bridge.h"
-
-#include <sys/ioctl.h>
 
 /* Prototypes */
 static int nfp_cpp_bridge_serve_write(int sockfd, struct nfp_cpp *cpp);
@@ -452,9 +445,3 @@ nfp_cpp_bridge_service_func(void *args)
 
 	return 0;
 }
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */

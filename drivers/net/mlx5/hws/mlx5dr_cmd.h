@@ -5,6 +5,13 @@
 #ifndef MLX5DR_CMD_H_
 #define MLX5DR_CMD_H_
 
+struct mlx5dr_cmd_set_fte_attr {
+	uint32_t action_flags;
+	uint8_t destination_type;
+	uint32_t destination_id;
+	uint8_t flow_source;
+};
+
 struct mlx5dr_cmd_ft_create_attr {
 	uint8_t type;
 	uint8_t level;
@@ -20,6 +27,10 @@ struct mlx5dr_cmd_ft_modify_attr {
 	uint32_t table_miss_id;
 	uint8_t table_miss_action;
 	uint64_t modify_fs;
+};
+
+struct mlx5dr_cmd_ft_query_attr {
+	uint8_t type;
 };
 
 struct mlx5dr_cmd_fg_attr {
@@ -215,6 +226,11 @@ int
 mlx5dr_cmd_flow_table_modify(struct mlx5dr_devx_obj *devx_obj,
 			     struct mlx5dr_cmd_ft_modify_attr *ft_attr);
 
+int
+mlx5dr_cmd_flow_table_query(struct mlx5dr_devx_obj *devx_obj,
+			    struct mlx5dr_cmd_ft_query_attr *ft_attr,
+			    uint64_t *icm_addr_0, uint64_t *icm_addr_1);
+
 struct mlx5dr_devx_obj *
 mlx5dr_cmd_rtc_create(struct ibv_context *ctx,
 		      struct mlx5dr_cmd_rtc_create_attr *rtc_attr);
@@ -255,6 +271,20 @@ mlx5dr_cmd_header_modify_pattern_create(struct ibv_context *ctx,
 					uint8_t *actions);
 
 struct mlx5dr_devx_obj *
+mlx5dr_cmd_set_fte(struct ibv_context *ctx,
+		   uint32_t table_type,
+		   uint32_t table_id,
+		   uint32_t group_id,
+		   struct mlx5dr_cmd_set_fte_attr *fte_attr);
+
+struct mlx5dr_cmd_forward_tbl *
+mlx5dr_cmd_forward_tbl_create(struct ibv_context *ctx,
+			      struct mlx5dr_cmd_ft_create_attr *ft_attr,
+			      struct mlx5dr_cmd_set_fte_attr *fte_attr);
+
+void mlx5dr_cmd_forward_tbl_destroy(struct mlx5dr_cmd_forward_tbl *tbl);
+
+struct mlx5dr_devx_obj *
 mlx5dr_cmd_alias_obj_create(struct ibv_context *ctx,
 			    struct mlx5dr_cmd_alias_obj_create_attr *alias_attr);
 
@@ -265,13 +295,6 @@ int mlx5dr_cmd_query_ib_port(struct ibv_context *ctx,
 			     uint32_t port_num);
 int mlx5dr_cmd_query_caps(struct ibv_context *ctx,
 			  struct mlx5dr_cmd_query_caps *caps);
-
-void mlx5dr_cmd_miss_ft_destroy(struct mlx5dr_cmd_forward_tbl *tbl);
-
-struct mlx5dr_cmd_forward_tbl *
-mlx5dr_cmd_miss_ft_create(struct ibv_context *ctx,
-			  struct mlx5dr_cmd_ft_create_attr *ft_attr,
-			  uint32_t vport);
 
 void mlx5dr_cmd_set_attr_connect_miss_tbl(struct mlx5dr_context *ctx,
 					  uint32_t fw_ft_type,

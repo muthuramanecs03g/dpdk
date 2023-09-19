@@ -132,6 +132,9 @@ struct nfp_flower_cmsg_port_mod {
 	rte_be16_t mtu;
 };
 
+#define NFP_FLOWER_CMSG_PORT_MOD_INFO_LINK              RTE_BIT32(0)
+#define NFP_FLOWER_CMSG_PORT_MOD_MTU_CHANGE_ONLY        RTE_BIT32(1)
+
 struct nfp_flower_tun_neigh {
 	uint8_t dst_mac[RTE_ETHER_ADDR_LEN];
 	uint8_t src_mac[RTE_ETHER_ADDR_LEN];
@@ -365,8 +368,6 @@ enum nfp_flower_cmsg_port_vnic_type {
 
 #define NFP_FLOWER_CMSG_HLEN            sizeof(struct nfp_flower_cmsg_hdr)
 #define NFP_FLOWER_CMSG_VER1            1
-#define NFP_NET_META_PORTID             5
-#define NFP_META_PORT_ID_CTRL           ~0U
 
 #define NFP_FLOWER_CMSG_PORT_TYPE(x)            (((x) >> 28) & 0xf)  /* [31,28] */
 #define NFP_FLOWER_CMSG_PORT_SYS_ID(x)          (((x) >> 24) & 0xf)  /* [24,27] */

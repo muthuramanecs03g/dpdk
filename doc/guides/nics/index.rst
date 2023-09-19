@@ -43,8 +43,6 @@ Network Interface Controller Drivers
     ionic
     ipn3ke
     ixgbe
-    kni
-    liquidio
     mana
     memif
     mlx4

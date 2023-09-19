@@ -80,6 +80,34 @@ mlx5dr_cmd_flow_table_modify(struct mlx5dr_devx_obj *devx_obj,
 	return ret;
 }
 
+int
+mlx5dr_cmd_flow_table_query(struct mlx5dr_devx_obj *devx_obj,
+			    struct mlx5dr_cmd_ft_query_attr *ft_attr,
+			    uint64_t *icm_addr_0, uint64_t *icm_addr_1)
+{
+	uint32_t out[MLX5_ST_SZ_DW(query_flow_table_out)] = {0};
+	uint32_t in[MLX5_ST_SZ_DW(query_flow_table_in)] = {0};
+	void *ft_ctx;
+	int ret;
+
+	MLX5_SET(query_flow_table_in, in, opcode, MLX5_CMD_OP_QUERY_FLOW_TABLE);
+	MLX5_SET(query_flow_table_in, in, table_type, ft_attr->type);
+	MLX5_SET(query_flow_table_in, in, table_id, devx_obj->id);
+
+	ret = mlx5_glue->devx_obj_query(devx_obj->obj, in, sizeof(in), out, sizeof(out));
+	if (ret) {
+		DR_LOG(ERR, "Failed to query FT");
+		rte_errno = errno;
+		return ret;
+	}
+
+	ft_ctx = MLX5_ADDR_OF(query_flow_table_out, out, flow_table_context);
+	*icm_addr_0 = MLX5_GET64(flow_table_context, ft_ctx, sw_owner_icm_root_0);
+	*icm_addr_1 = MLX5_GET64(flow_table_context, ft_ctx, sw_owner_icm_root_1);
+
+	return ret;
+}
+
 static struct mlx5dr_devx_obj *
 mlx5dr_cmd_flow_group_create(struct ibv_context *ctx,
 			     struct mlx5dr_cmd_fg_attr *fg_attr)
@@ -112,17 +140,18 @@ mlx5dr_cmd_flow_group_create(struct ibv_context *ctx,
 	return devx_obj;
 }
 
-static struct mlx5dr_devx_obj *
-mlx5dr_cmd_set_vport_fte(struct ibv_context *ctx,
-			 uint32_t table_type,
-			 uint32_t table_id,
-			 uint32_t group_id,
-			 uint32_t vport_id)
+struct mlx5dr_devx_obj *
+mlx5dr_cmd_set_fte(struct ibv_context *ctx,
+		   uint32_t table_type,
+		   uint32_t table_id,
+		   uint32_t group_id,
+		   struct mlx5dr_cmd_set_fte_attr *fte_attr)
 {
 	uint32_t in[MLX5_ST_SZ_DW(set_fte_in) + MLX5_ST_SZ_DW(dest_format)] = {0};
 	uint32_t out[MLX5_ST_SZ_DW(set_fte_out)] = {0};
 	struct mlx5dr_devx_obj *devx_obj;
 	void *in_flow_context;
+	uint32_t action_flags;
 	void *in_dests;
 
 	devx_obj = simple_malloc(sizeof(*devx_obj));
@@ -138,50 +167,51 @@ mlx5dr_cmd_set_vport_fte(struct ibv_context *ctx,
 
 	in_flow_context = MLX5_ADDR_OF(set_fte_in, in, flow_context);
 	MLX5_SET(flow_context, in_flow_context, group_id, group_id);
-	MLX5_SET(flow_context, in_flow_context, destination_list_size, 1);
-	MLX5_SET(flow_context, in_flow_context, action, MLX5_FLOW_CONTEXT_ACTION_FWD_DEST);
+	MLX5_SET(flow_context, in_flow_context, flow_source, fte_attr->flow_source);
 
-	in_dests = MLX5_ADDR_OF(flow_context, in_flow_context, destination);
-	MLX5_SET(dest_format, in_dests, destination_type,
-		 MLX5_FLOW_DESTINATION_TYPE_VPORT);
-	MLX5_SET(dest_format, in_dests, destination_id, vport_id);
+	action_flags = fte_attr->action_flags;
+	MLX5_SET(flow_context, in_flow_context, action, action_flags);
+
+	if (action_flags & MLX5_FLOW_CONTEXT_ACTION_FWD_DEST) {
+		/* Only destination_list_size of size 1 is supported */
+		MLX5_SET(flow_context, in_flow_context, destination_list_size, 1);
+		in_dests = MLX5_ADDR_OF(flow_context, in_flow_context, destination);
+		MLX5_SET(dest_format, in_dests, destination_type, fte_attr->destination_type);
+		MLX5_SET(dest_format, in_dests, destination_id, fte_attr->destination_id);
+	}
 
 	devx_obj->obj = mlx5_glue->devx_obj_create(ctx, in, sizeof(in), out, sizeof(out));
 	if (!devx_obj->obj) {
 		DR_LOG(ERR, "Failed to create FTE");
-		simple_free(devx_obj);
 		rte_errno = errno;
-		return NULL;
+		goto free_devx;
 	}
 
 	return devx_obj;
-}
 
-void mlx5dr_cmd_miss_ft_destroy(struct mlx5dr_cmd_forward_tbl *tbl)
-{
-	mlx5dr_cmd_destroy_obj(tbl->fte);
-	mlx5dr_cmd_destroy_obj(tbl->fg);
-	mlx5dr_cmd_destroy_obj(tbl->ft);
+free_devx:
+	simple_free(devx_obj);
+	return NULL;
 }
 
 struct mlx5dr_cmd_forward_tbl *
-mlx5dr_cmd_miss_ft_create(struct ibv_context *ctx,
-			  struct mlx5dr_cmd_ft_create_attr *ft_attr,
-			  uint32_t vport)
+mlx5dr_cmd_forward_tbl_create(struct ibv_context *ctx,
+			      struct mlx5dr_cmd_ft_create_attr *ft_attr,
+			      struct mlx5dr_cmd_set_fte_attr *fte_attr)
 {
 	struct mlx5dr_cmd_fg_attr fg_attr = {0};
 	struct mlx5dr_cmd_forward_tbl *tbl;
 
 	tbl = simple_calloc(1, sizeof(*tbl));
 	if (!tbl) {
-		DR_LOG(ERR, "Failed to allocate memory for forward default");
+		DR_LOG(ERR, "Failed to allocate memory");
 		rte_errno = ENOMEM;
 		return NULL;
 	}
 
 	tbl->ft = mlx5dr_cmd_flow_table_create(ctx, ft_attr);
 	if (!tbl->ft) {
-		DR_LOG(ERR, "Failed to create FT for miss-table");
+		DR_LOG(ERR, "Failed to create FT");
 		goto free_tbl;
 	}
 
@@ -190,13 +220,13 @@ mlx5dr_cmd_miss_ft_create(struct ibv_context *ctx,
 
 	tbl->fg = mlx5dr_cmd_flow_group_create(ctx, &fg_attr);
 	if (!tbl->fg) {
-		DR_LOG(ERR, "Failed to create FG for miss-table");
+		DR_LOG(ERR, "Failed to create FG");
 		goto free_ft;
 	}
 
-	tbl->fte = mlx5dr_cmd_set_vport_fte(ctx, ft_attr->type, tbl->ft->id, tbl->fg->id, vport);
+	tbl->fte = mlx5dr_cmd_set_fte(ctx, ft_attr->type, tbl->ft->id, tbl->fg->id, fte_attr);
 	if (!tbl->fte) {
-		DR_LOG(ERR, "Failed to create FTE for miss-table");
+		DR_LOG(ERR, "Failed to create FTE");
 		goto free_fg;
 	}
 	return tbl;
@@ -208,6 +238,14 @@ free_ft:
 free_tbl:
 	simple_free(tbl);
 	return NULL;
+}
+
+void mlx5dr_cmd_forward_tbl_destroy(struct mlx5dr_cmd_forward_tbl *tbl)
+{
+	mlx5dr_cmd_destroy_obj(tbl->fte);
+	mlx5dr_cmd_destroy_obj(tbl->fg);
+	mlx5dr_cmd_destroy_obj(tbl->ft);
+	simple_free(tbl);
 }
 
 void mlx5dr_cmd_set_attr_connect_miss_tbl(struct mlx5dr_context *ctx,
@@ -1096,7 +1134,7 @@ int mlx5dr_cmd_query_caps(struct ibv_context *ctx,
 
 		ret = mlx5_glue->devx_general_cmd(ctx, in, sizeof(in), out, sizeof(out));
 		if (ret) {
-			DR_LOG(ERR, "Query eswitch capabilities failed %d\n", ret);
+			DR_LOG(ERR, "Query eswitch capabilities failed %d", ret);
 			rte_errno = errno;
 			return rte_errno;
 		}

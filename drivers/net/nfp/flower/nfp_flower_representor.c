@@ -10,6 +10,7 @@
 #include "../nfp_logs.h"
 #include "../nfp_ctrl.h"
 #include "../nfp_rxtx.h"
+#include "../nfd3/nfp_nfd3.h"
 #include "../nfpcore/nfp_mip.h"
 #include "../nfpcore/nfp_rtsym.h"
 #include "../nfpcore/nfp_nsp.h"
@@ -31,7 +32,7 @@ nfp_pf_repr_rx_queue_setup(struct rte_eth_dev *dev,
 	const struct rte_memzone *tz;
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	hw = repr->app_fw_flower->pf_hw;
 
 	/* Allocating rx queue data structure */
@@ -45,9 +46,7 @@ nfp_pf_repr_rx_queue_setup(struct rte_eth_dev *dev,
 	/* Hw queues mapping based on firmware configuration */
 	rxq->qidx = queue_idx;
 	rxq->fl_qcidx = queue_idx * hw->stride_rx;
-	rxq->rx_qcidx = rxq->fl_qcidx + (hw->stride_rx - 1);
 	rxq->qcp_fl = hw->rx_bar + NFP_QCP_QUEUE_OFF(rxq->fl_qcidx);
-	rxq->qcp_rx = hw->rx_bar + NFP_QCP_QUEUE_OFF(rxq->rx_qcidx);
 
 	/*
 	 * Tracking mbuf size for detecting a potential mbuf overflow due to
@@ -61,7 +60,6 @@ nfp_pf_repr_rx_queue_setup(struct rte_eth_dev *dev,
 	rxq->rx_count = nb_desc;
 	rxq->port_id = dev->data->port_id;
 	rxq->rx_free_thresh = rx_conf->rx_free_thresh;
-	rxq->drop_en = rx_conf->rx_drop_en;
 
 	/*
 	 * Allocate RX ring hardware descriptors. A memzone large enough to
@@ -80,7 +78,7 @@ nfp_pf_repr_rx_queue_setup(struct rte_eth_dev *dev,
 
 	/* Saving physical and virtual addresses for the RX ring */
 	rxq->dma = (uint64_t)tz->iova;
-	rxq->rxds = (struct nfp_net_rx_desc *)tz->addr;
+	rxq->rxds = tz->addr;
 
 	/* mbuf pointers array for referencing mbufs linked to RX descriptors */
 	rxq->rxbufs = rte_zmalloc_socket("rxq->rxbufs",
@@ -118,7 +116,7 @@ nfp_pf_repr_tx_queue_setup(struct rte_eth_dev *dev,
 	const struct rte_memzone *tz;
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	hw = repr->app_fw_flower->pf_hw;
 
 	tx_free_thresh = (tx_conf->tx_free_thresh) ? tx_conf->tx_free_thresh :
@@ -153,9 +151,6 @@ nfp_pf_repr_tx_queue_setup(struct rte_eth_dev *dev,
 
 	txq->tx_count = nb_desc;
 	txq->tx_free_thresh = tx_free_thresh;
-	txq->tx_pthresh = tx_conf->tx_thresh.pthresh;
-	txq->tx_hthresh = tx_conf->tx_thresh.hthresh;
-	txq->tx_wthresh = tx_conf->tx_thresh.wthresh;
 
 	/* queue mapping based on firmware configuration */
 	txq->qidx = queue_idx;
@@ -166,7 +161,7 @@ nfp_pf_repr_tx_queue_setup(struct rte_eth_dev *dev,
 
 	/* Saving physical and virtual addresses for the TX ring */
 	txq->dma = (uint64_t)tz->iova;
-	txq->txds = (struct nfp_net_nfd3_tx_desc *)tz->addr;
+	txq->txds = tz->addr;
 
 	/* mbuf pointers array for referencing mbufs linked to TX descriptors */
 	txq->txbufs = rte_zmalloc_socket("txq->txbufs",
@@ -196,9 +191,11 @@ nfp_flower_repr_link_update(struct rte_eth_dev *dev,
 		__rte_unused int wait_to_complete)
 {
 	int ret;
+	uint32_t i;
 	uint32_t nn_link_status;
 	struct nfp_net_hw *pf_hw;
 	struct rte_eth_link *link;
+	struct nfp_eth_table *nfp_eth_table;
 	struct nfp_flower_representor *repr;
 
 	static const uint32_t ls_to_ethtool[] = {
@@ -212,25 +209,32 @@ nfp_flower_repr_link_update(struct rte_eth_dev *dev,
 		[NFP_NET_CFG_STS_LINK_RATE_100G]        = RTE_ETH_SPEED_NUM_100G,
 	};
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	link = &repr->link;
+	link->link_speed = RTE_ETH_SPEED_NUM_NONE;
 	pf_hw = repr->app_fw_flower->pf_hw;
 
-	memset(link, 0, sizeof(struct rte_eth_link));
-	nn_link_status = nn_cfg_readl(pf_hw, NFP_NET_CFG_STS);
+	if (link->link_status == RTE_ETH_LINK_UP) {
+		if (pf_hw->pf_dev != NULL) {
+			nfp_eth_table = pf_hw->pf_dev->nfp_eth_table;
+			if (nfp_eth_table != NULL) {
+				uint32_t speed = nfp_eth_table->ports[pf_hw->idx].speed;
+				for (i = 0; i < RTE_DIM(ls_to_ethtool); i++) {
+					if (ls_to_ethtool[i] == speed) {
+						link->link_speed = speed;
+						break;
+					}
+				}
+			}
+		} else {
+			nn_link_status = nn_cfg_readw(pf_hw, NFP_NET_CFG_STS);
+			nn_link_status = (nn_link_status >> NFP_NET_CFG_STS_LINK_RATE_SHIFT) &
+					NFP_NET_CFG_STS_LINK_RATE_MASK;
 
-	if (nn_link_status & NFP_NET_CFG_STS_LINK)
-		link->link_status = RTE_ETH_LINK_UP;
-
-	link->link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
-
-	nn_link_status = (nn_link_status >> NFP_NET_CFG_STS_LINK_RATE_SHIFT) &
-			 NFP_NET_CFG_STS_LINK_RATE_MASK;
-
-	if (nn_link_status >= RTE_DIM(ls_to_ethtool))
-		link->link_speed = RTE_ETH_SPEED_NUM_NONE;
-	else
-		link->link_speed = ls_to_ethtool[nn_link_status];
+			if (nn_link_status < RTE_DIM(ls_to_ethtool))
+				link->link_speed = ls_to_ethtool[nn_link_status];
+		}
+	}
 
 	ret = rte_eth_linkstatus_set(dev, link);
 	if (ret == 0) {
@@ -278,7 +282,7 @@ nfp_flower_repr_dev_configure(struct rte_eth_dev *dev)
 	struct rte_eth_rxmode *rxmode;
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	pf_hw = repr->app_fw_flower->pf_hw;
 
 	dev_conf = &dev->data->dev_conf;
@@ -300,7 +304,7 @@ nfp_flower_repr_dev_start(struct rte_eth_dev *dev)
 	struct nfp_flower_representor *repr;
 	struct nfp_app_fw_flower *app_fw_flower;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	app_fw_flower = repr->app_fw_flower;
 
 	if (repr->repr_type == NFP_REPR_TYPE_PHYS_PORT) {
@@ -319,7 +323,7 @@ nfp_flower_repr_dev_stop(struct rte_eth_dev *dev)
 	struct nfp_flower_representor *repr;
 	struct nfp_app_fw_flower *app_fw_flower;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	app_fw_flower = repr->app_fw_flower;
 
 	nfp_flower_cmsg_port_mod(app_fw_flower, repr->port_id, false);
@@ -344,7 +348,7 @@ nfp_flower_repr_rx_queue_setup(struct rte_eth_dev *dev,
 	struct nfp_net_hw *pf_hw;
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	pf_hw = repr->app_fw_flower->pf_hw;
 
 	/* Allocating rx queue data structure */
@@ -372,7 +376,7 @@ nfp_flower_repr_tx_queue_setup(struct rte_eth_dev *dev,
 	struct nfp_net_hw *pf_hw;
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)dev->data->dev_private;
+	repr = dev->data->dev_private;
 	pf_hw = repr->app_fw_flower->pf_hw;
 
 	/* Allocating tx queue data structure */
@@ -395,7 +399,7 @@ nfp_flower_repr_stats_get(struct rte_eth_dev *ethdev,
 {
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)ethdev->data->dev_private;
+	repr = ethdev->data->dev_private;
 	rte_memcpy(stats, &repr->repr_stats, sizeof(struct rte_eth_stats));
 
 	return 0;
@@ -406,7 +410,7 @@ nfp_flower_repr_stats_reset(struct rte_eth_dev *ethdev)
 {
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)ethdev->data->dev_private;
+	repr = ethdev->data->dev_private;
 	memset(&repr->repr_stats, 0, sizeof(struct rte_eth_stats));
 
 	return 0;
@@ -418,7 +422,7 @@ nfp_flower_repr_mac_addr_set(struct rte_eth_dev *ethdev,
 {
 	struct nfp_flower_representor *repr;
 
-	repr = (struct nfp_flower_representor *)ethdev->data->dev_private;
+	repr = ethdev->data->dev_private;
 	rte_ether_addr_copy(mac_addr, &repr->mac_addr);
 	rte_ether_addr_copy(mac_addr, ethdev->data->mac_addrs);
 
@@ -470,7 +474,6 @@ nfp_flower_repr_tx_burst(void *tx_queue,
 {
 	uint16_t i;
 	uint16_t sent;
-	char *meta_offset;
 	void *pf_tx_queue;
 	struct nfp_net_txq *txq;
 	struct nfp_net_hw *pf_hw;
@@ -488,12 +491,9 @@ nfp_flower_repr_tx_burst(void *tx_queue,
 	repr_dev = &rte_eth_devices[txq->port_id];
 	repr = repr_dev->data->dev_private;
 
-	for (i = 0; i < nb_pkts; i++) {
-		meta_offset = rte_pktmbuf_prepend(tx_pkts[i], FLOWER_PKT_DATA_OFFSET);
-		*(uint32_t *)meta_offset = rte_cpu_to_be_32(NFP_NET_META_PORTID);
-		meta_offset += 4;
-		*(uint32_t *)meta_offset = rte_cpu_to_be_32(repr->port_id);
-	}
+	for (i = 0; i < nb_pkts; i++)
+		nfp_flower_pkt_add_metadata(repr->app_fw_flower,
+				tx_pkts[i], repr->port_id);
 
 	/* This points to the PF vNIC that owns this representor */
 	pf_hw = txq->hw;
@@ -527,9 +527,10 @@ static const struct eth_dev_ops nfp_flower_pf_repr_dev_ops = {
 	.stats_reset          = nfp_flower_repr_stats_reset,
 
 	.promiscuous_enable   = nfp_net_promisc_enable,
-	.promiscuous_disable  = nfp_net_promisc_enable,
+	.promiscuous_disable  = nfp_net_promisc_disable,
 
 	.mac_addr_set         = nfp_flower_repr_mac_addr_set,
+	.fw_version_get       = nfp_repr_firmware_version_get,
 };
 
 static const struct eth_dev_ops nfp_flower_repr_dev_ops = {
@@ -548,9 +549,10 @@ static const struct eth_dev_ops nfp_flower_repr_dev_ops = {
 	.stats_reset          = nfp_flower_repr_stats_reset,
 
 	.promiscuous_enable   = nfp_net_promisc_enable,
-	.promiscuous_disable  = nfp_net_promisc_enable,
+	.promiscuous_disable  = nfp_net_promisc_disable,
 
 	.mac_addr_set         = nfp_flower_repr_mac_addr_set,
+	.fw_version_get       = nfp_repr_firmware_version_get,
 
 	.flow_ops_get         = nfp_net_flow_ops_get,
 	.mtr_ops_get          = nfp_net_mtr_ops_get,
@@ -589,7 +591,7 @@ nfp_flower_pf_repr_init(struct rte_eth_dev *eth_dev,
 	struct nfp_flower_representor *init_repr_data;
 
 	/* Cast the input representor data to the correct struct here */
-	init_repr_data = (struct nfp_flower_representor *)init_params;
+	init_repr_data = init_params;
 
 	/* Memory has been allocated in the eth_dev_create() function */
 	repr = eth_dev->data->dev_private;
@@ -603,7 +605,7 @@ nfp_flower_pf_repr_init(struct rte_eth_dev *eth_dev,
 	snprintf(repr->name, sizeof(repr->name), "%s", init_repr_data->name);
 
 	eth_dev->dev_ops = &nfp_flower_pf_repr_dev_ops;
-	eth_dev->rx_pkt_burst = nfp_flower_pf_recv_pkts;
+	eth_dev->rx_pkt_burst = nfp_net_recv_pkts;
 	eth_dev->tx_pkt_burst = nfp_flower_pf_xmit_pkts;
 	eth_dev->data->dev_flags |= RTE_ETH_DEV_REPRESENTOR;
 
@@ -644,7 +646,7 @@ nfp_flower_repr_init(struct rte_eth_dev *eth_dev,
 	struct nfp_flower_representor *init_repr_data;
 
 	/* Cast the input representor data to the correct struct here */
-	init_repr_data = (struct nfp_flower_representor *)init_params;
+	init_repr_data = init_params;
 	app_fw_flower = init_repr_data->app_fw_flower;
 
 	/* Memory has been allocated in the eth_dev_create() function */
@@ -730,7 +732,9 @@ nfp_flower_repr_alloc(struct nfp_app_fw_flower *app_fw_flower)
 {
 	int i;
 	int ret;
+	const char *pci_name;
 	struct rte_eth_dev *eth_dev;
+	struct rte_pci_device *pci_dev;
 	struct nfp_eth_table *nfp_eth_table;
 	struct nfp_eth_table_port *eth_port;
 	struct nfp_flower_representor flower_repr = {
@@ -753,7 +757,13 @@ nfp_flower_repr_alloc(struct nfp_app_fw_flower *app_fw_flower)
 
 	/* PF vNIC reprs get a random MAC address */
 	rte_eth_random_addr(flower_repr.mac_addr.addr_bytes);
-	sprintf(flower_repr.name, "flower_repr_pf");
+
+	pci_dev = app_fw_flower->pf_hw->pf_dev->pci_dev;
+
+	pci_name = strchr(pci_dev->name, ':') + 1;
+
+	snprintf(flower_repr.name, sizeof(flower_repr.name),
+			"%s_repr_pf", pci_name);
 
 	/* Create a eth_dev for this representor */
 	ret = rte_eth_dev_create(eth_dev->device, flower_repr.name,
@@ -773,9 +783,9 @@ nfp_flower_repr_alloc(struct nfp_app_fw_flower *app_fw_flower)
 		flower_repr.vf_id = i + 1;
 
 		/* Copy the real mac of the interface to the representor struct */
-		rte_ether_addr_copy((struct rte_ether_addr *)eth_port->mac_addr,
-				&flower_repr.mac_addr);
-		sprintf(flower_repr.name, "flower_repr_p%d", i);
+		rte_ether_addr_copy(&eth_port->mac_addr, &flower_repr.mac_addr);
+		snprintf(flower_repr.name, sizeof(flower_repr.name),
+				"%s_repr_p%d", pci_name, i);
 
 		/*
 		 * Create a eth_dev for this representor
@@ -806,7 +816,8 @@ nfp_flower_repr_alloc(struct nfp_app_fw_flower *app_fw_flower)
 
 		/* VF reprs get a random MAC address */
 		rte_eth_random_addr(flower_repr.mac_addr.addr_bytes);
-		sprintf(flower_repr.name, "flower_repr_vf%d", i);
+		snprintf(flower_repr.name, sizeof(flower_repr.name),
+				"%s_repr_vf%d", pci_name, i);
 
 		 /* This will also allocate private memory for the device*/
 		ret = rte_eth_dev_create(eth_dev->device, flower_repr.name,

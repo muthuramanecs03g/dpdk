@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright(c) 2017-2019 Intel Corporation
 
-project('DPDK', 'C',
+project('DPDK', 'c',
         # Get version number from file.
         # Fallback to "more" for Windows compatibility.
         version: run_command(find_program('cat', 'more'),
@@ -9,6 +9,7 @@ project('DPDK', 'C',
         license: 'BSD',
         default_options: [
             'buildtype=release',
+            'c_std=c11',
             'default_library=static',
             'warning_level=2',
         ],
@@ -43,7 +44,9 @@ dpdk_drivers = []
 dpdk_extra_ldflags = []
 dpdk_libs_deprecated = []
 dpdk_apps_disabled = []
+dpdk_apps_enabled = []
 dpdk_libs_disabled = []
+dpdk_libs_enabled = []
 dpdk_drvs_disabled = []
 testpmd_drivers_sources = []
 testpmd_drivers_deps = []
@@ -121,7 +124,7 @@ endif
 output_message = '\n=================\nApplications Enabled\n=================\n'
 output_message += '\napps:\n\t'
 output_count = 0
-foreach app:enabled_apps
+foreach app:dpdk_apps_enabled
     output_message += app + ', '
     output_count += 1
     if output_count == 8
@@ -134,7 +137,7 @@ message(output_message + '\n')
 output_message = '\n=================\nLibraries Enabled\n=================\n'
 output_message += '\nlibs:\n\t'
 output_count = 0
-foreach lib:enabled_libs
+foreach lib:dpdk_libs_enabled
     output_message += lib + ', '
     output_count += 1
     if output_count == 8

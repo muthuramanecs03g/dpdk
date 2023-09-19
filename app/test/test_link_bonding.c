@@ -2,7 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
-#include "unistd.h"
+#include <unistd.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -5171,4 +5171,4 @@ test_link_bonding(void)
 	return unit_test_suite_runner(&link_bonding_test_suite);
 }
 
-REGISTER_TEST_COMMAND(link_bonding_autotest, test_link_bonding);
+REGISTER_DRIVER_TEST(link_bonding_autotest, test_link_bonding);

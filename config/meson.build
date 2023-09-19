@@ -14,9 +14,34 @@ foreach env:supported_exec_envs
     set_variable('is_' + env, exec_env == env)
 endforeach
 
+exec_envs = {'freebsd': 0, 'linux': 1, 'windows': 2}
+foreach env, id:exec_envs
+    dpdk_conf.set('RTE_ENV_' + env.to_upper(), id)
+    dpdk_conf.set10('RTE_EXEC_ENV_IS_' + env.to_upper(), (exec_env == env))
+endforeach
+dpdk_conf.set('RTE_EXEC_ENV', exec_envs[exec_env])
+dpdk_conf.set('RTE_EXEC_ENV_' + exec_env.to_upper(), 1)
+
 # MS linker requires special treatment.
 # TODO: use cc.get_linker_id() with Meson >= 0.54
-is_ms_linker = is_windows and (cc.get_id() == 'clang')
+is_ms_compiler = is_windows and (cc.get_id() == 'msvc')
+is_ms_linker = is_windows and (cc.get_id() == 'clang' or is_ms_compiler)
+
+if is_ms_compiler
+    # force the use of intrinsics the MSVC compiler (except x86)
+    # does not support inline assembly
+    dpdk_conf.set('RTE_FORCE_INTRINSICS', 1)
+
+    # suppress warnings raised for using standard library functions
+    # the MSVC compiler regards as unsafe but are used by DPDK
+    dpdk_conf.set('_CRT_SECURE_NO_WARNINGS', 1)
+
+    # enable non-locking atomic operations
+    add_project_arguments('/experimental:c11atomics', language: 'c')
+
+    # enable typeof operator
+    add_project_arguments('/d1experimental:typeof', language: 'c')
+endif
 
 # set the major version, which might be used by drivers and libraries
 # depending on the configuration options
@@ -129,12 +154,14 @@ endif
 dpdk_conf.set('RTE_MACHINE', cpu_instruction_set)
 machine_args = []
 
-# ppc64 does not support -march= at all, use -mcpu and -mtune for that
-if host_machine.cpu_family().startswith('ppc')
-    machine_args += '-mcpu=' + cpu_instruction_set
-    machine_args += '-mtune=' + cpu_instruction_set
-else
-    machine_args += '-march=' + cpu_instruction_set
+if not is_ms_compiler
+    # ppc64 does not support -march= at all, use -mcpu and -mtune for that
+    if host_machine.cpu_family().startswith('ppc')
+        machine_args += '-mcpu=' + cpu_instruction_set
+        machine_args += '-mtune=' + cpu_instruction_set
+    else
+        machine_args += '-march=' + cpu_instruction_set
+    endif
 endif
 
 toolchain = cc.get_id()
@@ -174,7 +201,7 @@ if link_lib != ''
 endif
 
 # check for libraries used in multiple places in DPDK
-has_libnuma = 0
+has_libnuma = false
 find_libnuma = true
 if meson.is_cross_build() and not meson.get_cross_property('numa', true)
     # don't look for libnuma if explicitly disabled in cross build
@@ -184,17 +211,17 @@ if find_libnuma
     numa_dep = cc.find_library('numa', required: false)
     if numa_dep.found() and cc.has_header('numaif.h')
         dpdk_conf.set10('RTE_HAS_LIBNUMA', true)
-        has_libnuma = 1
+        has_libnuma = true
         add_project_link_arguments('-lnuma', language: 'c')
         dpdk_extra_ldflags += '-lnuma'
     endif
 endif
 
-has_libfdt = 0
+has_libfdt = false
 fdt_dep = cc.find_library('fdt', required: false)
 if fdt_dep.found() and cc.has_header('fdt.h')
     dpdk_conf.set10('RTE_HAS_LIBFDT', true)
-    has_libfdt = 1
+    has_libfdt = true
     add_project_link_arguments('-lfdt', language: 'c')
     dpdk_extra_ldflags += '-lfdt'
 endif
@@ -253,7 +280,11 @@ if cc.get_id() == 'clang' and dpdk_conf.get('RTE_ARCH_64') == false
 endif
 
 # add -include rte_config to cflags
-add_project_arguments('-include', 'rte_config.h', language: 'c')
+if is_ms_compiler
+    add_project_arguments('/FI', 'rte_config.h', language: 'c')
+else
+    add_project_arguments('-include', 'rte_config.h', language: 'c')
+endif
 
 # enable extra warnings and disable any unwanted warnings
 # -Wall is added by default at warning level 1, and -Wextra
@@ -366,7 +397,7 @@ if max_numa_nodes == 'detect'
         error('Discovery of max_numa_nodes not supported for cross-compilation.')
     endif
     # overwrite the default value with discovered values
-    max_numa_nodes = run_command(get_numa_count_cmd).stdout().to_int()
+    max_numa_nodes = run_command(get_numa_count_cmd, check: true).stdout().to_int()
     message('Found @0@ numa nodes'.format(max_numa_nodes))
     dpdk_conf.set('RTE_MAX_NUMA_NODES', max_numa_nodes)
 elif max_numa_nodes != 'default'
@@ -380,6 +411,15 @@ if not dpdk_conf.has('RTE_MAX_LCORE')
 endif
 if not dpdk_conf.has('RTE_MAX_NUMA_NODES')
     error('Number of NUMA nodes not specified.')
+endif
+if (is_linux and
+        dpdk_conf.get('RTE_MAX_NUMA_NODES') > 1 and
+        not meson.is_cross_build() and
+        not has_libnuma)
+    error('''
+No NUMA library (development package) found, yet DPDK configured for multiple NUMA nodes.
+Please install libnuma, or set 'max_numa_nodes' option to '1' to build without NUMA support.
+''')
 endif
 
 # set the install path for the drivers

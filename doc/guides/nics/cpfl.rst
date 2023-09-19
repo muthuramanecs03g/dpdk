@@ -20,27 +20,20 @@ Follow the DPDK :doc:`../linux_gsg/index` to setup the basic DPDK environment.
 To get better performance on Intel platforms,
 please follow the :doc:`../linux_gsg/nic_perf_intel_platform`.
 
-Features
---------
 
-Vector PMD
-~~~~~~~~~~
+Recommended Matching List
+-------------------------
 
-Vector path for Rx and Tx path are selected automatically.
-The paths are chosen based on 2 conditions:
+It is highly recommended to upgrade the MEV-ts release
+to avoid compatibility issues with the cpfl PMD.
+Here is the suggested matching list which has been tested and verified.
 
-- ``CPU``
+   +------------+------------------+
+   |     DPDK   |  MEV-ts release  |
+   +============+==================+
+   |    23.07   |      0.9.1       |
+   +------------+------------------+
 
-  On the x86 platform, the driver checks if the CPU supports AVX512.
-  If the CPU supports AVX512 and EAL argument ``--force-max-simd-bitwidth``
-  is set to 512, AVX512 paths will be chosen.
-
-- ``Offload features``
-
-  The supported HW offload features are described in the document cpfl.ini,
-  A value "P" means the offload feature is not supported by vector path.
-  If any not supported features are used, cpfl vector PMD is disabled
-  and the scalar paths are chosen.
 
 Configuration
 -------------
@@ -104,3 +97,34 @@ Driver compilation and testing
 ------------------------------
 
 Refer to the document :doc:`build_and_test` for details.
+
+
+Features
+--------
+
+Vector PMD
+~~~~~~~~~~
+
+Vector path for Rx and Tx path are selected automatically.
+The paths are chosen based on 2 conditions:
+
+- ``CPU``
+
+  On the x86 platform, the driver checks if the CPU supports AVX512.
+  If the CPU supports AVX512 and EAL argument ``--force-max-simd-bitwidth``
+  is set to 512, AVX512 paths will be chosen.
+
+- ``Offload features``
+
+  The supported HW offload features are described in the document cpfl.ini,
+  A value "P" means the offload feature is not supported by vector path.
+  If any not supported features are used, cpfl vector PMD is disabled
+  and the scalar paths are chosen.
+
+
+Hairpin queue
+~~~~~~~~~~~~~
+
+E2100 Series can loopback packets from RX port to TX port.
+This feature is called port-to-port or hairpin.
+Currently, the PMD only supports single port hairpin.

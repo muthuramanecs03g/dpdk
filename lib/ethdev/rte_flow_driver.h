@@ -121,6 +121,17 @@ struct rte_flow_ops {
 		 const void *update, void *query,
 		 enum rte_flow_query_update_mode qu_mode,
 		 struct rte_flow_error *error);
+	/** @see rte_flow_action_list_handle_create() */
+	struct rte_flow_action_list_handle *(*action_list_handle_create)
+		(struct rte_eth_dev *dev,
+		 const struct rte_flow_indir_action_conf *conf,
+		 const struct rte_flow_action actions[],
+		 struct rte_flow_error *error);
+	/** @see rte_flow_action_list_handle_destroy() */
+	int (*action_list_handle_destroy)
+		(struct rte_eth_dev *dev,
+		 struct rte_flow_action_list_handle *handle,
+		 struct rte_flow_error *error);
 	/** See rte_flow_tunnel_decap_set() */
 	int (*tunnel_decap_set)
 		(struct rte_eth_dev *dev,
@@ -302,6 +313,51 @@ struct rte_flow_ops {
 		 const void *update, void *query,
 		 enum rte_flow_query_update_mode qu_mode,
 		 void *user_data, struct rte_flow_error *error);
+	/** See rte_flow_actions_update(). */
+	int (*actions_update)
+		(struct rte_eth_dev *dev,
+		 struct rte_flow *flow,
+		 const struct rte_flow_action actions[],
+		 struct rte_flow_error *error);
+	/** See rte_flow_async_actions_update() */
+	int (*async_actions_update)
+		(struct rte_eth_dev *dev,
+		 uint32_t queue_id,
+		 const struct rte_flow_op_attr *op_attr,
+		 struct rte_flow *flow,
+		 const struct rte_flow_action actions[],
+		 uint8_t actions_template_index,
+		 void *user_data,
+		 struct rte_flow_error *error);
+	/** @see rte_flow_async_action_list_handle_create() */
+	struct rte_flow_action_list_handle *
+	(*async_action_list_handle_create)
+		(struct rte_eth_dev *dev, uint32_t queue_id,
+		 const struct rte_flow_op_attr *attr,
+		 const struct rte_flow_indir_action_conf *conf,
+		 const struct rte_flow_action *actions,
+		 void *user_data, struct rte_flow_error *error);
+	/** @see rte_flow_async_action_list_handle_destroy() */
+	int (*async_action_list_handle_destroy)
+		(struct rte_eth_dev *dev, uint32_t queue_id,
+		 const struct rte_flow_op_attr *op_attr,
+		 struct rte_flow_action_list_handle *action_handle,
+		 void *user_data, struct rte_flow_error *error);
+	/** @see rte_flow_action_list_handle_query_update() */
+	int (*action_list_handle_query_update)
+		(struct rte_eth_dev *dev,
+		 const struct rte_flow_action_list_handle *handle,
+		 const void **update, void **query,
+		 enum rte_flow_query_update_mode mode,
+		 struct rte_flow_error *error);
+	/** @see rte_flow_async_action_list_handle_query_update() */
+	int (*async_action_list_handle_query_update)
+		(struct rte_eth_dev *dev, uint32_t queue_id,
+		 const struct rte_flow_op_attr *attr,
+		 const struct rte_flow_action_list_handle *handle,
+		 const void **update, void **query,
+		 enum rte_flow_query_update_mode mode,
+		 void *user_data, struct rte_flow_error *error);
 };
 
 /**
@@ -319,6 +375,12 @@ struct rte_flow_ops {
  */
 const struct rte_flow_ops *
 rte_flow_ops_get(uint16_t port_id, struct rte_flow_error *error);
+
+/**
+ * Register mbuf dynamic flag for rte_flow_get_restore_info.
+ */
+int
+rte_flow_restore_info_dynflag_register(void);
 
 #ifdef __cplusplus
 }

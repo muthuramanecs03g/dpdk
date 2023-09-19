@@ -74,6 +74,9 @@ enum index {
 	SET_RAW_INDEX,
 	SET_SAMPLE_ACTIONS,
 	SET_SAMPLE_INDEX,
+	SET_IPV6_EXT_REMOVE,
+	SET_IPV6_EXT_PUSH,
+	SET_IPV6_EXT_INDEX,
 
 	/* Top-level command. */
 	FLOW,
@@ -129,6 +132,7 @@ enum index {
 	/* Queue arguments. */
 	QUEUE_CREATE,
 	QUEUE_DESTROY,
+	QUEUE_UPDATE,
 	QUEUE_AGED,
 	QUEUE_INDIRECT_ACTION,
 
@@ -143,8 +147,12 @@ enum index {
 	QUEUE_DESTROY_ID,
 	QUEUE_DESTROY_POSTPONE,
 
+	/* Queue update arguments. */
+	QUEUE_UPDATE_ID,
+
 	/* Queue indirect action arguments */
 	QUEUE_INDIRECT_ACTION_CREATE,
+	QUEUE_INDIRECT_ACTION_LIST_CREATE,
 	QUEUE_INDIRECT_ACTION_UPDATE,
 	QUEUE_INDIRECT_ACTION_DESTROY,
 	QUEUE_INDIRECT_ACTION_QUERY,
@@ -157,6 +165,7 @@ enum index {
 	QUEUE_INDIRECT_ACTION_TRANSFER,
 	QUEUE_INDIRECT_ACTION_CREATE_POSTPONE,
 	QUEUE_INDIRECT_ACTION_SPEC,
+	QUEUE_INDIRECT_ACTION_LIST,
 
 	/* Queue indirect action update arguments */
 	QUEUE_INDIRECT_ACTION_UPDATE_POSTPONE,
@@ -206,9 +215,11 @@ enum index {
 
 	/* Destroy arguments. */
 	DESTROY_RULE,
+	DESTROY_IS_USER_ID,
 
 	/* Query arguments. */
 	QUERY_ACTION,
+	QUERY_IS_USER_ID,
 
 	/* List arguments. */
 	LIST_GROUP,
@@ -224,10 +235,12 @@ enum index {
 	VC_TRANSFER,
 	VC_TUNNEL_SET,
 	VC_TUNNEL_MATCH,
+	VC_USER_ID,
 
 	/* Dump arguments */
 	DUMP_ALL,
 	DUMP_ONE,
+	DUMP_IS_USER_ID,
 
 	/* Configure arguments */
 	CONFIG_QUEUES_NUMBER,
@@ -242,6 +255,8 @@ enum index {
 
 	/* Indirect action arguments */
 	INDIRECT_ACTION_CREATE,
+	INDIRECT_ACTION_LIST_CREATE,
+	INDIRECT_ACTION_FLOW_CONF_CREATE,
 	INDIRECT_ACTION_UPDATE,
 	INDIRECT_ACTION_DESTROY,
 	INDIRECT_ACTION_QUERY,
@@ -253,6 +268,8 @@ enum index {
 	INDIRECT_ACTION_EGRESS,
 	INDIRECT_ACTION_TRANSFER,
 	INDIRECT_ACTION_SPEC,
+	INDIRECT_ACTION_LIST,
+	INDIRECT_ACTION_FLOW_CONF,
 
 	/* Indirect action destroy arguments */
 	INDIRECT_ACTION_DESTROY_ID,
@@ -300,6 +317,7 @@ enum index {
 	ITEM_IPV4,
 	ITEM_IPV4_VER_IHL,
 	ITEM_IPV4_TOS,
+	ITEM_IPV4_LENGTH,
 	ITEM_IPV4_ID,
 	ITEM_IPV4_FRAGMENT_OFFSET,
 	ITEM_IPV4_TTL,
@@ -309,6 +327,7 @@ enum index {
 	ITEM_IPV6,
 	ITEM_IPV6_TC,
 	ITEM_IPV6_FLOW,
+	ITEM_IPV6_LEN,
 	ITEM_IPV6_PROTO,
 	ITEM_IPV6_HOP,
 	ITEM_IPV6_SRC,
@@ -496,6 +515,15 @@ enum index {
 	ITEM_QUOTA_STATE_NAME,
 	ITEM_AGGR_AFFINITY,
 	ITEM_AGGR_AFFINITY_VALUE,
+	ITEM_TX_QUEUE,
+	ITEM_TX_QUEUE_VALUE,
+	ITEM_IB_BTH,
+	ITEM_IB_BTH_OPCODE,
+	ITEM_IB_BTH_PKEY,
+	ITEM_IB_BTH_DST_QPN,
+	ITEM_IB_BTH_PSN,
+	ITEM_IPV6_PUSH_REMOVE_EXT,
+	ITEM_IPV6_PUSH_REMOVE_EXT_TYPE,
 
 	/* Validate/create actions. */
 	ACTIONS,
@@ -626,6 +654,11 @@ enum index {
 	ACTION_SAMPLE_INDEX,
 	ACTION_SAMPLE_INDEX_VALUE,
 	ACTION_INDIRECT,
+	ACTION_INDIRECT_LIST,
+	ACTION_INDIRECT_LIST_HANDLE,
+	ACTION_INDIRECT_LIST_CONF,
+	INDIRECT_LIST_ACTION_ID2PTR_HANDLE,
+	INDIRECT_LIST_ACTION_ID2PTR_CONF,
 	ACTION_SHARED_INDIRECT,
 	INDIRECT_ACTION_PORT,
 	INDIRECT_ACTION_ID2PTR,
@@ -636,11 +669,17 @@ enum index {
 	ACTION_MODIFY_FIELD_DST_TYPE_VALUE,
 	ACTION_MODIFY_FIELD_DST_LEVEL,
 	ACTION_MODIFY_FIELD_DST_LEVEL_VALUE,
+	ACTION_MODIFY_FIELD_DST_TAG_INDEX,
+	ACTION_MODIFY_FIELD_DST_TYPE_ID,
+	ACTION_MODIFY_FIELD_DST_CLASS_ID,
 	ACTION_MODIFY_FIELD_DST_OFFSET,
 	ACTION_MODIFY_FIELD_SRC_TYPE,
 	ACTION_MODIFY_FIELD_SRC_TYPE_VALUE,
 	ACTION_MODIFY_FIELD_SRC_LEVEL,
 	ACTION_MODIFY_FIELD_SRC_LEVEL_VALUE,
+	ACTION_MODIFY_FIELD_SRC_TAG_INDEX,
+	ACTION_MODIFY_FIELD_SRC_TYPE_ID,
+	ACTION_MODIFY_FIELD_SRC_CLASS_ID,
 	ACTION_MODIFY_FIELD_SRC_OFFSET,
 	ACTION_MODIFY_FIELD_SRC_VALUE,
 	ACTION_MODIFY_FIELD_SRC_POINTER,
@@ -665,6 +704,12 @@ enum index {
 	ACTION_QUOTA_QU_LIMIT,
 	ACTION_QUOTA_QU_UPDATE_OP,
 	ACTION_QUOTA_QU_UPDATE_OP_NAME,
+	ACTION_IPV6_EXT_REMOVE,
+	ACTION_IPV6_EXT_REMOVE_INDEX,
+	ACTION_IPV6_EXT_REMOVE_INDEX_VALUE,
+	ACTION_IPV6_EXT_PUSH,
+	ACTION_IPV6_EXT_PUSH_INDEX,
+	ACTION_IPV6_EXT_PUSH_INDEX_VALUE,
 };
 
 /** Maximum size for pattern in struct rte_flow_item_raw. */
@@ -728,6 +773,42 @@ struct raw_decap_conf raw_decap_confs[RAW_ENCAP_CONFS_MAX_NUM];
 struct action_raw_decap_data {
 	struct rte_flow_action_raw_decap conf;
 	uint8_t data[ACTION_RAW_ENCAP_MAX_DATA];
+	uint16_t idx;
+};
+
+/** Maximum data size in struct rte_flow_action_ipv6_ext_push. */
+#define ACTION_IPV6_EXT_PUSH_MAX_DATA 512
+#define IPV6_EXT_PUSH_CONFS_MAX_NUM 8
+
+/** Storage for struct rte_flow_action_ipv6_ext_push. */
+struct ipv6_ext_push_conf {
+	uint8_t data[ACTION_IPV6_EXT_PUSH_MAX_DATA];
+	size_t size;
+	uint8_t type;
+};
+
+struct ipv6_ext_push_conf ipv6_ext_push_confs[IPV6_EXT_PUSH_CONFS_MAX_NUM];
+
+/** Storage for struct rte_flow_action_ipv6_ext_push including external data. */
+struct action_ipv6_ext_push_data {
+	struct rte_flow_action_ipv6_ext_push conf;
+	uint8_t data[ACTION_IPV6_EXT_PUSH_MAX_DATA];
+	uint8_t type;
+	uint16_t idx;
+};
+
+/** Storage for struct rte_flow_action_ipv6_ext_remove. */
+struct ipv6_ext_remove_conf {
+	struct rte_flow_action_ipv6_ext_remove conf;
+	uint8_t type;
+};
+
+struct ipv6_ext_remove_conf ipv6_ext_remove_confs[IPV6_EXT_PUSH_CONFS_MAX_NUM];
+
+/** Storage for struct rte_flow_action_ipv6_ext_remove including external data. */
+struct action_ipv6_ext_remove_data {
+	struct rte_flow_action_ipv6_ext_remove conf;
+	uint8_t type;
 	uint16_t idx;
 };
 
@@ -854,7 +935,9 @@ static const char *const modify_field_ids[] = {
 	"ipv4_ecn", "ipv6_ecn", "gtp_psc_qfi", "meter_color",
 	"ipv6_proto",
 	"flex_item",
-	"hash_result", NULL
+	"hash_result",
+	"geneve_opt_type", "geneve_opt_class", "geneve_opt_data", "mpls",
+	NULL
 };
 
 static const char *const meter_colors[] = {
@@ -1077,6 +1160,7 @@ struct buffer {
 			uint32_t act_templ_id;
 			struct rte_flow_attr attr;
 			struct tunnel_ops tunnel_ops;
+			uintptr_t user_id;
 			struct rte_flow_item *pattern;
 			struct rte_flow_action *actions;
 			struct rte_flow_action *masks;
@@ -1085,17 +1169,20 @@ struct buffer {
 			uint8_t *data;
 		} vc; /**< Validate/create arguments. */
 		struct {
-			uint32_t *rule;
-			uint32_t rule_n;
+			uint64_t *rule;
+			uint64_t rule_n;
+			bool is_user_id;
 		} destroy; /**< Destroy arguments. */
 		struct {
 			char file[128];
 			bool mode;
-			uint32_t rule;
+			uint64_t rule;
+			bool is_user_id;
 		} dump; /**< Dump arguments. */
 		struct {
-			uint32_t rule;
+			uint64_t rule;
 			struct rte_flow_action action;
+			bool is_user_id;
 		} query; /**< Query arguments. */
 		struct {
 			uint32_t *group;
@@ -1239,6 +1326,7 @@ static const enum index next_table_destroy_attr[] = {
 static const enum index next_queue_subcmd[] = {
 	QUEUE_CREATE,
 	QUEUE_DESTROY,
+	QUEUE_UPDATE,
 	QUEUE_AGED,
 	QUEUE_INDIRECT_ACTION,
 	ZERO,
@@ -1266,6 +1354,7 @@ static const enum index next_qia_create_attr[] = {
 	QUEUE_INDIRECT_ACTION_TRANSFER,
 	QUEUE_INDIRECT_ACTION_CREATE_POSTPONE,
 	QUEUE_INDIRECT_ACTION_SPEC,
+	QUEUE_INDIRECT_ACTION_LIST,
 	ZERO,
 };
 
@@ -1294,11 +1383,20 @@ static const enum index next_ia_create_attr[] = {
 	INDIRECT_ACTION_EGRESS,
 	INDIRECT_ACTION_TRANSFER,
 	INDIRECT_ACTION_SPEC,
+	INDIRECT_ACTION_LIST,
+	INDIRECT_ACTION_FLOW_CONF,
 	ZERO,
 };
 
 static const enum index next_ia[] = {
 	INDIRECT_ACTION_ID2PTR,
+	ACTION_NEXT,
+	ZERO
+};
+
+static const enum index next_ial[] = {
+	ACTION_INDIRECT_LIST_HANDLE,
+	ACTION_INDIRECT_LIST_CONF,
 	ACTION_NEXT,
 	ZERO
 };
@@ -1319,6 +1417,7 @@ static const enum index next_ia_qu_attr[] = {
 static const enum index next_dump_subcmd[] = {
 	DUMP_ALL,
 	DUMP_ONE,
+	DUMP_IS_USER_ID,
 	ZERO,
 };
 
@@ -1339,18 +1438,26 @@ static const enum index next_vc_attr[] = {
 	VC_TRANSFER,
 	VC_TUNNEL_SET,
 	VC_TUNNEL_MATCH,
+	VC_USER_ID,
 	ITEM_PATTERN,
 	ZERO,
 };
 
 static const enum index next_destroy_attr[] = {
 	DESTROY_RULE,
+	DESTROY_IS_USER_ID,
 	END,
 	ZERO,
 };
 
 static const enum index next_dump_attr[] = {
 	COMMON_FILE_PATH,
+	END,
+	ZERO,
+};
+
+static const enum index next_query_attr[] = {
+	QUERY_IS_USER_ID,
 	END,
 	ZERO,
 };
@@ -1452,6 +1559,8 @@ static const enum index next_item[] = {
 	ITEM_METER,
 	ITEM_QUOTA,
 	ITEM_AGGR_AFFINITY,
+	ITEM_TX_QUEUE,
+	ITEM_IB_BTH,
 	END_SET,
 	ZERO,
 };
@@ -1514,6 +1623,7 @@ static const enum index item_vlan[] = {
 static const enum index item_ipv4[] = {
 	ITEM_IPV4_VER_IHL,
 	ITEM_IPV4_TOS,
+	ITEM_IPV4_LENGTH,
 	ITEM_IPV4_ID,
 	ITEM_IPV4_FRAGMENT_OFFSET,
 	ITEM_IPV4_TTL,
@@ -1527,6 +1637,7 @@ static const enum index item_ipv4[] = {
 static const enum index item_ipv6[] = {
 	ITEM_IPV6_TC,
 	ITEM_IPV6_FLOW,
+	ITEM_IPV6_LEN,
 	ITEM_IPV6_PROTO,
 	ITEM_IPV6_HOP,
 	ITEM_IPV6_SRC,
@@ -1953,6 +2064,21 @@ static const enum index item_aggr_affinity[] = {
 	ZERO,
 };
 
+static const enum index item_tx_queue[] = {
+	ITEM_TX_QUEUE_VALUE,
+	ITEM_NEXT,
+	ZERO,
+};
+
+static const enum index item_ib_bth[] = {
+	ITEM_IB_BTH_OPCODE,
+	ITEM_IB_BTH_PKEY,
+	ITEM_IB_BTH_DST_QPN,
+	ITEM_IB_BTH_PSN,
+	ITEM_NEXT,
+	ZERO,
+};
+
 static const enum index next_action[] = {
 	ACTION_END,
 	ACTION_VOID,
@@ -2013,6 +2139,7 @@ static const enum index next_action[] = {
 	ACTION_AGE_UPDATE,
 	ACTION_SAMPLE,
 	ACTION_INDIRECT,
+	ACTION_INDIRECT_LIST,
 	ACTION_SHARED_INDIRECT,
 	ACTION_MODIFY_FIELD,
 	ACTION_CONNTRACK,
@@ -2022,6 +2149,8 @@ static const enum index next_action[] = {
 	ACTION_SEND_TO_KERNEL,
 	ACTION_QUOTA_CREATE,
 	ACTION_QUOTA_QU,
+	ACTION_IPV6_EXT_REMOVE,
+	ACTION_IPV6_EXT_PUSH,
 	ZERO,
 };
 
@@ -2230,6 +2359,18 @@ static const enum index action_raw_decap[] = {
 	ZERO,
 };
 
+static const enum index action_ipv6_ext_remove[] = {
+	ACTION_IPV6_EXT_REMOVE_INDEX,
+	ACTION_NEXT,
+	ZERO,
+};
+
+static const enum index action_ipv6_ext_push[] = {
+	ACTION_IPV6_EXT_PUSH_INDEX,
+	ACTION_NEXT,
+	ZERO,
+};
+
 static const enum index action_set_tag[] = {
 	ACTION_SET_TAG_DATA,
 	ACTION_SET_TAG_INDEX,
@@ -2289,12 +2430,32 @@ static const enum index next_action_sample[] = {
 	ACTION_RAW_ENCAP,
 	ACTION_VXLAN_ENCAP,
 	ACTION_NVGRE_ENCAP,
+	ACTION_REPRESENTED_PORT,
 	ACTION_NEXT,
+	ZERO,
+};
+
+static const enum index item_ipv6_push_ext[] = {
+	ITEM_IPV6_PUSH_REMOVE_EXT,
+	ZERO,
+};
+
+static const enum index item_ipv6_push_ext_type[] = {
+	ITEM_IPV6_PUSH_REMOVE_EXT_TYPE,
+	ZERO,
+};
+
+static const enum index item_ipv6_push_ext_header[] = {
+	ITEM_IPV6_ROUTING_EXT,
+	ITEM_NEXT,
 	ZERO,
 };
 
 static const enum index action_modify_field_dst[] = {
 	ACTION_MODIFY_FIELD_DST_LEVEL,
+	ACTION_MODIFY_FIELD_DST_TAG_INDEX,
+	ACTION_MODIFY_FIELD_DST_TYPE_ID,
+	ACTION_MODIFY_FIELD_DST_CLASS_ID,
 	ACTION_MODIFY_FIELD_DST_OFFSET,
 	ACTION_MODIFY_FIELD_SRC_TYPE,
 	ZERO,
@@ -2302,6 +2463,9 @@ static const enum index action_modify_field_dst[] = {
 
 static const enum index action_modify_field_src[] = {
 	ACTION_MODIFY_FIELD_SRC_LEVEL,
+	ACTION_MODIFY_FIELD_SRC_TAG_INDEX,
+	ACTION_MODIFY_FIELD_SRC_TYPE_ID,
+	ACTION_MODIFY_FIELD_SRC_CLASS_ID,
 	ACTION_MODIFY_FIELD_SRC_OFFSET,
 	ACTION_MODIFY_FIELD_SRC_VALUE,
 	ACTION_MODIFY_FIELD_SRC_POINTER,
@@ -2334,6 +2498,9 @@ static int parse_set_raw_encap_decap(struct context *, const struct token *,
 static int parse_set_sample_action(struct context *, const struct token *,
 				   const char *, unsigned int,
 				   void *, unsigned int);
+static int parse_set_ipv6_ext_action(struct context *, const struct token *,
+				     const char *, unsigned int,
+				     void *, unsigned int);
 static int parse_set_init(struct context *, const struct token *,
 			  const char *, unsigned int,
 			  void *, unsigned int);
@@ -2411,6 +2578,22 @@ static int parse_vc_action_raw_encap_index(struct context *,
 static int parse_vc_action_raw_decap_index(struct context *,
 					   const struct token *, const char *,
 					   unsigned int, void *, unsigned int);
+static int parse_vc_action_ipv6_ext_remove(struct context *ctx, const struct token *token,
+					   const char *str, unsigned int len, void *buf,
+					   unsigned int size);
+static int parse_vc_action_ipv6_ext_remove_index(struct context *ctx,
+						 const struct token *token,
+						 const char *str, unsigned int len,
+						 void *buf,
+						 unsigned int size);
+static int parse_vc_action_ipv6_ext_push(struct context *ctx, const struct token *token,
+					 const char *str, unsigned int len, void *buf,
+					 unsigned int size);
+static int parse_vc_action_ipv6_ext_push_index(struct context *ctx,
+					       const struct token *token,
+					       const char *str, unsigned int len,
+					       void *buf,
+					       unsigned int size);
 static int parse_vc_action_set_meta(struct context *ctx,
 				    const struct token *token, const char *str,
 				    unsigned int len, void *buf,
@@ -2539,6 +2722,10 @@ static int parse_ia_destroy(struct context *ctx, const struct token *token,
 static int parse_ia_id2ptr(struct context *ctx, const struct token *token,
 			   const char *str, unsigned int len, void *buf,
 			   unsigned int size);
+
+static int parse_indlst_id2ptr(struct context *ctx, const struct token *token,
+			       const char *str, unsigned int len, void *buf,
+			       unsigned int size);
 static int parse_ia_port(struct context *ctx, const struct token *token,
 			 const char *str, unsigned int len, void *buf,
 			 unsigned int size);
@@ -2596,6 +2783,8 @@ static int comp_set_raw_index(struct context *, const struct token *,
 			      unsigned int, char *, unsigned int);
 static int comp_set_sample_index(struct context *, const struct token *,
 			      unsigned int, char *, unsigned int);
+static int comp_set_ipv6_ext_index(struct context *ctx, const struct token *token,
+				   unsigned int ent, char *buf, unsigned int size);
 static int comp_set_modify_field_op(struct context *, const struct token *,
 			      unsigned int, char *, unsigned int);
 static int comp_set_modify_field_id(struct context *, const struct token *,
@@ -2626,6 +2815,16 @@ comp_quota_update_name(struct context *ctx, const struct token *token,
 static int
 comp_qu_mode_name(struct context *ctx, const struct token *token,
 		  unsigned int ent, char *buf, unsigned int size);
+
+struct indlst_conf {
+	uint32_t id;
+	uint32_t conf_num;
+	struct rte_flow_action *actions;
+	const void **conf;
+	SLIST_ENTRY(indlst_conf) next;
+};
+
+static const struct indlst_conf *indirect_action_list_conf_get(uint32_t conf_id);
 
 /** Token definitions. */
 static const struct token token_list[] = {
@@ -3191,6 +3390,7 @@ static const struct token token_list[] = {
 			     NEXT_ENTRY(COMMON_UNSIGNED)),
 		.args = ARGS(ARGS_ENTRY(struct buffer,
 					args.table.attr.nb_flows)),
+		.call = parse_table,
 	},
 	[TABLE_PATTERN_TEMPLATE] = {
 		.name = "pattern_template",
@@ -3234,6 +3434,14 @@ static const struct token token_list[] = {
 			     NEXT_ENTRY(COMMON_QUEUE_ID)),
 		.args = ARGS(ARGS_ENTRY(struct buffer, queue)),
 		.call = parse_qo_destroy,
+	},
+	[QUEUE_UPDATE] = {
+		.name = "update",
+		.help = "update a flow rule",
+		.next = NEXT(NEXT_ENTRY(QUEUE_UPDATE_ID),
+			     NEXT_ENTRY(COMMON_QUEUE_ID)),
+		.args = ARGS(ARGS_ENTRY(struct buffer, queue)),
+		.call = parse_qo,
 	},
 	[QUEUE_AGED] = {
 		.name = "aged",
@@ -3310,6 +3518,15 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY_PTR(struct buffer,
 					    args.destroy.rule)),
 		.call = parse_qo_destroy,
+	},
+	[QUEUE_UPDATE_ID] = {
+		.name = "rule",
+		.help = "specify rule id to update",
+		.next = NEXT(NEXT_ENTRY(QUEUE_ACTIONS_TEMPLATE),
+			NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct buffer,
+				     args.vc.rule_id)),
+		.call = parse_qo,
 	},
 	/* Queue indirect action arguments */
 	[QUEUE_INDIRECT_ACTION_CREATE] = {
@@ -3426,6 +3643,12 @@ static const struct token token_list[] = {
 		.help = "specify action to create indirect handle",
 		.next = NEXT(next_action),
 	},
+	[QUEUE_INDIRECT_ACTION_LIST] = {
+		.name = "list",
+		.help = "specify actions for indirect handle list",
+		.next = NEXT(NEXT_ENTRY(ACTIONS, END)),
+		.call = parse_qia,
+	},
 	/* Top-level command. */
 	[PUSH] = {
 		.name = "push",
@@ -3533,7 +3756,7 @@ static const struct token token_list[] = {
 	[DESTROY] = {
 		.name = "destroy",
 		.help = "destroy specific flow rules",
-		.next = NEXT(NEXT_ENTRY(DESTROY_RULE),
+		.next = NEXT(next_destroy_attr,
 			     NEXT_ENTRY(COMMON_PORT_ID)),
 		.args = ARGS(ARGS_ENTRY(struct buffer, port)),
 		.call = parse_destroy,
@@ -3555,7 +3778,7 @@ static const struct token token_list[] = {
 	[QUERY] = {
 		.name = "query",
 		.help = "query an existing flow rule",
-		.next = NEXT(NEXT_ENTRY(QUERY_ACTION),
+		.next = NEXT(next_query_attr, NEXT_ENTRY(QUERY_ACTION),
 			     NEXT_ENTRY(COMMON_RULE_ID),
 			     NEXT_ENTRY(COMMON_PORT_ID)),
 		.args = ARGS(ARGS_ENTRY(struct buffer, args.query.action.type),
@@ -3674,6 +3897,12 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY_PTR(struct buffer, args.destroy.rule)),
 		.call = parse_destroy,
 	},
+	[DESTROY_IS_USER_ID] = {
+		.name = "user_id",
+		.help = "rule identifier is user-id",
+		.next = NEXT(next_destroy_attr),
+		.call = parse_destroy,
+	},
 	/* Dump arguments. */
 	[DUMP_ALL] = {
 		.name = "all",
@@ -3690,6 +3919,12 @@ static const struct token token_list[] = {
 				ARGS_ENTRY(struct buffer, args.dump.rule)),
 		.call = parse_dump,
 	},
+	[DUMP_IS_USER_ID] = {
+		.name = "user_id",
+		.help = "rule identifier is user-id",
+		.next = NEXT(next_dump_subcmd),
+		.call = parse_dump,
+	},
 	/* Query arguments. */
 	[QUERY_ACTION] = {
 		.name = "{action}",
@@ -3697,6 +3932,12 @@ static const struct token token_list[] = {
 		.help = "action to query, must be part of the rule",
 		.call = parse_action,
 		.comp = comp_action,
+	},
+	[QUERY_IS_USER_ID] = {
+		.name = "user_id",
+		.help = "rule identifier is user-id",
+		.next = NEXT(next_query_attr),
+		.call = parse_query,
 	},
 	/* List arguments. */
 	[LIST_GROUP] = {
@@ -3757,6 +3998,13 @@ static const struct token token_list[] = {
 		.help = "tunnel match rule",
 		.next = NEXT(next_vc_attr, NEXT_ENTRY(COMMON_UNSIGNED)),
 		.args = ARGS(ARGS_ENTRY(struct tunnel_ops, id)),
+		.call = parse_vc,
+	},
+	[VC_USER_ID] = {
+		.name = "user_id",
+		.help = "specify a user id to create",
+		.next = NEXT(next_vc_attr, NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct buffer, args.vc.user_id)),
 		.call = parse_vc,
 	},
 	/* Validate/create pattern. */
@@ -4027,6 +4275,14 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ipv4,
 					     hdr.type_of_service)),
 	},
+	[ITEM_IPV4_LENGTH] = {
+		.name = "length",
+		.help = "total length",
+		.next = NEXT(item_ipv4, NEXT_ENTRY(COMMON_UNSIGNED),
+			     item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ipv4,
+					     hdr.total_length)),
+	},
 	[ITEM_IPV4_ID] = {
 		.name = "packet_id",
 		.help = "fragment packet id",
@@ -4099,6 +4355,14 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY_MASK_HTON(struct rte_flow_item_ipv6,
 						  hdr.vtc_flow,
 						  "\x00\x0f\xff\xff")),
+	},
+	[ITEM_IPV6_LEN] = {
+		.name = "length",
+		.help = "payload length",
+		.next = NEXT(item_ipv6, NEXT_ENTRY(COMMON_UNSIGNED),
+			     item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ipv6,
+					     hdr.payload_len)),
 	},
 	[ITEM_IPV6_PROTO] = {
 		.name = "proto",
@@ -5523,6 +5787,46 @@ static const struct token token_list[] = {
 		.call = parse_quota_state_name,
 		.comp = comp_quota_state_name
 	},
+	[ITEM_IB_BTH] = {
+		.name = "ib_bth",
+		.help = "match ib bth fields",
+		.priv = PRIV_ITEM(IB_BTH,
+				  sizeof(struct rte_flow_item_ib_bth)),
+		.next = NEXT(item_ib_bth),
+		.call = parse_vc,
+	},
+	[ITEM_IB_BTH_OPCODE] = {
+		.name = "opcode",
+		.help = "match ib bth opcode",
+		.next = NEXT(item_ib_bth, NEXT_ENTRY(COMMON_UNSIGNED),
+				 item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ib_bth,
+						 hdr.opcode)),
+	},
+	[ITEM_IB_BTH_PKEY] = {
+		.name = "pkey",
+		.help = "partition key",
+		.next = NEXT(item_ib_bth, NEXT_ENTRY(COMMON_UNSIGNED),
+				 item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ib_bth,
+						 hdr.pkey)),
+	},
+	[ITEM_IB_BTH_DST_QPN] = {
+		.name = "dst_qp",
+		.help = "destination qp",
+		.next = NEXT(item_ib_bth, NEXT_ENTRY(COMMON_UNSIGNED),
+				 item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ib_bth,
+						 hdr.dst_qp)),
+	},
+	[ITEM_IB_BTH_PSN] = {
+		.name = "psn",
+		.help = "packet sequence number",
+		.next = NEXT(item_ib_bth, NEXT_ENTRY(COMMON_UNSIGNED),
+				 item_param),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ib_bth,
+						 hdr.psn)),
+	},
 	/* Validate/create actions. */
 	[ACTIONS] = {
 		.name = "actions",
@@ -6388,6 +6692,33 @@ static const struct token token_list[] = {
 		.call = parse_vc_modify_field_level,
 		.comp = comp_none,
 	},
+	[ACTION_MODIFY_FIELD_DST_TAG_INDEX] = {
+		.name = "dst_tag_index",
+		.help = "destination field tag array",
+		.next = NEXT(action_modify_field_dst,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_modify_field,
+					dst.tag_index)),
+		.call = parse_vc_conf,
+	},
+	[ACTION_MODIFY_FIELD_DST_TYPE_ID] = {
+		.name = "dst_type_id",
+		.help = "destination field type ID",
+		.next = NEXT(action_modify_field_dst,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_modify_field,
+					dst.type)),
+		.call = parse_vc_conf,
+	},
+	[ACTION_MODIFY_FIELD_DST_CLASS_ID] = {
+		.name = "dst_class",
+		.help = "destination field class ID",
+		.next = NEXT(action_modify_field_dst,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_action_modify_field,
+					     dst.class_id)),
+		.call = parse_vc_conf,
+	},
 	[ACTION_MODIFY_FIELD_DST_OFFSET] = {
 		.name = "dst_offset",
 		.help = "destination field bit offset",
@@ -6422,6 +6753,33 @@ static const struct token token_list[] = {
 		.help = "source field level value",
 		.call = parse_vc_modify_field_level,
 		.comp = comp_none,
+	},
+	[ACTION_MODIFY_FIELD_SRC_TAG_INDEX] = {
+		.name = "stc_tag_index",
+		.help = "source field tag array",
+		.next = NEXT(action_modify_field_src,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_modify_field,
+					src.tag_index)),
+		.call = parse_vc_conf,
+	},
+	[ACTION_MODIFY_FIELD_SRC_TYPE_ID] = {
+		.name = "src_type_id",
+		.help = "source field type ID",
+		.next = NEXT(action_modify_field_src,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY(struct rte_flow_action_modify_field,
+					src.type)),
+		.call = parse_vc_conf,
+	},
+	[ACTION_MODIFY_FIELD_SRC_CLASS_ID] = {
+		.name = "src_class",
+		.help = "source field class ID",
+		.next = NEXT(action_modify_field_src,
+			     NEXT_ENTRY(COMMON_UNSIGNED)),
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_action_modify_field,
+					     src.class_id)),
+		.call = parse_vc_conf,
 	},
 	[ACTION_MODIFY_FIELD_SRC_OFFSET] = {
 		.name = "src_offset",
@@ -6472,6 +6830,48 @@ static const struct token token_list[] = {
 		.next = NEXT(NEXT_ENTRY(ACTION_NEXT)),
 		.call = parse_vc,
 	},
+	[ACTION_IPV6_EXT_REMOVE] = {
+		.name = "ipv6_ext_remove",
+		.help = "IPv6 extension type, defined by set ipv6_ext_remove",
+		.priv = PRIV_ACTION(IPV6_EXT_REMOVE,
+			sizeof(struct action_ipv6_ext_remove_data)),
+		.next = NEXT(action_ipv6_ext_remove),
+		.call = parse_vc_action_ipv6_ext_remove,
+	},
+	[ACTION_IPV6_EXT_REMOVE_INDEX] = {
+		.name = "index",
+		.help = "the index of ipv6_ext_remove",
+		.next = NEXT(NEXT_ENTRY(ACTION_IPV6_EXT_REMOVE_INDEX_VALUE)),
+	},
+	[ACTION_IPV6_EXT_REMOVE_INDEX_VALUE] = {
+		.name = "{index}",
+		.type = "UNSIGNED",
+		.help = "unsigned integer value",
+		.next = NEXT(NEXT_ENTRY(ACTION_NEXT)),
+		.call = parse_vc_action_ipv6_ext_remove_index,
+		.comp = comp_set_ipv6_ext_index,
+	},
+	[ACTION_IPV6_EXT_PUSH] = {
+		.name = "ipv6_ext_push",
+		.help = "IPv6 extension data, defined by set ipv6_ext_push",
+		.priv = PRIV_ACTION(IPV6_EXT_PUSH,
+			sizeof(struct action_ipv6_ext_push_data)),
+		.next = NEXT(action_ipv6_ext_push),
+		.call = parse_vc_action_ipv6_ext_push,
+	},
+	[ACTION_IPV6_EXT_PUSH_INDEX] = {
+		.name = "index",
+		.help = "the index of ipv6_ext_push",
+		.next = NEXT(NEXT_ENTRY(ACTION_IPV6_EXT_PUSH_INDEX_VALUE)),
+	},
+	[ACTION_IPV6_EXT_PUSH_INDEX_VALUE] = {
+		.name = "{index}",
+		.type = "UNSIGNED",
+		.help = "unsigned integer value",
+		.next = NEXT(NEXT_ENTRY(ACTION_NEXT)),
+		.call = parse_vc_action_ipv6_ext_push_index,
+		.comp = comp_set_ipv6_ext_index,
+	},
 	/* Top level command. */
 	[SET] = {
 		.name = "set",
@@ -6481,7 +6881,9 @@ static const struct token token_list[] = {
 		.next = NEXT(NEXT_ENTRY
 			     (SET_RAW_ENCAP,
 			      SET_RAW_DECAP,
-			      SET_SAMPLE_ACTIONS)),
+			      SET_SAMPLE_ACTIONS,
+			      SET_IPV6_EXT_REMOVE,
+			      SET_IPV6_EXT_PUSH)),
 		.call = parse_set_init,
 	},
 	/* Sub-level commands. */
@@ -6528,6 +6930,49 @@ static const struct token token_list[] = {
 				 sizeof(((struct buffer *)0)->port),
 				 0, RAW_SAMPLE_CONFS_MAX_NUM - 1)),
 		.call = parse_set_sample_action,
+	},
+	[SET_IPV6_EXT_PUSH] = {
+		.name = "ipv6_ext_push",
+		.help = "set IPv6 extension header",
+		.next = NEXT(NEXT_ENTRY(SET_IPV6_EXT_INDEX)),
+		.args = ARGS(ARGS_ENTRY_ARB_BOUNDED
+				(offsetof(struct buffer, port),
+				 sizeof(((struct buffer *)0)->port),
+				 0, IPV6_EXT_PUSH_CONFS_MAX_NUM - 1)),
+		.call = parse_set_ipv6_ext_action,
+	},
+	[SET_IPV6_EXT_REMOVE] = {
+		.name = "ipv6_ext_remove",
+		.help = "set IPv6 extension header",
+		.next = NEXT(NEXT_ENTRY(SET_IPV6_EXT_INDEX)),
+		.args = ARGS(ARGS_ENTRY_ARB_BOUNDED
+				(offsetof(struct buffer, port),
+				 sizeof(((struct buffer *)0)->port),
+				 0, IPV6_EXT_PUSH_CONFS_MAX_NUM - 1)),
+		.call = parse_set_ipv6_ext_action,
+	},
+	[SET_IPV6_EXT_INDEX] = {
+		.name = "{index}",
+		.type = "UNSIGNED",
+		.help = "index of ipv6 extension push/remove actions",
+		.next = NEXT(item_ipv6_push_ext),
+		.call = parse_port,
+	},
+	[ITEM_IPV6_PUSH_REMOVE_EXT] = {
+		.name = "ipv6_ext",
+		.help = "set IPv6 extension header",
+		.priv = PRIV_ITEM(IPV6_EXT,
+				  sizeof(struct rte_flow_item_ipv6_ext)),
+		.next = NEXT(item_ipv6_push_ext_type),
+		.call = parse_vc,
+	},
+	[ITEM_IPV6_PUSH_REMOVE_EXT_TYPE] = {
+		.name = "type",
+		.help = "set IPv6 extension type",
+		.args = ARGS(ARGS_ENTRY_HTON(struct rte_flow_item_ipv6_ext,
+					     next_hdr)),
+		.next = NEXT(item_ipv6_push_ext_header, NEXT_ENTRY(COMMON_UNSIGNED),
+			     item_param),
 	},
 	[ACTION_SET_TAG] = {
 		.name = "set_tag",
@@ -6775,6 +7220,37 @@ static const struct token token_list[] = {
 		.args = ARGS(ARGS_ENTRY_ARB(0, sizeof(uint32_t))),
 		.call = parse_vc,
 	},
+	[ACTION_INDIRECT_LIST] = {
+		.name = "indirect_list",
+		.help = "apply indirect list action by id",
+		.priv = PRIV_ACTION(INDIRECT_LIST,
+				    sizeof(struct
+					   rte_flow_action_indirect_list)),
+		.next = NEXT(next_ial),
+		.call = parse_vc,
+	},
+	[ACTION_INDIRECT_LIST_HANDLE] = {
+		.name = "handle",
+		.help = "indirect list handle",
+		.next = NEXT(next_ial, NEXT_ENTRY(INDIRECT_LIST_ACTION_ID2PTR_HANDLE)),
+		.args = ARGS(ARGS_ENTRY_ARB(0, sizeof(uintptr_t))),
+	},
+	[ACTION_INDIRECT_LIST_CONF] = {
+		.name = "conf",
+		.help = "indirect list configuration",
+		.next = NEXT(next_ial, NEXT_ENTRY(INDIRECT_LIST_ACTION_ID2PTR_CONF)),
+		.args = ARGS(ARGS_ENTRY_ARB(0, sizeof(uintptr_t))),
+	},
+	[INDIRECT_LIST_ACTION_ID2PTR_HANDLE] = {
+		.type = "UNSIGNED",
+		.help = "unsigned integer value",
+		.call = parse_indlst_id2ptr,
+	},
+	[INDIRECT_LIST_ACTION_ID2PTR_CONF] = {
+		.type = "UNSIGNED",
+		.help = "unsigned integer value",
+		.call = parse_indlst_id2ptr,
+	},
 	[ACTION_SHARED_INDIRECT] = {
 		.name = "shared_indirect",
 		.help = "apply indirect action by id and port",
@@ -6822,6 +7298,18 @@ static const struct token token_list[] = {
 		.name = "action",
 		.help = "specify action to create indirect handle",
 		.next = NEXT(next_action),
+	},
+	[INDIRECT_ACTION_LIST] = {
+		.name = "list",
+		.help = "specify actions for indirect handle list",
+		.next = NEXT(NEXT_ENTRY(ACTIONS, END)),
+		.call = parse_ia,
+	},
+	[INDIRECT_ACTION_FLOW_CONF] = {
+		.name = "flow_conf",
+		.help = "specify actions configuration for indirect handle list",
+		.next = NEXT(NEXT_ENTRY(ACTIONS, END)),
+		.call = parse_ia,
 	},
 	[ACTION_POL_G] = {
 		.name = "g_actions",
@@ -6944,6 +7432,22 @@ static const struct token token_list[] = {
 			     item_param),
 		.args = ARGS(ARGS_ENTRY(struct rte_flow_item_aggr_affinity,
 					affinity)),
+	},
+	[ITEM_TX_QUEUE] = {
+		.name = "tx_queue",
+		.help = "match on the tx queue of send packet",
+		.priv = PRIV_ITEM(TX_QUEUE,
+				  sizeof(struct rte_flow_item_tx_queue)),
+		.next = NEXT(item_tx_queue),
+		.call = parse_vc,
+	},
+	[ITEM_TX_QUEUE_VALUE] = {
+		.name = "tx_queue_value",
+		.help = "tx queue value",
+		.next = NEXT(item_tx_queue, NEXT_ENTRY(COMMON_UNSIGNED),
+			     item_param),
+		.args = ARGS(ARGS_ENTRY(struct rte_flow_item_tx_queue,
+					tx_queue)),
 	},
 };
 
@@ -7181,6 +7685,12 @@ parse_ia(struct context *ctx, const struct token *token,
 		return len;
 	case INDIRECT_ACTION_QU_MODE:
 		return len;
+	case INDIRECT_ACTION_LIST:
+		out->command = INDIRECT_ACTION_LIST_CREATE;
+		return len;
+	case INDIRECT_ACTION_FLOW_CONF:
+		out->command = INDIRECT_ACTION_FLOW_CONF_CREATE;
+		return len;
 	default:
 		return -1;
 	}
@@ -7277,6 +7787,9 @@ parse_qia(struct context *ctx, const struct token *token,
 	case QUEUE_INDIRECT_ACTION_CREATE_POSTPONE:
 		return len;
 	case QUEUE_INDIRECT_ACTION_QU_MODE:
+		return len;
+	case QUEUE_INDIRECT_ACTION_LIST:
+		out->command = QUEUE_INDIRECT_ACTION_LIST_CREATE;
 		return len;
 	default:
 		return -1;
@@ -7415,11 +7928,15 @@ parse_vc(struct context *ctx, const struct token *token,
 	case VC_TUNNEL_MATCH:
 		ctx->object = &out->args.vc.tunnel_ops;
 		break;
+	case VC_USER_ID:
+		ctx->object = out;
+		break;
 	}
 	ctx->objmask = NULL;
 	switch (ctx->curr) {
 	case VC_GROUP:
 	case VC_PRIORITY:
+	case VC_USER_ID:
 		return len;
 	case VC_TUNNEL_SET:
 		out->args.vc.tunnel_ops.enabled = 1;
@@ -7454,10 +7971,12 @@ parse_vc(struct context *ctx, const struct token *token,
 			return -1;
 		break;
 	case ACTIONS:
-		out->args.vc.actions =
+		out->args.vc.actions = out->args.vc.pattern ?
 			(void *)RTE_ALIGN_CEIL((uintptr_t)
 					       (out->args.vc.pattern +
 						out->args.vc.pattern_n),
+					       sizeof(double)) :
+			(void *)RTE_ALIGN_CEIL((uintptr_t)(out + 1),
 					       sizeof(double));
 		ctx->object = out->args.vc.actions;
 		ctx->objmask = NULL;
@@ -8844,6 +9363,140 @@ parse_vc_action_raw_decap(struct context *ctx, const struct token *token,
 }
 
 static int
+parse_vc_action_ipv6_ext_remove(struct context *ctx, const struct token *token,
+				const char *str, unsigned int len, void *buf,
+				unsigned int size)
+{
+	struct buffer *out = buf;
+	struct rte_flow_action *action;
+	struct action_ipv6_ext_remove_data *ipv6_ext_remove_data = NULL;
+	int ret;
+
+	ret = parse_vc(ctx, token, str, len, buf, size);
+	if (ret < 0)
+		return ret;
+	/* Nothing else to do if there is no buffer. */
+	if (!out)
+		return ret;
+	if (!out->args.vc.actions_n)
+		return -1;
+	action = &out->args.vc.actions[out->args.vc.actions_n - 1];
+	/* Point to selected object. */
+	ctx->object = out->args.vc.data;
+	ctx->objmask = NULL;
+	/* Copy the headers to the buffer. */
+	ipv6_ext_remove_data = ctx->object;
+	ipv6_ext_remove_data->conf.type = ipv6_ext_remove_confs[0].type;
+	action->conf = &ipv6_ext_remove_data->conf;
+	return ret;
+}
+
+static int
+parse_vc_action_ipv6_ext_remove_index(struct context *ctx, const struct token *token,
+				      const char *str, unsigned int len, void *buf,
+				      unsigned int size)
+{
+	struct action_ipv6_ext_remove_data *action_ipv6_ext_remove_data;
+	struct rte_flow_action *action;
+	const struct arg *arg;
+	struct buffer *out = buf;
+	int ret;
+	uint16_t idx;
+
+	RTE_SET_USED(token);
+	RTE_SET_USED(buf);
+	RTE_SET_USED(size);
+	arg = ARGS_ENTRY_ARB_BOUNDED
+		(offsetof(struct action_ipv6_ext_remove_data, idx),
+		 sizeof(((struct action_ipv6_ext_remove_data *)0)->idx),
+		 0, IPV6_EXT_PUSH_CONFS_MAX_NUM - 1);
+	if (push_args(ctx, arg))
+		return -1;
+	ret = parse_int(ctx, token, str, len, NULL, 0);
+	if (ret < 0) {
+		pop_args(ctx);
+		return -1;
+	}
+	if (!ctx->object)
+		return len;
+	action = &out->args.vc.actions[out->args.vc.actions_n - 1];
+	action_ipv6_ext_remove_data = ctx->object;
+	idx = action_ipv6_ext_remove_data->idx;
+	action_ipv6_ext_remove_data->conf.type = ipv6_ext_remove_confs[idx].type;
+	action->conf = &action_ipv6_ext_remove_data->conf;
+	return len;
+}
+
+static int
+parse_vc_action_ipv6_ext_push(struct context *ctx, const struct token *token,
+			      const char *str, unsigned int len, void *buf,
+			      unsigned int size)
+{
+	struct buffer *out = buf;
+	struct rte_flow_action *action;
+	struct action_ipv6_ext_push_data *ipv6_ext_push_data = NULL;
+	int ret;
+
+	ret = parse_vc(ctx, token, str, len, buf, size);
+	if (ret < 0)
+		return ret;
+	/* Nothing else to do if there is no buffer. */
+	if (!out)
+		return ret;
+	if (!out->args.vc.actions_n)
+		return -1;
+	action = &out->args.vc.actions[out->args.vc.actions_n - 1];
+	/* Point to selected object. */
+	ctx->object = out->args.vc.data;
+	ctx->objmask = NULL;
+	/* Copy the headers to the buffer. */
+	ipv6_ext_push_data = ctx->object;
+	ipv6_ext_push_data->conf.type = ipv6_ext_push_confs[0].type;
+	ipv6_ext_push_data->conf.data = ipv6_ext_push_confs[0].data;
+	ipv6_ext_push_data->conf.size = ipv6_ext_push_confs[0].size;
+	action->conf = &ipv6_ext_push_data->conf;
+	return ret;
+}
+
+static int
+parse_vc_action_ipv6_ext_push_index(struct context *ctx, const struct token *token,
+				    const char *str, unsigned int len, void *buf,
+				    unsigned int size)
+{
+	struct action_ipv6_ext_push_data *action_ipv6_ext_push_data;
+	struct rte_flow_action *action;
+	const struct arg *arg;
+	struct buffer *out = buf;
+	int ret;
+	uint16_t idx;
+
+	RTE_SET_USED(token);
+	RTE_SET_USED(buf);
+	RTE_SET_USED(size);
+	arg = ARGS_ENTRY_ARB_BOUNDED
+		(offsetof(struct action_ipv6_ext_push_data, idx),
+		 sizeof(((struct action_ipv6_ext_push_data *)0)->idx),
+		 0, IPV6_EXT_PUSH_CONFS_MAX_NUM - 1);
+	if (push_args(ctx, arg))
+		return -1;
+	ret = parse_int(ctx, token, str, len, NULL, 0);
+	if (ret < 0) {
+		pop_args(ctx);
+		return -1;
+	}
+	if (!ctx->object)
+		return len;
+	action = &out->args.vc.actions[out->args.vc.actions_n - 1];
+	action_ipv6_ext_push_data = ctx->object;
+	idx = action_ipv6_ext_push_data->idx;
+	action_ipv6_ext_push_data->conf.type = ipv6_ext_push_confs[idx].type;
+	action_ipv6_ext_push_data->conf.size = ipv6_ext_push_confs[idx].size;
+	action_ipv6_ext_push_data->conf.data = ipv6_ext_push_confs[idx].data;
+	action->conf = &action_ipv6_ext_push_data->conf;
+	return len;
+}
+
+static int
 parse_vc_action_set_meta(struct context *ctx, const struct token *token,
 			 const char *str, unsigned int len, void *buf,
 			 unsigned int size)
@@ -9109,6 +9762,10 @@ parse_destroy(struct context *ctx, const struct token *token,
 					       sizeof(double));
 		return len;
 	}
+	if (ctx->curr == DESTROY_IS_USER_ID) {
+		out->args.destroy.is_user_id = true;
+		return len;
+	}
 	if (((uint8_t *)(out->args.destroy.rule + out->args.destroy.rule_n) +
 	     sizeof(*out->args.destroy.rule)) > (uint8_t *)out + size)
 		return -1;
@@ -9179,6 +9836,9 @@ parse_dump(struct context *ctx, const struct token *token,
 		ctx->object = out;
 		ctx->objmask = NULL;
 		return len;
+	case DUMP_IS_USER_ID:
+		out->args.dump.is_user_id = true;
+		return len;
 	default:
 		return -1;
 	}
@@ -9207,6 +9867,10 @@ parse_query(struct context *ctx, const struct token *token,
 		ctx->objdata = 0;
 		ctx->object = out;
 		ctx->objmask = NULL;
+	}
+	if (ctx->curr == QUERY_IS_USER_ID) {
+		out->args.query.is_user_id = true;
+		return len;
 	}
 	return len;
 }
@@ -9571,6 +10235,11 @@ parse_table(struct context *ctx, const struct token *token,
 			return -1;
 		out->args.table.attr.specialize = RTE_FLOW_TABLE_SPECIALIZE_TRANSFER_VPORT_ORIG;
 		return len;
+	case TABLE_RULES_NUMBER:
+		ctx->objdata = 0;
+		ctx->object = out;
+		ctx->objmask = NULL;
+		return len;
 	default:
 		return -1;
 	}
@@ -9643,6 +10312,7 @@ parse_qo(struct context *ctx, const struct token *token,
 	}
 	switch (ctx->curr) {
 	case QUEUE_CREATE:
+	case QUEUE_UPDATE:
 		out->command = ctx->curr;
 		ctx->objdata = 0;
 		ctx->object = out;
@@ -9654,6 +10324,7 @@ parse_qo(struct context *ctx, const struct token *token,
 	case QUEUE_ACTIONS_TEMPLATE:
 	case QUEUE_CREATE_POSTPONE:
 	case QUEUE_RULE_ID:
+	case QUEUE_UPDATE_ID:
 		return len;
 	case ITEM_PATTERN:
 		out->args.vc.pattern =
@@ -9683,7 +10354,7 @@ parse_qo_destroy(struct context *ctx, const struct token *token,
 		 void *buf, unsigned int size)
 {
 	struct buffer *out = buf;
-	uint32_t *flow_id;
+	uint64_t *flow_id;
 
 	/* Token name must match. */
 	if (parse_default(ctx, token, str, len, NULL, 0) < 0)
@@ -10413,6 +11084,49 @@ parse_ia_id2ptr(struct context *ctx, const struct token *token,
 }
 
 static int
+parse_indlst_id2ptr(struct context *ctx, const struct token *token,
+		    const char *str, unsigned int len,
+		    __rte_unused void *buf, __rte_unused unsigned int size)
+{
+	struct rte_flow_action *action = ctx->object;
+	struct rte_flow_action_indirect_list *action_conf;
+	const struct indlst_conf *indlst_conf;
+	uint32_t id;
+	int ret;
+
+	if (!action)
+		return -1;
+	ctx->objdata = 0;
+	ctx->object = &id;
+	ctx->objmask = NULL;
+	ret = parse_int(ctx, token, str, len, ctx->object, sizeof(id));
+	if (ret != (int)len)
+		return ret;
+	ctx->object = action;
+	action_conf = (void *)(uintptr_t)action->conf;
+	action_conf->conf = NULL;
+	switch (ctx->curr) {
+	case INDIRECT_LIST_ACTION_ID2PTR_HANDLE:
+	action_conf->handle = (typeof(action_conf->handle))
+				port_action_handle_get_by_id(ctx->port, id);
+		if (!action_conf->handle) {
+			printf("no indirect list handle for id %u\n", id);
+			return -1;
+		}
+		break;
+	case INDIRECT_LIST_ACTION_ID2PTR_CONF:
+		indlst_conf = indirect_action_list_conf_get(id);
+		if (!indlst_conf)
+			return -1;
+		action_conf->conf = (const void **)indlst_conf->conf;
+		break;
+	default:
+		break;
+	}
+	return ret;
+}
+
+static int
 parse_meter_profile_id2ptr(struct context *ctx, const struct token *token,
 		const char *str, unsigned int len,
 		void *buf, unsigned int size)
@@ -10528,6 +11242,35 @@ parse_set_sample_action(struct context *ctx, const struct token *token,
 	out->command = ctx->curr;
 	/* For sampler we need is actions */
 	out->args.vc.actions = (void *)RTE_ALIGN_CEIL((uintptr_t)(out + 1),
+						       sizeof(double));
+	return len;
+}
+
+/** Parse set command, initialize output buffer for subsequent tokens. */
+static int
+parse_set_ipv6_ext_action(struct context *ctx, const struct token *token,
+			  const char *str, unsigned int len,
+			  void *buf, unsigned int size)
+{
+	struct buffer *out = buf;
+
+	/* Token name must match. */
+	if (parse_default(ctx, token, str, len, NULL, 0) < 0)
+		return -1;
+	/* Nothing else to do if there is no buffer. */
+	if (!out)
+		return len;
+	/* Make sure buffer is large enough. */
+	if (size < sizeof(*out))
+		return -1;
+	ctx->objdata = 0;
+	ctx->objmask = NULL;
+	ctx->object = out;
+	if (!out->command)
+		return -1;
+	out->command = ctx->curr;
+	/* For ipv6_ext_push/remove we need is pattern */
+	out->args.vc.pattern = (void *)RTE_ALIGN_CEIL((uintptr_t)(out + 1),
 						       sizeof(double));
 	return len;
 }
@@ -10899,7 +11642,7 @@ comp_rule_id(struct context *ctx, const struct token *token,
 	port = &ports[ctx->port];
 	for (pf = port->flow_list; pf != NULL; pf = pf->next) {
 		if (buf && i == ent)
-			return snprintf(buf, size, "%u", pf->id);
+			return snprintf(buf, size, "%"PRIu64, pf->id);
 		++i;
 	}
 	if (buf)
@@ -10954,6 +11697,24 @@ comp_set_raw_index(struct context *ctx, const struct token *token,
 	RTE_SET_USED(ctx);
 	RTE_SET_USED(token);
 	for (idx = 0; idx < RAW_ENCAP_CONFS_MAX_NUM; ++idx) {
+		if (buf && idx == ent)
+			return snprintf(buf, size, "%u", idx);
+		++nb;
+	}
+	return nb;
+}
+
+/** Complete index number for set raw_ipv6_ext_push/ipv6_ext_remove commands. */
+static int
+comp_set_ipv6_ext_index(struct context *ctx, const struct token *token,
+			unsigned int ent, char *buf, unsigned int size)
+{
+	uint16_t idx = 0;
+	uint16_t nb = 0;
+
+	RTE_SET_USED(ctx);
+	RTE_SET_USED(token);
+	for (idx = 0; idx < IPV6_EXT_PUSH_CONFS_MAX_NUM; ++idx) {
 		if (buf && idx == ent)
 			return snprintf(buf, size, "%u", idx);
 		++nb;
@@ -11453,6 +12214,64 @@ cmd_flow_tok(cmdline_parse_token_hdr_t **hdr,
 	*hdr = &cmd_flow_token_hdr;
 }
 
+static SLIST_HEAD(, indlst_conf) indlst_conf_head =
+	SLIST_HEAD_INITIALIZER();
+
+static void
+indirect_action_flow_conf_create(const struct buffer *in)
+{
+	int len, ret;
+	uint32_t i;
+	struct indlst_conf *indlst_conf = NULL;
+	size_t base = RTE_ALIGN(sizeof(*indlst_conf), 8);
+	struct rte_flow_action *src = in->args.vc.actions;
+
+	if (!in->args.vc.actions_n)
+		goto end;
+	len = rte_flow_conv(RTE_FLOW_CONV_OP_ACTIONS, NULL, 0, src, NULL);
+	if (len <= 0)
+		goto end;
+	len = RTE_ALIGN(len, 16);
+
+	indlst_conf = calloc(1, base + len +
+			     in->args.vc.actions_n * sizeof(uintptr_t));
+	if (!indlst_conf)
+		goto end;
+	indlst_conf->id = in->args.vc.attr.group;
+	indlst_conf->conf_num = in->args.vc.actions_n - 1;
+	indlst_conf->actions = RTE_PTR_ADD(indlst_conf, base);
+	ret = rte_flow_conv(RTE_FLOW_CONV_OP_ACTIONS, indlst_conf->actions,
+			    len, src, NULL);
+	if (ret <= 0) {
+		free(indlst_conf);
+		indlst_conf = NULL;
+		goto end;
+	}
+	indlst_conf->conf = RTE_PTR_ADD(indlst_conf, base + len);
+	for (i = 0; i < indlst_conf->conf_num; i++)
+		indlst_conf->conf[i] = indlst_conf->actions[i].conf;
+	SLIST_INSERT_HEAD(&indlst_conf_head, indlst_conf, next);
+end:
+	if (indlst_conf)
+		printf("created indirect action list configuration %u\n",
+		       in->args.vc.attr.group);
+	else
+		printf("cannot create indirect action list configuration %u\n",
+		       in->args.vc.attr.group);
+}
+
+static const struct indlst_conf *
+indirect_action_list_conf_get(uint32_t conf_id)
+{
+	const struct indlst_conf *conf;
+
+	SLIST_FOREACH(conf, &indlst_conf_head, next) {
+		if (conf->id == conf_id)
+			return conf;
+	}
+	return NULL;
+}
+
 /** Dispatch parsed buffer to function calls. */
 static void
 cmd_flow_parsed(const struct buffer *in)
@@ -11521,6 +12340,11 @@ cmd_flow_parsed(const struct buffer *in)
 					in->args.destroy.rule_n,
 					in->args.destroy.rule);
 		break;
+	case QUEUE_UPDATE:
+		port_queue_flow_update(in->port, in->queue, in->postpone,
+				in->args.vc.rule_id, in->args.vc.act_templ_id,
+				in->args.vc.actions);
+		break;
 	case PUSH:
 		port_queue_flow_push(in->port, in->queue);
 		break;
@@ -11532,6 +12356,7 @@ cmd_flow_parsed(const struct buffer *in)
 				     in->args.aged.destroy);
 		break;
 	case QUEUE_INDIRECT_ACTION_CREATE:
+	case QUEUE_INDIRECT_ACTION_LIST_CREATE:
 		port_queue_action_handle_create(
 				in->port, in->queue, in->postpone,
 				in->args.vc.attr.group,
@@ -11567,14 +12392,19 @@ cmd_flow_parsed(const struct buffer *in)
 						      in->args.vc.actions);
 		break;
 	case INDIRECT_ACTION_CREATE:
+	case INDIRECT_ACTION_LIST_CREATE:
 		port_action_handle_create(
 				in->port, in->args.vc.attr.group,
+				in->command == INDIRECT_ACTION_LIST_CREATE,
 				&((const struct rte_flow_indir_action_conf) {
 					.ingress = in->args.vc.attr.ingress,
 					.egress = in->args.vc.attr.egress,
 					.transfer = in->args.vc.attr.transfer,
 				}),
 				in->args.vc.actions);
+		break;
+	case INDIRECT_ACTION_FLOW_CONF_CREATE:
+		indirect_action_flow_conf_create(in);
 		break;
 	case INDIRECT_ACTION_DESTROY:
 		port_action_handle_destroy(in->port,
@@ -11602,11 +12432,12 @@ cmd_flow_parsed(const struct buffer *in)
 	case CREATE:
 		port_flow_create(in->port, &in->args.vc.attr,
 				 in->args.vc.pattern, in->args.vc.actions,
-				 &in->args.vc.tunnel_ops);
+				 &in->args.vc.tunnel_ops, in->args.vc.user_id);
 		break;
 	case DESTROY:
 		port_flow_destroy(in->port, in->args.destroy.rule_n,
-				  in->args.destroy.rule);
+				  in->args.destroy.rule,
+				  in->args.destroy.is_user_id);
 		break;
 	case FLUSH:
 		port_flow_flush(in->port);
@@ -11614,11 +12445,13 @@ cmd_flow_parsed(const struct buffer *in)
 	case DUMP_ONE:
 	case DUMP_ALL:
 		port_flow_dump(in->port, in->args.dump.mode,
-				in->args.dump.rule, in->args.dump.file);
+				in->args.dump.rule, in->args.dump.file,
+				in->args.dump.is_user_id);
 		break;
 	case QUERY:
 		port_flow_query(in->port, in->args.query.rule,
-				&in->args.query.action);
+				&in->args.query.action,
+				in->args.query.is_user_id);
 		break;
 	case LIST:
 		port_flow_list(in->port, in->args.list.group_n,
@@ -11653,6 +12486,7 @@ cmd_flow_parsed(const struct buffer *in)
 	default:
 		break;
 	}
+	fflush(stdout);
 }
 
 /** Token generator and output processing callback (cmdline API). */
@@ -11849,10 +12683,88 @@ flow_item_default_mask(const struct rte_flow_item *item)
 	case RTE_FLOW_ITEM_TYPE_AGGR_AFFINITY:
 		mask = &rte_flow_item_aggr_affinity_mask;
 		break;
+	case RTE_FLOW_ITEM_TYPE_TX_QUEUE:
+		mask = &rte_flow_item_tx_queue_mask;
+		break;
+	case RTE_FLOW_ITEM_TYPE_IB_BTH:
+		mask = &rte_flow_item_ib_bth_mask;
+		break;
 	default:
 		break;
 	}
 	return mask;
+}
+
+/** Dispatch parsed buffer to function calls. */
+static void
+cmd_set_ipv6_ext_parsed(const struct buffer *in)
+{
+	uint32_t n = in->args.vc.pattern_n;
+	int i = 0;
+	struct rte_flow_item *item = NULL;
+	size_t size = 0;
+	uint8_t *data = NULL;
+	uint8_t *type = NULL;
+	size_t *total_size = NULL;
+	uint16_t idx = in->port; /* We borrow port field as index */
+	struct rte_flow_item_ipv6_routing_ext *ext;
+	const struct rte_flow_item_ipv6_ext *ipv6_ext;
+
+	RTE_ASSERT(in->command == SET_IPV6_EXT_PUSH ||
+		   in->command == SET_IPV6_EXT_REMOVE);
+
+	if (in->command == SET_IPV6_EXT_REMOVE) {
+		if (n != 1 || in->args.vc.pattern->type !=
+		    RTE_FLOW_ITEM_TYPE_IPV6_EXT) {
+			fprintf(stderr, "Error - Not supported item\n");
+			return;
+		}
+		type = (uint8_t *)&ipv6_ext_remove_confs[idx].type;
+		item = in->args.vc.pattern;
+		ipv6_ext = item->spec;
+		*type = ipv6_ext->next_hdr;
+		return;
+	}
+
+	total_size = &ipv6_ext_push_confs[idx].size;
+	data = (uint8_t *)&ipv6_ext_push_confs[idx].data;
+	type = (uint8_t *)&ipv6_ext_push_confs[idx].type;
+
+	*total_size = 0;
+	memset(data, 0x00, ACTION_RAW_ENCAP_MAX_DATA);
+	for (i = n - 1 ; i >= 0; --i) {
+		item = in->args.vc.pattern + i;
+		switch (item->type) {
+		case RTE_FLOW_ITEM_TYPE_IPV6_EXT:
+			ipv6_ext = item->spec;
+			*type = ipv6_ext->next_hdr;
+			break;
+		case RTE_FLOW_ITEM_TYPE_IPV6_ROUTING_EXT:
+			ext = (struct rte_flow_item_ipv6_routing_ext *)(uintptr_t)item->spec;
+			if (!ext->hdr.hdr_len) {
+				size = sizeof(struct rte_ipv6_routing_ext) +
+				(ext->hdr.segments_left << 4);
+				ext->hdr.hdr_len = ext->hdr.segments_left << 1;
+				/* Indicate no TLV once SRH. */
+				if (ext->hdr.type == 4)
+					ext->hdr.last_entry = ext->hdr.segments_left - 1;
+			} else {
+				size = sizeof(struct rte_ipv6_routing_ext) +
+				(ext->hdr.hdr_len << 3);
+			}
+			*total_size += size;
+			memcpy(data, ext, size);
+			break;
+		default:
+			fprintf(stderr, "Error - Not supported item\n");
+			goto error;
+		}
+	}
+	RTE_ASSERT((*total_size) <= ACTION_IPV6_EXT_PUSH_MAX_DATA);
+	return;
+error:
+	*total_size = 0;
+	memset(data, 0x00, ACTION_IPV6_EXT_PUSH_MAX_DATA);
 }
 
 /** Dispatch parsed buffer to function calls. */
@@ -11988,6 +12900,9 @@ cmd_set_raw_parsed(const struct buffer *in)
 
 	if (in->command == SET_SAMPLE_ACTIONS)
 		return cmd_set_raw_parsed_sample(in);
+	else if (in->command == SET_IPV6_EXT_PUSH ||
+		 in->command == SET_IPV6_EXT_REMOVE)
+		return cmd_set_ipv6_ext_parsed(in);
 	RTE_ASSERT(in->command == SET_RAW_ENCAP ||
 		   in->command == SET_RAW_DECAP);
 	if (in->command == SET_RAW_ENCAP) {
@@ -12032,6 +12947,9 @@ cmd_set_raw_parsed(const struct buffer *in)
 				size = sizeof(struct rte_ipv6_routing_ext) +
 					(ext->hdr.segments_left << 4);
 				ext->hdr.hdr_len = ext->hdr.segments_left << 1;
+				/* SRv6 without TLV. */
+				if (ext->hdr.type == RTE_IPV6_SRCRT_TYPE_4)
+					ext->hdr.last_entry = ext->hdr.segments_left - 1;
 			} else {
 				size = sizeof(struct rte_ipv6_routing_ext) +
 					(ext->hdr.hdr_len << 3);

@@ -1057,6 +1057,7 @@ mlx5_alloc_srh_flex_parser(struct rte_eth_dev *dev)
 	uint32_t ids[MLX5_GRAPH_NODE_SAMPLE_NUM];
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_common_dev_config *config = &priv->sh->cdev->config;
+	struct mlx5_hca_flex_attr *attr = &priv->sh->cdev->config.hca_attr.flex;
 	void *fp = NULL, *ibv_ctx = priv->sh->cdev->ctx;
 	int ret;
 
@@ -1066,7 +1067,7 @@ mlx5_alloc_srh_flex_parser(struct rte_eth_dev *dev)
 		DRV_LOG(ERR, "Dynamic flex parser is not supported on HWS");
 		return -ENOTSUP;
 	}
-	if (__atomic_add_fetch(&priv->sh->srh_flex_parser.refcnt, 1, __ATOMIC_RELAXED) > 1)
+	if (__atomic_fetch_add(&priv->sh->srh_flex_parser.refcnt, 1, __ATOMIC_RELAXED) + 1 > 1)
 		return 0;
 	priv->sh->srh_flex_parser.flex.devx_fp = mlx5_malloc(MLX5_MEM_ZERO,
 			sizeof(struct mlx5_flex_parser_devx), 0, SOCKET_ID_ANY);
@@ -1079,6 +1080,8 @@ mlx5_alloc_srh_flex_parser(struct rte_eth_dev *dev)
 	node.header_length_field_shift = 0x3;
 	/* Header length is the 2nd byte. */
 	node.header_length_field_offset = 0x8;
+	if (attr->header_length_mask_width < 8)
+		node.header_length_field_offset += 8 - attr->header_length_mask_width;
 	node.header_length_field_mask = 0xF;
 	/* One byte next header protocol. */
 	node.next_header_field_size = 0x8;
@@ -1137,7 +1140,7 @@ mlx5_free_srh_flex_parser(struct rte_eth_dev *dev)
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_internal_flex_parser_profile *fp = &priv->sh->srh_flex_parser;
 
-	if (__atomic_sub_fetch(&fp->refcnt, 1, __ATOMIC_RELAXED))
+	if (__atomic_fetch_sub(&fp->refcnt, 1, __ATOMIC_RELAXED) - 1)
 		return;
 	mlx5_devx_cmd_destroy(fp->flex.devx_fp->devx_obj);
 	mlx5_free(fp->flex.devx_fp);
@@ -1835,6 +1838,7 @@ mlx5_free_shared_dev_ctx(struct mlx5_dev_ctx_shared *sh)
 	if (LIST_EMPTY(&mlx5_dev_ctx_list)) {
 		mlx5_os_net_cleanup();
 		mlx5_flow_os_release_workspace();
+		mlx5_flow_workspace_gc_release();
 	}
 	pthread_mutex_unlock(&mlx5_dev_ctx_list_mutex);
 	if (sh->flex_parsers_dv) {
@@ -2347,6 +2351,7 @@ const struct eth_dev_ops mlx5_dev_ops = {
 	.get_monitor_addr = mlx5_get_monitor_addr,
 	.count_aggr_ports = mlx5_count_aggr_ports,
 	.map_aggr_tx_affinity = mlx5_map_aggr_tx_affinity,
+	.rx_metadata_negotiate = mlx5_flow_rx_metadata_negotiate,
 };
 
 /* Available operations from secondary process. */
@@ -2372,6 +2377,7 @@ const struct eth_dev_ops mlx5_dev_sec_ops = {
 	.get_module_eeprom = mlx5_get_module_eeprom,
 	.count_aggr_ports = mlx5_count_aggr_ports,
 	.map_aggr_tx_affinity = mlx5_map_aggr_tx_affinity,
+	.rx_metadata_negotiate = mlx5_flow_rx_metadata_negotiate,
 };
 
 /* Available operations in flow isolated mode. */
@@ -2597,6 +2603,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 	config->mprq.max_memcpy_len = MLX5_MPRQ_MEMCPY_DEFAULT_LEN;
 	config->mprq.min_rxqs_num = MLX5_MPRQ_MIN_RXQS;
 	config->mprq.log_stride_num = MLX5_MPRQ_DEFAULT_LOG_STRIDE_NUM;
+	config->mprq.log_stride_size = MLX5_MPRQ_DEFAULT_LOG_STRIDE_SIZE;
 	config->log_hp_size = MLX5_ARG_UNSET;
 	config->std_delay_drop = 0;
 	config->hp_delay_drop = 0;

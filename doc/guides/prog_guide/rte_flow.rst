@@ -148,14 +148,15 @@ Attribute: Group
 Flow rules can be grouped by assigning them a common group number. Groups
 allow a logical hierarchy of flow rule groups (tables) to be defined. These
 groups can be supported virtually in the PMD or in the physical device.
-Group 0 is the default group and this is the only group which flows are
-guarantee to matched against, all subsequent groups can only be reached by
-way of the JUMP action from a matched flow rule.
+Group 0 is the default group and is the only group that
+flows are guaranteed to be matched against.
+All subsequent groups can only be reached by using a JUMP action
+from a matched flow rule.
 
 Although optional, applications are encouraged to group similar rules as
 much as possible to fully take advantage of hardware capabilities
 (e.g. optimized matching) and work around limitations (e.g. a single pattern
-type possibly allowed in a given group), while being aware that the groups
+type possibly allowed in a given group), while being aware that the groups'
 hierarchies must be programmed explicitly.
 
 Note that support for more than a single group is not guaranteed.
@@ -170,7 +171,7 @@ Priority levels are arbitrary and up to the application, they do
 not need to be contiguous nor start from 0, however the maximum number
 varies between devices and may be affected by existing flow rules.
 
-A flow which matches multiple rules in the same group will always matched by
+A flow which matches multiple rules in the same group will always be matched by
 the rule with the highest priority in that group.
 
 If a packet is matched by several rules of a given group for a given
@@ -1486,6 +1487,13 @@ This item is meant to use the same structure as `Item: PORT_REPRESENTOR`_.
 
 See also `Action: REPRESENTED_PORT`_.
 
+Item: ``TX_QUEUE``
+^^^^^^^^^^^^^^^^^^
+
+Matches on the Tx queue of sent packet.
+
+- ``tx_queue``: Tx queue.
+
 Item: ``AGGR_AFFINITY``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1550,6 +1558,13 @@ Item: ``QUOTA``
 Matches flow quota state set by quota action.
 
 - ``state``: Flow quota state
+
+Item: ``IB_BTH``
+^^^^^^^^^^^^^^^^
+
+Matches an InfiniBand base transport header in RoCE packet.
+
+- ``hdr``: InfiniBand base transport header definition (``rte_ib.h``).
 
 Actions
 ~~~~~~~
@@ -1755,12 +1770,12 @@ flow group/tables on the device, this action redirects the matched flow to
 the specified group on that device.
 
 If a matched flow is redirected to a table which doesn't contain a matching
-rule for that flow then the behavior is undefined and the resulting behavior
-is up to the specific device. Best practice when using groups would be define
+rule for that flow, then the behavior is undefined and the resulting behavior
+is up to the specific device. Best practice when using groups would be to define
 a default flow rule for each group which a defines the default actions in that
 group so a consistent behavior is defined.
 
-Defining an action for matched flow in a group to jump to a group which is
+Defining an action for a matched flow in a group to jump to a group which is
 higher in the group hierarchy may not be supported by physical devices,
 depending on how groups are mapped to the physical devices. In the
 definitions of jump actions, applications should be aware that it may be
@@ -1954,8 +1969,8 @@ Also, regarding packet encapsulation ``level``:
   level.
 
 - ``2`` and subsequent values request RSS to be performed on the specified
-   inner packet encapsulation level, from outermost to innermost (lower to
-   higher values).
+  inner packet encapsulation level, from outermost to innermost (lower to
+  higher values).
 
 Values other than ``0`` are not necessarily supported.
 
@@ -2494,6 +2509,28 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
    | ``ipv6_addr`` | new IPv6 destination address |
    +---------------+------------------------------+
 
+Action: ``IPV6_EXT_PUSH``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Add an IPv6 extension into IPv6 header.
+Its template is provided in its data buffer
+with the specific type as defined in ``rte_flow_action_ipv6_ext_push``.
+
+This action modifies the payload of matched flows.
+The data supplied must be a valid extension in the specified type,
+it should be added the last one if preceding extension existed.
+When applied to the original packet,
+the resulting packet must be a valid packet.
+
+Action: ``IPV6_EXT_REMOVE``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Remove an IPv6 extension whose type is provided in
+``rte_flow_action_ipv6_ext_remove``.
+
+This action modifies the payload of matched flow
+and the packet should be valid after removing.
+
 Action: ``SET_TP_SRC``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
@@ -2904,6 +2941,124 @@ including the ones created for the test, will be kept after the device start.
    | no properties |
    +---------------+
 
+Action: ``INDIRECT_LIST``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Indirect API creates a shared flow action with unique action handle.
+Flow rules can access the shared flow action and resources related to
+that action through the indirect action handle.
+In addition, the API allows to update existing shared flow action configuration.
+After the update completes, new action configuration
+is available to all flows that reference that shared action.
+
+Indirect actions list expands the indirect action API:
+
+- Indirect action list creates a handle for one or several
+  flow actions, while legacy indirect action handle references
+  single action only.
+  Input flow actions arranged in END terminated list.
+
+- Flow rule can provide rule specific configuration parameters to
+  existing shared handle.
+  Updates of flow rule specific configuration will not change the base
+  action configuration.
+  Base action configuration was set during the action creation.
+
+Indirect action list handle defines 2 types of resources:
+
+- Mutable handle resource can be changed during handle lifespan.
+
+- Immutable handle resource value is set during handle creation
+  and cannot be changed.
+
+There are 2 types of mutable indirect handle contexts:
+
+- Action mutable context is always shared between all flows
+  that referenced indirect actions list handle.
+  Action mutable context can be changed by explicit invocation
+  of indirect handle update function.
+
+- Flow mutable context is private to a flow.
+  Flow mutable context can be updated by indirect list handle
+  flow rule configuration.
+
+Indirect action types - immutable, action / flow mutable, are mutually
+exclusive and depend on the action definition.
+
+If indirect list handle was created from a list of actions A1 / A2 ... An / END
+indirect list flow action can update Ai flow mutable context in the
+action configuration parameter.
+Indirect list action configuration is and array [C1, C2,  .., Cn]
+where Ci corresponds to Ai in the action handle source.
+Ci configuration element points Ai flow mutable update, or it's NULL
+if Ai has no flow mutable update.
+Indirect list action configuration is NULL if the action has no flow mutable updates.
+Otherwise it points to an array of n flow mutable configuration pointers.
+
+**Template API:**
+
+*Action template format:*
+
+``template .. indirect_list handle Htmpl conf Ctmpl ..``
+
+``mask     .. indirect_list handle Hmask conf Cmask ..``
+
+- If Htmpl was masked (Hmask != 0), it will be fixed in that template.
+  Otherwise, indirect action value is set in a flow rule.
+
+- If Htmpl and Ctmpl[i] were masked (Hmask !=0 and Cmask[i] != 0),
+  Htmpl's Ai action flow mutable context fill be updated to
+  Ctmpl[i] values and will be fixed in that template.
+
+*Flow rule format:*
+
+``actions .. indirect_list handle Hflow conf Cflow ..``
+
+- If Htmpl was not masked in actions template, Hflow references an
+  action of the same type as Htmpl.
+
+- Cflow[i] updates handle's Ai flow mutable configuration if
+  the Ci was not masked in action template.
+
+.. _table_rte_flow_action_indirect_list:
+
+.. table:: INDIRECT_LIST
+
+   +------------------+----------------------------------+
+   | Field            | Value                            |
+   +==================+==================================+
+   | ``handle``       | Indirect action list handle      |
+   +------------------+----------------------------------+
+   | ``conf``         | Flow mutable configuration array |
+   +------------------+----------------------------------+
+
+.. code-block:: text
+
+   flow 1:
+    / indirect handle H conf C1 /
+                      |       |
+                      |       |
+                      |       |         flow 2:
+                      |       |         / indirect handle H conf C2 /
+                      |       |                           |      |
+                      |       |                           |      |
+                      |       |                           |      |
+              =========================================================
+              ^       |       |                           |      |
+              |       |       V                           |      V
+              |    ~~~~~~~~~~~~~~                      ~~~~~~~~~~~~~~~
+              |     flow mutable                        flow mutable
+              |     context 1                           context 2
+              |    ~~~~~~~~~~~~~~                      ~~~~~~~~~~~~~~~
+    indirect  |       |                                   |
+    action    |       |                                   |
+    context   |       V                                   V
+              |   -----------------------------------------------------
+              |                 action mutable context
+              |   -----------------------------------------------------
+              v                action immutable context
+              =========================================================
+
 Action: ``MODIFY_FIELD``
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -2917,22 +3072,39 @@ The immediate value ``RTE_FLOW_FIELD_VALUE`` (or a pointer to it
 ``RTE_FLOW_FIELD_START`` is used to point to the beginning of a packet.
 See ``enum rte_flow_field_id`` for the list of supported fields.
 
-``op`` selects the operation to perform on a destination field.
+``op`` selects the operation to perform on a destination field:
+
 - ``set`` copies the data from ``src`` field to ``dst`` field.
 - ``add`` adds together ``dst`` and ``src`` and stores the result into ``dst``.
-- ``sub`` subtracts ``src`` from ``dst`` and stores the result into ``dst``
+- ``sub`` subtracts ``src`` from ``dst`` and stores the result into ``dst``.
 
 ``width`` defines a number of bits to use from ``src`` field.
 
-``level`` is used to access any packet field on any encapsulation level
-as well as any tag element in the tag array.
-- ``0`` means the default behaviour. Depending on the packet type, it can
-mean outermost, innermost or anything in between.
+``level`` is used to access any packet field on any encapsulation level:
+
+- ``0`` means the default behaviour. Depending on the packet type,
+  it can mean outermost, innermost or anything in between.
 - ``1`` requests access to the outermost packet encapsulation level.
 - ``2`` and subsequent values requests access to the specified packet
-encapsulation level, from outermost to innermost (lower to higher values).
-For the tag array (in case of multiple tags are supported and present)
-``level`` translates directly into the array index.
+  encapsulation level, from outermost to innermost (lower to higher values).
+
+``tag_index`` is the index of the header inside encapsulation level.
+It is used to modify either ``VLAN`` or ``MPLS`` or ``TAG`` headers
+which multiple of them might be supported in the same encapsulation level.
+
+.. note::
+
+   For ``RTE_FLOW_FIELD_TAG`` type, the tag array was provided in ``level``
+   field and it is still supported for backwards compatibility.
+   When ``tag_index`` is zero, the tag array is taken from ``level`` field.
+
+``type`` is used to specify (along with ``class_id``) the Geneve option
+which is being modified.
+This field is relevant only for ``RTE_FLOW_FIELD_GENEVE_OPT_XXXX`` type.
+
+``class_id`` is used to specify (along with ``type``) the Geneve option
+which is being modified.
+This field is relevant only for ``RTE_FLOW_FIELD_GENEVE_OPT_XXXX`` type.
 
 ``flex_handle`` is used to specify the flex item pointer which is being
 modified. ``flex_handle`` and ``level`` are mutually exclusive.
@@ -2964,6 +3136,18 @@ to replace the third byte of MAC address with value 0x85, application should
 specify destination width as 8, destination offset as 16, and provide immediate
 value as sequence of bytes {xxx, xxx, 0x85, xxx, xxx, xxx}.
 
+The ``RTE_FLOW_FIELD_GENEVE_OPT_DATA`` type supports modifying only one DW in
+single action and align to 32 bits.
+For example, for modifying 16 bits start from offset 24,
+2 different actions should be prepared.
+The first one includes ``offset=24`` and ``width=8``,
+and the second one includes ``offset=32`` and ``width=8``.
+Application should provide the data in immediate value memory only
+for the single DW even though the offset is related to start of first DW.
+For example, to replace the third byte of second DW in Geneve option data
+with value ``0x85``, the application should specify destination width as ``8``,
+destination offset as ``48``, and provide immediate value ``0xXXXX85XX``.
+
 .. _table_rte_flow_action_modify_field:
 
 .. table:: MODIFY_FIELD
@@ -2989,7 +3173,13 @@ value as sequence of bytes {xxx, xxx, 0x85, xxx, xxx, xxx}.
    +=================+==========================================================+
    | ``field``       | ID: packet field, mark, meta, tag, immediate, pointer    |
    +-----------------+----------------------------------------------------------+
-   | ``level``       | encapsulation level of a packet field or tag array index |
+   | ``level``       | encapsulation level of a packet field                    |
+   +-----------------+----------------------------------------------------------+
+   | ``tag_index``   | tag index inside encapsulation level                     |
+   +-----------------+----------------------------------------------------------+
+   | ``type``        | Geneve option type                                       |
+   +-----------------+----------------------------------------------------------+
+   | ``class_id``    | Geneve option class ID                                   |
    +-----------------+----------------------------------------------------------+
    | ``flex_handle`` | flex item handle of a packet field                       |
    +-----------------+----------------------------------------------------------+
@@ -3446,6 +3636,31 @@ Return values:
 
 - 0 on success, a negative errno value otherwise and ``rte_errno`` is set.
 
+Update
+~~~~~~
+
+Update an existing flow rule with a new set of actions.
+
+.. code-block:: c
+
+   struct rte_flow *
+   rte_flow_actions_update(uint16_t port_id,
+                           struct rte_flow *flow,
+                           const struct rte_flow_action *actions[],
+                           struct rte_flow_error *error);
+
+Arguments:
+
+- ``port_id``: port identifier of Ethernet device.
+- ``flow``: flow rule handle to update.
+- ``actions``: associated actions (list terminated by the END action).
+- ``error``: perform verbose error reporting if not NULL. PMDs initialize
+  this structure in case of error only.
+
+Return values:
+
+- 0 on success, a negative errno value otherwise and ``rte_errno`` is set.
+
 Flush
 ~~~~~
 
@@ -3699,6 +3914,7 @@ Asynchronous operations
 -----------------------
 
 Flow rules management can be done via special lockless flow management queues.
+
 - Queue operations are asynchronous and not thread-safe.
 
 - Operations can thus be invoked by the app's datapath,
@@ -3794,6 +4010,23 @@ Enqueueing a flow rule destruction operation is similar to simple destruction.
                           struct rte_flow *flow,
                           void *user_data,
                           struct rte_flow_error *error);
+
+Enqueue update operation
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enqueueing a flow rule update operation to replace actions in the existing rule.
+
+.. code-block:: c
+
+   int
+   rte_flow_async_actions_update(uint16_t port_id,
+                                 uint32_t queue_id,
+                                 const struct rte_flow_op_attr *op_attr,
+                                 struct rte_flow *flow,
+                                 const struct rte_flow_action actions[],
+                                 uint8_t actions_template_index,
+                                 void *user_data,
+                                 struct rte_flow_error *error);
 
 Enqueue indirect action creation operation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

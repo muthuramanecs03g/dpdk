@@ -18,6 +18,7 @@
 #include <rte_log.h>
 
 #include "fd_man.h"
+#include "vduse.h"
 #include "vhost.h"
 #include "vhost_user.h"
 
@@ -35,6 +36,7 @@ struct vhost_user_socket {
 	int socket_fd;
 	struct sockaddr_un un;
 	bool is_server;
+	bool is_vduse;
 	bool reconnect;
 	bool iommu_support;
 	bool use_builtin_virtio_net;
@@ -55,6 +57,8 @@ struct vhost_user_socket {
 	uint64_t features;
 
 	uint64_t protocol_features;
+
+	uint32_t max_queue_pairs;
 
 	struct rte_vdpa_device *vdpa_dev;
 
@@ -221,7 +225,7 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 		return;
 	}
 
-	vid = vhost_new_device();
+	vid = vhost_user_new_device();
 	if (vid == -1) {
 		goto err;
 	}
@@ -507,7 +511,7 @@ vhost_user_reconnect_init(void)
 	}
 	TAILQ_INIT(&reconn_list.head);
 
-	ret = rte_ctrl_thread_create(&reconn_tid, "vhost_reconn", NULL,
+	ret = rte_ctrl_thread_create(&reconn_tid, "dpdk-vhost-reco", NULL,
 			     vhost_user_client_reconnect, NULL);
 	if (ret != 0) {
 		VHOST_LOG_CONFIG("thread", ERR, "failed to create reconnect thread\n");
@@ -821,7 +825,7 @@ rte_vhost_driver_get_queue_num(const char *path, uint32_t *queue_num)
 
 	vdpa_dev = vsocket->vdpa_dev;
 	if (!vdpa_dev) {
-		*queue_num = VHOST_MAX_QUEUE_PAIRS;
+		*queue_num = vsocket->max_queue_pairs;
 		goto unlock_exit;
 	}
 
@@ -831,7 +835,36 @@ rte_vhost_driver_get_queue_num(const char *path, uint32_t *queue_num)
 		goto unlock_exit;
 	}
 
-	*queue_num = RTE_MIN((uint32_t)VHOST_MAX_QUEUE_PAIRS, vdpa_queue_num);
+	*queue_num = RTE_MIN(vsocket->max_queue_pairs, vdpa_queue_num);
+
+unlock_exit:
+	pthread_mutex_unlock(&vhost_user.mutex);
+	return ret;
+}
+
+int
+rte_vhost_driver_set_max_queue_num(const char *path, uint32_t max_queue_pairs)
+{
+	struct vhost_user_socket *vsocket;
+	int ret = 0;
+
+	VHOST_LOG_CONFIG(path, INFO, "Setting max queue pairs to %u\n", max_queue_pairs);
+
+	if (max_queue_pairs > VHOST_MAX_QUEUE_PAIRS) {
+		VHOST_LOG_CONFIG(path, ERR, "Library only supports up to %u queue pairs\n",
+				VHOST_MAX_QUEUE_PAIRS);
+		return -1;
+	}
+
+	pthread_mutex_lock(&vhost_user.mutex);
+	vsocket = find_vhost_user_socket(path);
+	if (!vsocket) {
+		VHOST_LOG_CONFIG(path, ERR, "socket file is not registered yet.\n");
+		ret = -1;
+		goto unlock_exit;
+	}
+
+	vsocket->max_queue_pairs = max_queue_pairs;
 
 unlock_exit:
 	pthread_mutex_unlock(&vhost_user.mutex);
@@ -841,15 +874,11 @@ unlock_exit:
 static void
 vhost_user_socket_mem_free(struct vhost_user_socket *vsocket)
 {
-	if (vsocket && vsocket->path) {
-		free(vsocket->path);
-		vsocket->path = NULL;
-	}
+	if (vsocket == NULL)
+		return;
 
-	if (vsocket) {
-		free(vsocket);
-		vsocket = NULL;
-	}
+	free(vsocket->path);
+	free(vsocket);
 }
 
 /*
@@ -889,17 +918,24 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		VHOST_LOG_CONFIG(path, ERR, "failed to init connection mutex\n");
 		goto out_free;
 	}
+
+	if (!strncmp("/dev/vduse/", path, strlen("/dev/vduse/")))
+		vsocket->is_vduse = true;
+
 	vsocket->vdpa_dev = NULL;
+	vsocket->max_queue_pairs = VHOST_MAX_QUEUE_PAIRS;
 	vsocket->extbuf = flags & RTE_VHOST_USER_EXTBUF_SUPPORT;
 	vsocket->linearbuf = flags & RTE_VHOST_USER_LINEARBUF_SUPPORT;
 	vsocket->async_copy = flags & RTE_VHOST_USER_ASYNC_COPY;
 	vsocket->net_compliant_ol_flags = flags & RTE_VHOST_USER_NET_COMPLIANT_OL_FLAGS;
 	vsocket->stats_enabled = flags & RTE_VHOST_USER_NET_STATS_ENABLE;
-	vsocket->iommu_support = flags & RTE_VHOST_USER_IOMMU_SUPPORT;
+	if (vsocket->is_vduse)
+		vsocket->iommu_support = true;
+	else
+		vsocket->iommu_support = flags & RTE_VHOST_USER_IOMMU_SUPPORT;
 
-	if (vsocket->async_copy &&
-		(flags & (RTE_VHOST_USER_IOMMU_SUPPORT |
-		RTE_VHOST_USER_POSTCOPY_SUPPORT))) {
+	if (vsocket->async_copy && (vsocket->iommu_support ||
+				(flags & RTE_VHOST_USER_POSTCOPY_SUPPORT))) {
 		VHOST_LOG_CONFIG(path, ERR, "async copy with IOMMU or post-copy not supported\n");
 		goto out_mutex;
 	}
@@ -917,9 +953,14 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 	 * two values.
 	 */
 	vsocket->use_builtin_virtio_net = true;
-	vsocket->supported_features = VIRTIO_NET_SUPPORTED_FEATURES;
-	vsocket->features           = VIRTIO_NET_SUPPORTED_FEATURES;
-	vsocket->protocol_features  = VHOST_USER_PROTOCOL_FEATURES;
+	if (vsocket->is_vduse) {
+		vsocket->supported_features = VDUSE_NET_SUPPORTED_FEATURES;
+		vsocket->features           = VDUSE_NET_SUPPORTED_FEATURES;
+	} else {
+		vsocket->supported_features = VHOST_USER_NET_SUPPORTED_FEATURES;
+		vsocket->features           = VHOST_USER_NET_SUPPORTED_FEATURES;
+		vsocket->protocol_features  = VHOST_USER_PROTOCOL_FEATURES;
+	}
 
 	if (vsocket->async_copy) {
 		vsocket->supported_features &= ~(1ULL << VHOST_F_LOG_ALL);
@@ -944,7 +985,7 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		vsocket->features &= ~seg_offload_features;
 	}
 
-	if (!(flags & RTE_VHOST_USER_IOMMU_SUPPORT)) {
+	if (!vsocket->iommu_support) {
 		vsocket->supported_features &= ~(1ULL << VIRTIO_F_IOMMU_PLATFORM);
 		vsocket->features &= ~(1ULL << VIRTIO_F_IOMMU_PLATFORM);
 	}
@@ -960,18 +1001,19 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 #endif
 	}
 
-	if ((flags & RTE_VHOST_USER_CLIENT) != 0) {
-		vsocket->reconnect = !(flags & RTE_VHOST_USER_NO_RECONNECT);
-		if (vsocket->reconnect && reconn_tid == 0) {
-			if (vhost_user_reconnect_init() != 0)
-				goto out_mutex;
+	if (!vsocket->is_vduse) {
+		if ((flags & RTE_VHOST_USER_CLIENT) != 0) {
+			vsocket->reconnect = !(flags & RTE_VHOST_USER_NO_RECONNECT);
+			if (vsocket->reconnect && reconn_tid == 0) {
+				if (vhost_user_reconnect_init() != 0)
+					goto out_mutex;
+			}
+		} else {
+			vsocket->is_server = true;
 		}
-	} else {
-		vsocket->is_server = true;
-	}
-	ret = create_unix_socket(vsocket);
-	if (ret < 0) {
-		goto out_mutex;
+		ret = create_unix_socket(vsocket);
+		if (ret < 0)
+			goto out_mutex;
 	}
 
 	vhost_user.vsockets[vhost_user.vsocket_cnt++] = vsocket;
@@ -1036,7 +1078,9 @@ again:
 		if (strcmp(vsocket->path, path))
 			continue;
 
-		if (vsocket->is_server) {
+		if (vsocket->is_vduse) {
+			vduse_device_destroy(path);
+		} else if (vsocket->is_server) {
 			/*
 			 * If r/wcb is executing, release vhost_user's
 			 * mutex lock, and try again since the r/wcb
@@ -1139,6 +1183,9 @@ rte_vhost_driver_start(const char *path)
 	if (!vsocket)
 		return -1;
 
+	if (vsocket->is_vduse)
+		return vduse_device_create(path, vsocket->net_compliant_ol_flags);
+
 	if (fdset_tid == 0) {
 		/**
 		 * create a pipe which will be waited by poll and notified to
@@ -1150,7 +1197,7 @@ rte_vhost_driver_start(const char *path)
 		}
 
 		int ret = rte_ctrl_thread_create(&fdset_tid,
-			"vhost-events", NULL, fdset_event_dispatch,
+			"dpdk-vhost-evt", NULL, fdset_event_dispatch,
 			&vhost_user.fdset);
 		if (ret != 0) {
 			VHOST_LOG_CONFIG(path, ERR, "failed to create fdset handling thread\n");

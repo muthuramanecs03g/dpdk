@@ -66,10 +66,14 @@ extern "C" {
 static __rte_always_inline void
 rte_smp_mb(void)
 {
+#ifdef RTE_TOOLCHAIN_MSVC
+	_mm_mfence();
+#else
 #ifdef RTE_ARCH_I686
 	asm volatile("lock addl $0, -128(%%esp); " ::: "memory");
 #else
 	asm volatile("lock addl $0, -128(%%rsp); " ::: "memory");
+#endif
 #endif
 }
 
@@ -78,6 +82,8 @@ rte_smp_mb(void)
 #define rte_io_wmb() rte_compiler_barrier()
 
 #define rte_io_rmb() rte_compiler_barrier()
+
+#ifndef RTE_TOOLCHAIN_MSVC
 
 /**
  * Synchronization fence between threads based on the specified memory order.
@@ -273,6 +279,8 @@ static inline int rte_atomic32_dec_and_test(rte_atomic32_t *v)
 #include "rte_atomic_32.h"
 #else
 #include "rte_atomic_64.h"
+#endif
+
 #endif
 
 #ifdef __cplusplus

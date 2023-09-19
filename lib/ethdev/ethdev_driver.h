@@ -16,7 +16,6 @@ extern "C" {
  *
  * These APIs for the use from Ethernet drivers, user applications shouldn't
  * use them.
- *
  */
 
 #include <dev_driver.h>
@@ -117,7 +116,11 @@ struct rte_eth_dev_data {
 
 	uint64_t rx_mbuf_alloc_failed; /**< Rx ring mbuf allocation failures */
 
-	/** Device Ethernet link address. @see rte_eth_dev_release_port() */
+	/**
+	 * Device Ethernet link addresses.
+	 * All entries are unique.
+	 * The first entry (index zero) is the default address.
+	 */
 	struct rte_ether_addr *mac_addrs;
 	/** Bitmap associating MAC addresses to pools */
 	uint64_t mac_pool_sel[RTE_ETH_NUM_RECEIVE_MAC_ADDR];

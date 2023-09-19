@@ -1,10 +1,14 @@
 EXPERIMENTAL {
 	global:
 
+	__rte_graph_mcore_dispatch_sched_node_enqueue;
+	__rte_graph_mcore_dispatch_sched_wq_process;
+
 	__rte_node_register;
 	__rte_node_stream_alloc;
 	__rte_node_stream_alloc_size;
 
+	rte_graph_clone;
 	rte_graph_create;
 	rte_graph_destroy;
 	rte_graph_dump;
@@ -14,10 +18,17 @@ EXPERIMENTAL {
 	rte_graph_lookup;
 	rte_graph_list_dump;
 	rte_graph_max_count;
+	rte_graph_model_is_valid;
+	rte_graph_model_mcore_dispatch_core_bind;
+	rte_graph_model_mcore_dispatch_core_unbind;
+	rte_graph_model_mcore_dispatch_node_lcore_affinity_set;
 	rte_graph_node_get;
 	rte_graph_node_get_by_name;
 	rte_graph_obj_dump;
 	rte_graph_walk;
+	rte_graph_worker_model_get;
+	rte_graph_worker_model_no_check_get;
+	rte_graph_worker_model_set;
 
 	rte_graph_cluster_stats_create;
 	rte_graph_cluster_stats_destroy;

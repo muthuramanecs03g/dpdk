@@ -54,11 +54,9 @@ static struct socket v1_socket; /* socket for v1 telemetry */
 static const char *telemetry_version; /* save rte_version */
 static const char *socket_dir;        /* runtime directory */
 static rte_cpuset_t *thread_cpuset;
-static rte_log_fn rte_log_ptr;
-static uint32_t logtype;
 
-#define TMTY_LOG(l, ...) \
-        rte_log_ptr(RTE_LOG_ ## l, logtype, "TELEMETRY: " __VA_ARGS__)
+RTE_LOG_REGISTER_DEFAULT(logtype, WARNING);
+#define TMTY_LOG(l, ...) rte_log(RTE_LOG_ ## l, logtype, "TELEMETRY: " __VA_ARGS__)
 
 /* list of command callbacks, with one command registered by default */
 static struct cmd_callback *callbacks;
@@ -208,7 +206,11 @@ container_to_json(const struct rte_tel_data *d, char *out_buf, size_t buf_len)
 				break;
 			case RTE_TEL_CONTAINER:
 			{
-				char temp[buf_len];
+				char *temp = malloc(buf_len);
+				if (temp == NULL)
+					break;
+				*temp = '\0';  /* ensure valid string */
+
 				const struct container *cont =
 						&v->value.container;
 				if (container_to_json(cont->data,
@@ -219,6 +221,7 @@ container_to_json(const struct rte_tel_data *d, char *out_buf, size_t buf_len)
 							v->name, temp);
 				if (!cont->keep)
 					rte_tel_data_free(cont->data);
+				free(temp);
 				break;
 			}
 			}
@@ -275,7 +278,11 @@ output_json(const char *cmd, const struct rte_tel_data *d, int s)
 				break;
 			case RTE_TEL_CONTAINER:
 			{
-				char temp[buf_len];
+				char *temp = malloc(buf_len);
+				if (temp == NULL)
+					break;
+				*temp = '\0';  /* ensure valid string */
+
 				const struct container *cont =
 						&v->value.container;
 				if (container_to_json(cont->data,
@@ -286,6 +293,7 @@ output_json(const char *cmd, const struct rte_tel_data *d, int s)
 							v->name, temp);
 				if (!cont->keep)
 					rte_tel_data_free(cont->data);
+				free(temp);
 			}
 			}
 		}
@@ -311,7 +319,11 @@ output_json(const char *cmd, const struct rte_tel_data *d, int s)
 						buf_len, used,
 						d->data.array[i].uval);
 			else if (d->type == TEL_ARRAY_CONTAINER) {
-				char temp[buf_len];
+				char *temp = malloc(buf_len);
+				if (temp == NULL)
+					break;
+				*temp = '\0';  /* ensure valid string */
+
 				const struct container *rec_data =
 						&d->data.array[i].container;
 				if (container_to_json(rec_data->data,
@@ -321,6 +333,7 @@ output_json(const char *cmd, const struct rte_tel_data *d, int s)
 							buf_len, used, temp);
 				if (!rec_data->keep)
 					rte_tel_data_free(rec_data->data);
+				free(temp);
 			}
 		break;
 	}
@@ -391,7 +404,7 @@ client_handler(void *sock_id)
 		bytes = read(s, buffer, sizeof(buffer) - 1);
 	}
 	close(s);
-	__atomic_sub_fetch(&v2_clients, 1, __ATOMIC_RELAXED);
+	__atomic_fetch_sub(&v2_clients, 1, __ATOMIC_RELAXED);
 	return NULL;
 }
 
@@ -414,7 +427,7 @@ socket_listener(void *socket)
 				close(s_accepted);
 				continue;
 			}
-			__atomic_add_fetch(s->num_clients, 1,
+			__atomic_fetch_add(s->num_clients, 1,
 					__ATOMIC_RELAXED);
 		}
 		rc = pthread_create(&th, NULL, s->fn,
@@ -424,7 +437,7 @@ socket_listener(void *socket)
 				 strerror(rc));
 			close(s_accepted);
 			if (s->num_clients != NULL)
-				__atomic_sub_fetch(s->num_clients, 1,
+				__atomic_fetch_sub(s->num_clients, 1,
 						   __ATOMIC_RELAXED);
 			continue;
 		}
@@ -548,7 +561,7 @@ telemetry_legacy_init(void)
 		return -1;
 	}
 	pthread_setaffinity_np(t_old, sizeof(*thread_cpuset), thread_cpuset);
-	set_thread_name(t_old, "telemetry-v1");
+	set_thread_name(t_old, "dpdk-telemet-v1");
 	TMTY_LOG(DEBUG, "Legacy telemetry socket initialized ok\n");
 	pthread_detach(t_old);
 	return 0;
@@ -602,7 +615,7 @@ telemetry_v2_init(void)
 		return -1;
 	}
 	pthread_setaffinity_np(t_new, sizeof(*thread_cpuset), thread_cpuset);
-	set_thread_name(t_new, "telemetry-v2");
+	set_thread_name(t_new, "dpdk-telemet-v2");
 	pthread_detach(t_new);
 	atexit(unlink_sockets);
 
@@ -612,14 +625,11 @@ telemetry_v2_init(void)
 #endif /* !RTE_EXEC_ENV_WINDOWS */
 
 int32_t
-rte_telemetry_init(const char *runtime_dir, const char *rte_version, rte_cpuset_t *cpuset,
-		rte_log_fn log_fn, uint32_t registered_logtype)
+rte_telemetry_init(const char *runtime_dir, const char *rte_version, rte_cpuset_t *cpuset)
 {
 	telemetry_version = rte_version;
 	socket_dir = runtime_dir;
 	thread_cpuset = cpuset;
-	rte_log_ptr = log_fn;
-	logtype = registered_logtype;
 
 #ifndef RTE_EXEC_ENV_WINDOWS
 	if (telemetry_v2_init() != 0)

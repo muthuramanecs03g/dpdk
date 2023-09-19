@@ -200,6 +200,8 @@ struct npc_parse_state {
 	bool set_ipv6ext_ltype_mask;
 	bool is_second_pass_rule;
 	bool has_eth_type;
+	uint16_t nb_tx_queues;
+	uint16_t dst_pf_func;
 };
 
 enum npc_kpu_parser_flag {
@@ -403,6 +405,7 @@ struct npc {
 	struct npc_prio_flow_list_head *prio_flow_list;
 	struct plt_bitmap *rss_grp_entries;
 	struct npc_flow_list ipsec_list;
+	uint8_t exact_match_ena;
 };
 
 #define NPC_HASH_FIELD_LEN 16
@@ -448,6 +451,7 @@ int npc_parse_mark_item(struct npc_parse_state *pst);
 int npc_parse_pre_l2(struct npc_parse_state *pst);
 int npc_parse_higig2_hdr(struct npc_parse_state *pst);
 int npc_parse_cpt_hdr(struct npc_parse_state *pst);
+int npc_parse_tx_queue(struct npc_parse_state *pst);
 int npc_parse_la(struct npc_parse_state *pst);
 int npc_parse_lb(struct npc_parse_state *pst);
 int npc_parse_lc(struct npc_parse_state *pst);

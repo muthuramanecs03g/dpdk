@@ -33,7 +33,7 @@ VOLATILE,PREFER_PACKED,PREFER_ALIGNED,PREFER_PRINTF,STRLCPY,\
 PREFER_KERNEL_TYPES,PREFER_FALLTHROUGH,BIT_MACRO,CONST_STRUCT,\
 SPLIT_STRING,LONG_LINE_STRING,C99_COMMENT_TOLERANCE,\
 LINE_SPACING,PARENTHESIS_ALIGNMENT,NETWORKING_BLOCK_COMMENT_STYLE,\
-NEW_TYPEDEFS,COMPARISON_TO_NULL"
+NEW_TYPEDEFS,COMPARISON_TO_NULL,AVOID_BUG"
 options="$options $DPDK_CHECKPATCH_OPTIONS"
 
 print_usage () {
@@ -78,14 +78,6 @@ check_forbidden_additions() { # <patch>
 		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
 		"$1" || res=1
 
-	# forbid variable declaration inside "for" loop
-	awk -v FOLDERS='.' \
-		-v EXPRESSIONS='for[[:space:]]*\\((char|u?int|unsigned|s?size_t)' \
-		-v RET_ON_FAIL=1 \
-		-v MESSAGE='Declaring a variable inside for()' \
-		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
-		"$1" || res=1
-
 	# refrain from new additions of 16/32/64 bits rte_atomicNN_xxx()
 	awk -v FOLDERS="lib drivers app examples" \
 		-v EXPRESSIONS="rte_atomic[0-9][0-9]_.*\\\(" \
@@ -119,11 +111,27 @@ check_forbidden_additions() { # <patch>
 		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
 		"$1" || res=1
 
+	# refrain from using compiler __atomic_{add,and,nand,or,sub,xor}_fetch()
+	awk -v FOLDERS="lib drivers app examples" \
+		-v EXPRESSIONS="__atomic_(add|and|nand|or|sub|xor)_fetch\\\(" \
+		-v RET_ON_FAIL=1 \
+		-v MESSAGE='Using __atomic_op_fetch, prefer __atomic_fetch_op' \
+		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
+		"$1" || res=1
+
 	# forbid use of __reserved which is a reserved keyword in Windows system headers
 	awk -v FOLDERS="lib drivers app examples" \
 		-v EXPRESSIONS='\\<__reserved\\>' \
 		-v RET_ON_FAIL=1 \
 		-v MESSAGE='Using __reserved' \
+		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
+		"$1" || res=1
+
+	# forbid use of non abstracted bit count operations
+	awk -v FOLDERS="lib drivers app examples" \
+		-v EXPRESSIONS='\\<__builtin_(clz|clzll|ctz|ctzll|popcount|popcountll)\\>' \
+		-v RET_ON_FAIL=1 \
+		-v MESSAGE='Using __builtin helpers for bit count operations' \
 		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
 		"$1" || res=1
 
@@ -164,6 +172,14 @@ check_forbidden_additions() { # <patch>
 		-v EXPRESSIONS='http://.*dpdk.org' \
 		-v RET_ON_FAIL=1 \
 		-v MESSAGE='Using non https link to dpdk.org' \
+		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
+		"$1" || res=1
+
+	# prefer Sphinx references for internal documentation
+	awk -v FOLDERS='doc' \
+		-v EXPRESSIONS='//doc.dpdk.org/guides/' \
+		-v RET_ON_FAIL=1 \
+		-v MESSAGE='Using explicit URL to doc.dpdk.org, prefer :ref: or :doc:' \
 		-f $(dirname $(readlink -f $0))/check-forbidden-tokens.awk \
 		"$1" || res=1
 

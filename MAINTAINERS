@@ -155,6 +155,7 @@ F: doc/guides/prog_guide/env_abstraction_layer.rst
 F: app/test/test_alarm.c
 F: app/test/test_atomic.c
 F: app/test/test_barrier.c
+F: app/test/test_bitcount.c
 F: app/test/test_byteorder.c
 F: app/test/test_common.c
 F: app/test/test_cpuflags.c
@@ -164,7 +165,6 @@ F: app/test/test_devargs.c
 F: app/test/test_eal*
 F: app/test/test_errno.c
 F: app/test/test_lcores.c
-F: app/test/test_logs.c
 F: app/test/test_memcpy*
 F: app/test/test_per_lcore.c
 F: app/test/test_pflock.c
@@ -176,6 +176,11 @@ F: app/test/test_string_fns.c
 F: app/test/test_tailq.c
 F: app/test/test_threads.c
 F: app/test/test_version.c
+
+Logging
+F: lib/log/
+F: doc/guides/prog_guide/log_lib.rst
+F: app/test/test_logs.c
 
 Trace - EXPERIMENTAL
 M: Jerin Jacob <jerinj@marvell.com>
@@ -316,7 +321,6 @@ M: Bruce Richardson <bruce.richardson@intel.com>
 M: Konstantin Ananyev <konstantin.v.ananyev@yandex.ru>
 F: config/x86/
 F: doc/guides/linux_gsg/nic_perf_intel_platform.rst
-F: buildtools/binutils-avx512-check.py
 F: doc/guides/howto/avx512.rst
 F: lib/eal/x86/
 F: lib/*/*_sse*
@@ -564,6 +568,11 @@ F: doc/guides/mempool/cnxk.rst
 Bus Drivers
 -----------
 
+AMD CDX bus
+M: Nipun Gupta <nipun.gupta@amd.com>
+M: Nikhil Agarwal <nikhil.agarwal@amd.com>
+F: drivers/bus/cdx/
+
 Auxiliary bus driver - EXPERIMENTAL
 M: Parav Pandit <parav@nvidia.com>
 M: Xueming Li <xuemingl@nvidia.com>
@@ -581,6 +590,8 @@ F: drivers/bus/dpaa/
 F: drivers/bus/fslmc/
 
 PCI bus driver
+M: Chenbo Xia <chenbo.xia@intel.com>
+M: Nipun Gupta <nipun.gupta@amd.com>
 F: drivers/bus/pci/
 
 Platform bus driver
@@ -598,8 +609,8 @@ F: drivers/bus/vmbus/
 
 Networking Drivers
 ------------------
-M: Ferruh Yigit <ferruh.yigit@amd.com>
 T: git://dpdk.org/next/dpdk-next-net
+F: drivers/net/meson.build
 F: doc/guides/nics/features/default.ini
 
 Link bonding
@@ -609,12 +620,6 @@ F: drivers/net/bonding/
 F: doc/guides/prog_guide/link_bonding_poll_mode_drv_lib.rst
 F: app/test/test_link_bonding*
 F: examples/bond/
-
-Linux KNI
-F: kernel/linux/kni/
-F: lib/kni/
-F: doc/guides/prog_guide/kernel_nic_interface.rst
-F: app/test/test_kni.c
 
 Linux AF_PACKET
 M: John W. Linville <linville@tuxdriver.com>
@@ -629,17 +634,17 @@ F: doc/guides/nics/af_xdp.rst
 F: doc/guides/nics/features/af_xdp.ini
 
 Amazon ENA
-M: Marcin Wojtas <mw@semihalf.com>
 M: Michal Krawczyk <mk@semihalf.com>
 M: Shai Brandes <shaibran@amazon.com>
 M: Evgeny Schemeilin <evgenys@amazon.com>
 M: Igor Chauskin <igorch@amazon.com>
+M: Ron Beider <rbeider@amazon.com>
 F: drivers/net/ena/
 F: doc/guides/nics/ena.rst
 F: doc/guides/nics/features/ena.ini
 
 AMD axgbe
-M: Chandubabu Namburu <chandu@amd.com>
+M: Selwin Sebastian <selwin.sebastian@amd.com>
 F: drivers/net/axgbe/
 F: doc/guides/nics/axgbe.rst
 F: doc/guides/nics/features/axgbe.ini
@@ -681,14 +686,6 @@ F: drivers/net/thunderx/
 F: doc/guides/nics/thunderx.rst
 F: doc/guides/nics/features/thunderx.ini
 
-Cavium LiquidIO - UNMAINTAINED
-M: Shijith Thotton <sthotton@marvell.com>
-M: Srisivasubramanian Srinivasan <srinivasan@marvell.com>
-T: git://dpdk.org/next/dpdk-next-net-mrvl
-F: drivers/net/liquidio/
-F: doc/guides/nics/liquidio.rst
-F: doc/guides/nics/features/liquidio.ini
-
 Cavium OCTEON TX
 M: Harman Kalra <hkalra@marvell.com>
 T: git://dpdk.org/next/dpdk-next-net-mrvl
@@ -713,6 +710,9 @@ F: doc/guides/nics/features/enic.ini
 
 Google Virtual Ethernet
 M: Junfeng Guo <junfeng.guo@intel.com>
+M: Jeroen de Borst <jeroendb@google.com>
+M: Rushil Gupta <rushilg@google.com>
+M: Joshua Washington <joshwash@google.com>
 F: drivers/net/gve/
 F: doc/guides/nics/gve.rst
 F: doc/guides/nics/features/gve.ini
@@ -845,9 +845,7 @@ F: doc/guides/nics/mvneta.rst
 F: doc/guides/nics/features/mvneta.ini
 
 Marvell OCTEON TX EP - endpoint
-M: Radha Mohan Chintakuntla <radhac@marvell.com>
-M: Veerasenareddy Burru <vburru@marvell.com>
-M: Sathesh Edara <sedara@marvell.com>
+M: Vamsi Attunuru <vattunuru@marvell.com>
 T: git://dpdk.org/next/dpdk-next-net-mrvl
 F: drivers/net/octeon_ep/
 F: doc/guides/nics/features/octeon_ep.ini
@@ -864,6 +862,8 @@ F: doc/guides/nics/features/mlx4.ini
 NVIDIA mlx5
 M: Matan Azrad <matan@nvidia.com>
 M: Viacheslav Ovsiienko <viacheslavo@nvidia.com>
+M: Ori Kam <orika@nvidia.com>
+M: Suanming Mou <suanmingm@nvidia.com>
 T: git://dpdk.org/next/dpdk-next-net-mlx
 F: drivers/common/mlx5/
 F: drivers/net/mlx5/
@@ -938,8 +938,7 @@ F: drivers/net/pfe/
 F: doc/guides/nics/features/pfe.ini
 
 Marvell QLogic bnx2x
-M: Rasesh Mody <rmody@marvell.com>
-M: Shahed Shaikh <shshaikh@marvell.com>
+M: Julien Aube <julien_dpdk@jaube.fr>
 T: git://dpdk.org/next/dpdk-next-net-mrvl
 F: drivers/net/bnx2x/
 F: doc/guides/nics/bnx2x.rst
@@ -1026,10 +1025,6 @@ F: drivers/net/tap/
 F: doc/guides/nics/tap.rst
 F: doc/guides/nics/features/tap.ini
 
-KNI PMD
-F: drivers/net/kni/
-F: doc/guides/nics/kni.rst
-
 Ring PMD
 M: Bruce Richardson <bruce.richardson@intel.com>
 F: drivers/net/ring/
@@ -1062,6 +1057,7 @@ F: doc/guides/nics/features/memif.ini
 Crypto Drivers
 --------------
 T: git://dpdk.org/next/dpdk-next-crypto
+F: drivers/crypto/meson.build
 F: doc/guides/cryptodevs/features/default.ini
 
 AMD CCP Crypto
@@ -1198,6 +1194,7 @@ F: doc/guides/cryptodevs/features/virtio.ini
 Compression Drivers
 -------------------
 T: git://dpdk.org/next/dpdk-next-crypto
+F: drivers/compress/meson.build
 
 Cavium OCTEON TX zipvf
 M: Ashish Gupta <ashish.gupta@marvell.com>
@@ -1248,8 +1245,7 @@ F: drivers/dma/hisilicon/
 F: doc/guides/dmadevs/hisilicon.rst
 
 Marvell CNXK DPI DMA
-M: Radha Mohan Chintakuntla <radhac@marvell.com>
-M: Veerasenareddy Burru <vburru@marvell.com>
+M: Vamsi Attunuru <vattunuru@marvell.com>
 F: drivers/dma/cnxk/
 F: doc/guides/dmadevs/cnxk.rst
 
@@ -1296,6 +1292,7 @@ F: doc/guides/mldevs/cnxk.rst
 vDPA Drivers
 ------------
 T: git://dpdk.org/next/dpdk-next-virtio
+F: drivers/vdpa/meson.build
 
 Intel ifc
 M: Xiao Wang <xiao.w.wang@intel.com>
@@ -1319,8 +1316,8 @@ F: doc/guides/vdpadevs/features/sfc.ini
 
 Eventdev Drivers
 ----------------
-M: Jerin Jacob <jerinj@marvell.com>
 T: git://dpdk.org/next/dpdk-next-eventdev
+F: drivers/event/meson.build
 
 Cavium OCTEON TX ssovf
 M: Jerin Jacob <jerinj@marvell.com>
@@ -1332,7 +1329,7 @@ M: Pavan Nikhilesh <pbhagavatula@marvell.com>
 F: drivers/event/octeontx/timvf_*
 
 Intel DLB2
-M: Timothy McDaniel <timothy.mcdaniel@intel.com>
+M: Abdullah Sevincer <abdullah.sevincer@intel.com>
 F: drivers/event/dlb2/
 F: doc/guides/eventdevs/dlb2.rst
 
@@ -1375,10 +1372,11 @@ F: doc/guides/eventdevs/opdl.rst
 
 Baseband Drivers
 ----------------
+T: git://dpdk.org/next/dpdk-next-baseband
+F: drivers/baseband/meson.build
 
 Intel baseband
 M: Nicolas Chautru <nicolas.chautru@intel.com>
-T: git://dpdk.org/next/dpdk-next-baseband
 F: drivers/baseband/turbo_sw/
 F: doc/guides/bbdevs/turbo_sw.rst
 F: doc/guides/bbdevs/features/turbo_sw.ini
@@ -1397,7 +1395,6 @@ F: doc/guides/bbdevs/features/vrb1.ini
 
 Null baseband
 M: Nicolas Chautru <nicolas.chautru@intel.com>
-T: git://dpdk.org/next/dpdk-next-baseband
 F: drivers/baseband/null/
 F: doc/guides/bbdevs/null.rst
 F: doc/guides/bbdevs/features/null.ini
@@ -1405,7 +1402,6 @@ F: doc/guides/bbdevs/features/null.ini
 NXP LA12xx
 M: Gagandeep Singh <g.singh@nxp.com>
 M: Hemant Agrawal <hemant.agrawal@nxp.com>
-T: git://dpdk.org/next/dpdk-next-baseband
 F: drivers/baseband/la12xx/
 F: doc/guides/bbdevs/la12xx.rst
 F: doc/guides/bbdevs/features/la12xx.ini
@@ -1478,6 +1474,7 @@ M: Konstantin Ananyev <konstantin.v.ananyev@yandex.ru>
 F: lib/ip_frag/
 F: doc/guides/prog_guide/ip_fragment_reassembly_lib.rst
 F: app/test/test_ipfrag.c
+F: app/test/test_reassembly_perf.c
 F: examples/ip_fragmentation/
 F: doc/guides/sample_app_ug/ip_frag.rst
 F: examples/ip_reassembly/
@@ -1502,12 +1499,13 @@ F: doc/guides/prog_guide/ipsec_lib.rst
 M: Vladimir Medvedkin <vladimir.medvedkin@intel.com>
 F: app/test-sad/
 
-Flow Classify - EXPERIMENTAL - UNMAINTAINED
-F: lib/flow_classify/
-F: app/test/test_flow_classify*
-F: doc/guides/prog_guide/flow_classify_lib.rst
-F: examples/flow_classify/
-F: doc/guides/sample_app_ug/flow_classify.rst
+PDCP - EXPERIMENTAL
+M: Anoob Joseph <anoobj@marvell.com>
+M: Volodymyr Fialko <vfialko@marvell.com>
+T: git://dpdk.org/next/dpdk-next-crypto
+F: lib/pdcp/
+F: doc/guides/prog_guide/pdcp_lib.rst
+F: app/test/test_pdcp*
 
 Distributor
 M: David Hunt <david.hunt@intel.com>
@@ -1518,7 +1516,7 @@ F: examples/distributor/
 F: doc/guides/sample_app_ug/dist_app.rst
 
 Reorder
-M: Reshma Pattan <reshma.pattan@intel.com>
+M: Volodymyr Fialko <vfialko@marvell.com>
 F: lib/reorder/
 F: doc/guides/prog_guide/reorder_lib.rst
 F: app/test/test_reorder*
@@ -1657,10 +1655,12 @@ F: app/test/test_rcu*
 F: doc/guides/prog_guide/rcu_lib.rst
 
 PCI
+M: Chenbo Xia <chenbo.xia@intel.com>
 M: Gaetan Rivet <grive@u256.net>
 F: lib/pci/
 
 Power management
+M: Anatoly Burakov <anatoly.burakov@intel.com>
 M: David Hunt <david.hunt@intel.com>
 F: lib/power/
 F: doc/guides/prog_guide/power_man.rst
@@ -1700,6 +1700,7 @@ Telemetry
 M: Ciara Power <ciara.power@intel.com>
 F: lib/telemetry/
 F: app/test/test_telemetry*
+F: app/test/suites/test_telemetry.sh
 F: usertools/dpdk-telemetry*
 F: doc/guides/howto/telemetry.rst
 
@@ -1714,10 +1715,11 @@ F: doc/guides/prog_guide/bpf_lib.rst
 Graph - EXPERIMENTAL
 M: Jerin Jacob <jerinj@marvell.com>
 M: Kiran Kumar K <kirankumark@marvell.com>
+M: Nithin Dabilpuram <ndabilpuram@marvell.com>
+M: Zhirun Yan <zhirun.yan@intel.com>
 F: lib/graph/
 F: doc/guides/prog_guide/graph_lib.rst
 F: app/test/test_graph*
-M: Nithin Dabilpuram <ndabilpuram@marvell.com>
 F: examples/l3fwd-graph/
 F: doc/guides/sample_app_ug/l3_forward_graph.rst
 
@@ -1732,7 +1734,6 @@ Test Applications
 
 Unit tests framework
 F: app/test/commands.c
-F: app/test/has_hugepage.py
 F: app/test/packet_burst_generator.c
 F: app/test/packet_burst_generator.h
 F: app/test/process.h
@@ -1743,6 +1744,8 @@ F: app/test/test_pmd_perf.c
 F: app/test/test_resource.c
 F: app/test/virtual_pmd.c
 F: app/test/virtual_pmd.h
+F: buildtools/has-hugepages.py
+F: buildtools/get-test-suites.py
 
 Sample packet helper functions for unit test
 M: Reshma Pattan <reshma.pattan@intel.com>
@@ -1755,6 +1758,11 @@ M: Yuying Zhang <yuying.zhang@intel.com>
 T: git://dpdk.org/next/dpdk-next-net
 F: app/test-pmd/
 F: doc/guides/testpmd_app_ug/
+
+DMA device performance tool
+M: Cheng Jiang <cheng1.jiang@intel.com>
+F: app/test-dma-perf/
+F: doc/guides/tools/dmaperf.rst
 
 Flow performance tool
 M: Wisam Jaddo <wisamm@nvidia.com>
@@ -1787,7 +1795,6 @@ F: doc/guides/tools/img/eventdev_*
 F: app/test/test_event_ring.c
 
 Procinfo tool
-M: Maryam Tahhan <maryam.tahhan@intel.com>
 M: Reshma Pattan <reshma.pattan@intel.com>
 F: app/proc-info/
 F: doc/guides/tools/proc_info.rst
@@ -1809,6 +1816,7 @@ F: doc/guides/sample_app_ug/ethtool.rst
 
 FIPS validation example
 M: Brian Dooley <brian.dooley@intel.com>
+M: Gowrishankar Muthukrishnan <gmuthukrishn@marvell.com>
 F: examples/fips_validation/
 F: doc/guides/sample_app_ug/fips_validation.rst
 

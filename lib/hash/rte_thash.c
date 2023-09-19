@@ -130,7 +130,7 @@ get_bit_lfsr(struct thash_lfsr *lfsr)
 	 * masking the TAP bits defined by the polynomial and
 	 * calculating parity
 	 */
-	bit = __builtin_popcount(lfsr->state & lfsr->poly) & 0x1;
+	bit = rte_popcount32(lfsr->state & lfsr->poly) & 0x1;
 	ret = lfsr->state & 0x1;
 	lfsr->state = ((lfsr->state >> 1) | (bit << (lfsr->deg - 1))) &
 		((1 << lfsr->deg) - 1);
@@ -144,7 +144,7 @@ get_rev_bit_lfsr(struct thash_lfsr *lfsr)
 {
 	uint32_t bit, ret;
 
-	bit = __builtin_popcount(lfsr->rev_state & lfsr->rev_poly) & 0x1;
+	bit = rte_popcount32(lfsr->rev_state & lfsr->rev_poly) & 0x1;
 	ret = lfsr->rev_state & (1 << (lfsr->deg - 1));
 	lfsr->rev_state = ((lfsr->rev_state << 1) | bit) &
 		((1 << lfsr->deg) - 1);
@@ -670,7 +670,7 @@ rte_thash_get_gfni_matrices(struct rte_thash_ctx *ctx)
 }
 
 static inline uint8_t
-read_unaligned_byte(uint8_t *ptr, unsigned int len, unsigned int offset)
+read_unaligned_byte(uint8_t *ptr, unsigned int offset)
 {
 	uint8_t ret = 0;
 
@@ -681,13 +681,14 @@ read_unaligned_byte(uint8_t *ptr, unsigned int len, unsigned int offset)
 			(CHAR_BIT - (offset % CHAR_BIT));
 	}
 
-	return ret >> (CHAR_BIT - len);
+	return ret;
 }
 
 static inline uint32_t
 read_unaligned_bits(uint8_t *ptr, int len, int offset)
 {
 	uint32_t ret = 0;
+	int shift;
 
 	len = RTE_MAX(len, 0);
 	len = RTE_MIN(len, (int)(sizeof(uint32_t) * CHAR_BIT));
@@ -695,13 +696,14 @@ read_unaligned_bits(uint8_t *ptr, int len, int offset)
 	while (len > 0) {
 		ret <<= CHAR_BIT;
 
-		ret |= read_unaligned_byte(ptr, RTE_MIN(len, CHAR_BIT),
-			offset);
+		ret |= read_unaligned_byte(ptr, offset);
 		offset += CHAR_BIT;
 		len -= CHAR_BIT;
 	}
 
-	return ret;
+	shift = (len == 0) ? 0 :
+		(CHAR_BIT - ((len + CHAR_BIT) % CHAR_BIT));
+	return ret >> shift;
 }
 
 /* returns mask for len bits with given offset inside byte */

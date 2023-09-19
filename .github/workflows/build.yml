@@ -20,14 +20,14 @@ jobs:
       BUILD_32BIT: ${{ matrix.config.cross == 'i386' }}
       BUILD_DEBUG: ${{ contains(matrix.config.checks, 'debug') }}
       BUILD_DOCS: ${{ contains(matrix.config.checks, 'doc') }}
+      BUILD_EXAMPLES: ${{ contains(matrix.config.checks, 'examples') }}
       CC: ccache ${{ matrix.config.compiler }}
       DEF_LIB: ${{ matrix.config.library }}
       LIBABIGAIL_VERSION: libabigail-2.1
       MINGW: ${{ matrix.config.cross == 'mingw' }}
       MINI: ${{ matrix.config.mini != '' }}
       PPC64LE: ${{ matrix.config.cross == 'ppc64le' }}
-      REF_GIT_REPO: https://dpdk.org/git/dpdk-stable
-      REF_GIT_TAG: v22.11.1
+      REF_GIT_TAG: none
       RISCV64: ${{ matrix.config.cross == 'riscv64' }}
       RUN_TESTS: ${{ contains(matrix.config.checks, 'tests') }}
 
@@ -40,7 +40,7 @@ jobs:
             mini: mini
           - os: ubuntu-20.04
             compiler: gcc
-            checks: abi+debug+doc+tests
+            checks: debug+doc+examples+tests
           - os: ubuntu-20.04
             compiler: clang
             checks: asan+doc+tests
@@ -54,6 +54,7 @@ jobs:
             cross: mingw
           - os: ubuntu-20.04
             compiler: gcc
+            library: shared
             cross: aarch64
           - os: ubuntu-20.04
             compiler: gcc
@@ -69,7 +70,7 @@ jobs:
       id: get_ref_keys
       run: |
         echo 'ccache=ccache-${{ matrix.config.os }}-${{ matrix.config.compiler }}-${{ matrix.config.cross }}-'$(date -u +%Y-w%W) >> $GITHUB_OUTPUT
-        echo 'libabigail=libabigail-${{ matrix.config.os }}' >> $GITHUB_OUTPUT
+        echo 'libabigail=libabigail-${{ env.LIBABIGAIL_VERSION }}-${{ matrix.config.os }}' >> $GITHUB_OUTPUT
         echo 'abi=abi-${{ matrix.config.os }}-${{ matrix.config.compiler }}-${{ matrix.config.cross }}-${{ env.REF_GIT_TAG }}' >> $GITHUB_OUTPUT
     - name: Retrieve ccache cache
       uses: actions/cache@v3
@@ -91,20 +92,22 @@ jobs:
       with:
         path: reference
         key: ${{ steps.get_ref_keys.outputs.abi }}
+    - name: Configure i386 architecture
+      if: env.BUILD_32BIT == 'true'
+      run: sudo dpkg --add-architecture i386
     - name: Update APT cache
       run: sudo apt update || true
     - name: Install packages
       run: sudo apt install -y ccache libarchive-dev libbsd-dev libfdt-dev
         libibverbs-dev libjansson-dev libnuma-dev libpcap-dev libssl-dev
-        ninja-build python3-pip python3-pyelftools python3-setuptools
+        ninja-build pkg-config python3-pip python3-pyelftools python3-setuptools
         python3-wheel zlib1g-dev
     - name: Install libabigail build dependencies if no cache is available
       if: env.ABI_CHECKS == 'true' && steps.libabigail-cache.outputs.cache-hit != 'true'
       run: sudo apt install -y autoconf automake libdw-dev libtool libxml2-dev
-        pkg-config
     - name: Install i386 cross compiling packages
       if: env.BUILD_32BIT == 'true'
-      run: sudo apt install -y gcc-multilib g++-multilib
+      run: sudo apt install -y gcc-multilib g++-multilib libnuma-dev:i386
     - name: Install aarch64 cross compiling packages
       if: env.AARCH64 == 'true'
       run: sudo apt install -y crossbuild-essential-arm64
@@ -145,12 +148,14 @@ jobs:
   prepare-container-images:
     name: ${{ join(matrix.config.*, '-') }}
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.get_keys.outputs.image }}
 
     strategy:
       fail-fast: false
       matrix:
         config:
-          - image: fedora:35
+          - image: fedora:37
 
     steps:
     - name: Generate various keys
@@ -199,9 +204,9 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - image: fedora:35
+          - image: fedora:37
             compiler: gcc
-          - image: fedora:35
+          - image: fedora:37
             compiler: clang
 
     steps:
@@ -211,14 +216,13 @@ jobs:
       id: get_keys
       run: |
         echo 'ccache=ccache-${{ matrix.config.image }}-${{ matrix.config.compiler }}-'$(date -u +%Y-w%W) >> $GITHUB_OUTPUT
-        echo 'image=image-${{ matrix.config.image }}-'$(date -u +%Y-%m-%d) >> $GITHUB_OUTPUT
         echo 'logs=meson-logs-${{ join(matrix.config.*, '-') }}' | tr -d ':' >> $GITHUB_OUTPUT
     - name: Retrieve image cache
       id: image_cache
       uses: actions/cache@v3
       with:
         path: ~/.image
-        key: ${{ steps.get_keys.outputs.image }}
+        key: ${{ needs.prepare-container-images.outputs.image }}
     - name: Fail if no image (not supposed to happen)
       if: steps.image_cache.outputs.cache-hit != 'true'
       run: |
@@ -251,7 +255,7 @@ jobs:
       run: docker exec -i dpdk dnf update -y || true
     - name: Install packages
       run: docker exec -i dpdk dnf install -y ccache jansson-devel
-        libarchive-devel libatomic libbsd-devel libbpf-devel libfdt-devel
+        libarchive-devel libatomic libbsd-devel libxdp-devel libfdt-devel
         libpcap-devel ninja-build numactl-devel openssl-devel python3-pip
         python3-pyelftools python3-setuptools python3-wheel rdma-core-devel
         zlib-devel

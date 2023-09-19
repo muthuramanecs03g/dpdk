@@ -30,6 +30,7 @@
 #include <rte_memory.h>
 #include <rte_launch.h>
 #include <rte_eal.h>
+#include <rte_eal_memconfig.h>
 #include <rte_errno.h>
 #include <rte_lcore.h>
 #include <rte_service_component.h>
@@ -49,10 +50,10 @@
 #include "eal_hugepages.h"
 #include "eal_memcfg.h"
 #include "eal_trace.h"
-#include "eal_log.h"
 #include "eal_options.h"
 #include "eal_vfio.h"
 #include "hotplug_mp.h"
+#include "log_internal.h"
 
 #define MEMSIZE_IF_NO_HUGE_PAGE (64ULL * 1024ULL * 1024ULL)
 
@@ -664,7 +665,7 @@ eal_parse_args(int argc, char **argv)
 			continue;
 
 		switch (opt) {
-		case 'h':
+		case OPT_HELP_NUM:
 			eal_usage(prgname);
 			exit(EXIT_SUCCESS);
 
@@ -1057,12 +1058,6 @@ rte_eal_init(int argc, char **argv)
 		}
 	}
 
-	/* register multi-process action callbacks for hotplug */
-	if (eal_mp_dev_hotplug_init() < 0) {
-		rte_eal_init_alert("failed to register mp callback for hotplug");
-		return -1;
-	}
-
 	if (rte_bus_scan()) {
 		rte_eal_init_alert("Cannot scan the buses for devices");
 		rte_errno = ENODEV;
@@ -1080,17 +1075,15 @@ rte_eal_init(int argc, char **argv)
 		if (iova_mode == RTE_IOVA_DC) {
 			RTE_LOG(DEBUG, EAL, "Buses did not request a specific IOVA mode.\n");
 
-			if (!phys_addrs) {
+			if (!RTE_IOVA_IN_MBUF) {
+				iova_mode = RTE_IOVA_VA;
+				RTE_LOG(DEBUG, EAL, "IOVA as VA mode is forced by build option.\n");
+			} else if (!phys_addrs) {
 				/* if we have no access to physical addresses,
 				 * pick IOVA as VA mode.
 				 */
 				iova_mode = RTE_IOVA_VA;
 				RTE_LOG(DEBUG, EAL, "Physical addresses are unavailable, selecting IOVA as VA mode.\n");
-#if defined(RTE_LIB_KNI) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-			} else if (rte_eal_check_module("rte_kni") == 1) {
-				iova_mode = RTE_IOVA_PA;
-				RTE_LOG(DEBUG, EAL, "KNI is loaded, selecting IOVA as PA mode for better KNI performance.\n");
-#endif
 			} else if (is_iommu_enabled()) {
 				/* we have an IOMMU, pick IOVA as VA mode */
 				iova_mode = RTE_IOVA_VA;
@@ -1103,20 +1096,6 @@ rte_eal_init(int argc, char **argv)
 				RTE_LOG(DEBUG, EAL, "IOMMU is not available, selecting IOVA as PA mode.\n");
 			}
 		}
-#if defined(RTE_LIB_KNI) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
-		/* Workaround for KNI which requires physical address to work
-		 * in kernels < 4.10
-		 */
-		if (iova_mode == RTE_IOVA_VA &&
-				rte_eal_check_module("rte_kni") == 1) {
-			if (phys_addrs) {
-				iova_mode = RTE_IOVA_PA;
-				RTE_LOG(WARNING, EAL, "Forcing IOVA as 'PA' because KNI module is loaded\n");
-			} else {
-				RTE_LOG(DEBUG, EAL, "KNI can not work since physical addresses are unavailable\n");
-			}
-		}
-#endif
 		rte_eal_get_configuration()->iova_mode = iova_mode;
 	} else {
 		rte_eal_get_configuration()->iova_mode =
@@ -1193,7 +1172,10 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 
+	rte_mcfg_mem_read_lock();
+
 	if (rte_eal_memory_init() < 0) {
+		rte_mcfg_mem_read_unlock();
 		rte_eal_init_alert("Cannot init memory");
 		rte_errno = ENOMEM;
 		return -1;
@@ -1203,8 +1185,23 @@ rte_eal_init(int argc, char **argv)
 	eal_hugedirs_unlock();
 
 	if (rte_eal_malloc_heap_init() < 0) {
+		rte_mcfg_mem_read_unlock();
 		rte_eal_init_alert("Cannot init malloc heap");
 		rte_errno = ENODEV;
+		return -1;
+	}
+
+	rte_mcfg_mem_read_unlock();
+
+	if (rte_eal_malloc_heap_populate() < 0) {
+		rte_eal_init_alert("Cannot init malloc heap");
+		rte_errno = ENODEV;
+		return -1;
+	}
+
+	/* register multi-process action callbacks for hotplug after memory init */
+	if (eal_mp_dev_hotplug_init() < 0) {
+		rte_eal_init_alert("failed to register mp callback for hotplug");
 		return -1;
 	}
 
@@ -1256,7 +1253,7 @@ rte_eal_init(int argc, char **argv)
 
 		/* Set thread_name for aid in debugging. */
 		snprintf(thread_name, sizeof(thread_name),
-			"rte-worker-%d", i);
+			"dpdk-worker%d", i);
 		rte_thread_set_name(lcore_config[i].thread_id, thread_name);
 
 		ret = rte_thread_set_affinity_by_id(lcore_config[i].thread_id,
@@ -1317,13 +1314,9 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY && !internal_conf->no_telemetry) {
-		int tlog = rte_log_register_type_and_pick_level(
-				"lib.telemetry", RTE_LOG_WARNING);
-		if (tlog < 0)
-			tlog = RTE_LOGTYPE_EAL;
 		if (rte_telemetry_init(rte_eal_get_runtime_dir(),
 				rte_version(),
-				&internal_conf->ctrl_cpuset, rte_log, tlog) != 0)
+				&internal_conf->ctrl_cpuset) != 0)
 			return -1;
 	}
 
@@ -1352,6 +1345,16 @@ mark_freeable(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
 int
 rte_eal_cleanup(void)
 {
+	static uint32_t run_once;
+	uint32_t has_run = 0;
+
+	if (!__atomic_compare_exchange_n(&run_once, &has_run, 1, 0,
+					__ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+		RTE_LOG(WARNING, EAL, "Already called cleanup\n");
+		rte_errno = EALREADY;
+		return -1;
+	}
+
 	/* if we're in a primary process, we need to mark hugepages as freeable
 	 * so that finalization can release them back to the system.
 	 */

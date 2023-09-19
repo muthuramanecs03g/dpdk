@@ -253,6 +253,7 @@ fib_main_loop(__rte_unused void *dummy)
 	return 0;
 }
 
+#ifdef RTE_LIB_EVENTDEV
 /* One eventdev loop for single and burst using fib. */
 static __rte_always_inline void
 fib_event_loop(struct l3fwd_event_resources *evt_rsrc,
@@ -359,10 +360,10 @@ fib_event_loop(struct l3fwd_event_resources *evt_rsrc,
 				nh = (uint16_t)hopsv4[ipv4_arr_assem++];
 			else
 				nh = (uint16_t)hopsv6[ipv6_arr_assem++];
-			if (nh != FIB_DEFAULT_HOP)
-				hops[i] = nh != FIB_DEFAULT_HOP ?
-						  nh :
-						  events[i].mbuf->port;
+
+			hops[i] = nh != FIB_DEFAULT_HOP ?
+				  nh :
+				  events[i].mbuf->port;
 			process_packet(events[i].mbuf, &hops[i]);
 			events[i].mbuf->port = hops[i] != BAD_PORT ?
 						       hops[i] :
@@ -635,6 +636,7 @@ fib_event_main_loop_tx_q_burst_vector(__rte_unused void *dummy)
 	fib_event_loop_vector(evt_rsrc, L3FWD_EVENT_TX_ENQ);
 	return 0;
 }
+#endif
 
 /* Function to setup fib. 8< */
 void

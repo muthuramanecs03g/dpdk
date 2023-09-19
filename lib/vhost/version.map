@@ -1,4 +1,4 @@
-DPDK_23 {
+DPDK_24 {
 	global:
 
 	rte_vdpa_find_device_by_name;
@@ -98,6 +98,10 @@ EXPERIMENTAL {
 	# added in 22.11
 	rte_vhost_async_dma_unconfigure;
 	rte_vhost_vring_call_nonblock;
+
+	# added in 23.07
+	rte_vhost_driver_set_max_queue_num;
+	rte_vhost_notify_guest;
 };
 
 INTERNAL {

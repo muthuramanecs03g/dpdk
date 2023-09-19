@@ -61,9 +61,9 @@ nffw_fwinfo_mip_offset_get(const struct nffw_fwinfo *fi)
 }
 
 #define NFP_IMB_TGTADDRESSMODECFG_MODE_of(_x)		(((_x) >> 13) & 0x7)
-#define NFP_IMB_TGTADDRESSMODECFG_ADDRMODE		BIT(12)
+#define NFP_IMB_TGTADDRESSMODECFG_ADDRMODE		RTE_BIT32(12)
 #define   NFP_IMB_TGTADDRESSMODECFG_ADDRMODE_32_BIT	0
-#define   NFP_IMB_TGTADDRESSMODECFG_ADDRMODE_40_BIT	BIT(12)
+#define   NFP_IMB_TGTADDRESSMODECFG_ADDRMODE_40_BIT	RTE_BIT32(12)
 
 static int
 nfp_mip_mu_locality_lsb(struct nfp_cpp *cpp)
@@ -112,7 +112,7 @@ nffw_res_fwinfos(struct nfp_nffw_info_data *fwinf, struct nffw_fwinfo **arr)
  * nfp_nffw_info_open() - Acquire the lock on the NFFW table
  * @cpp:	NFP CPP handle
  *
- * Return: 0, or -ERRNO
+ * Return: nffw info pointer, or NULL on failure
  */
 struct nfp_nffw_info *
 nfp_nffw_info_open(struct nfp_cpp *cpp)
@@ -164,7 +164,7 @@ err_free:
  * nfp_nffw_info_close() - Release the lock on the NFFW table
  * @state:	NFP FW info state
  *
- * Return: 0, or -ERRNO
+ * Return: void
  */
 void
 nfp_nffw_info_close(struct nfp_nffw_info *state)

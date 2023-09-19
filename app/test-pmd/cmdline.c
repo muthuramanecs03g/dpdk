@@ -39,6 +39,7 @@
 #include <rte_gro.h>
 #endif
 #include <rte_mbuf_dyn.h>
+#include <rte_trace.h>
 
 #include <cmdline_rdline.h>
 #include <cmdline_parse.h>
@@ -254,6 +255,36 @@ static void cmd_help_long_parsed(void *parsed_result,
 
 			"show port (port_id) flow_ctrl"
 			"	Show flow control info of a port.\n\n"
+
+			"dump_physmem\n"
+			"    Dumps all physical memory segment layouts\n\n"
+
+			"dump_socket_mem\n"
+			"    Dumps the memory usage of all sockets\n\n"
+
+			"dump_memzone\n"
+			"    Dumps the layout of all memory zones\n\n"
+
+			"dump_struct_sizes\n"
+			"    Dumps the size of all memory structures\n\n"
+
+			"dump_ring\n"
+			"    Dumps the status of all or specific element in DPDK rings\n\n"
+
+			"dump_mempool\n"
+			"    Dumps the statistics of all or specific memory pool\n\n"
+
+			"dump_devargs\n"
+			"    Dumps the user device list\n\n"
+
+			"dump_lcores\n"
+			"    Dumps the logical cores list\n\n"
+
+			"dump_trace\n"
+			"    Dumps the tracing data to the folder according to the current EAL settings\n\n"
+
+			"dump_log_types\n"
+			"    Dumps the log level for all the dpdk modules\n\n"
 		);
 	}
 
@@ -653,7 +684,7 @@ static void cmd_help_long_parsed(void *parsed_result,
 			"    Detach physical or virtual dev by port_id\n\n"
 
 			"port config (port_id|all)"
-			" speed (10|100|1000|10000|25000|40000|50000|100000|200000|400000|auto)"
+			" speed (10|100|1000|2500|5000|10000|25000|40000|50000|100000|200000|400000|auto)"
 			" duplex (half|full|auto)\n"
 			"    Set speed and duplex for all ports or port_id\n\n"
 
@@ -1344,6 +1375,10 @@ parse_and_check_speed_duplex(char *speedstr, char *duplexstr, uint32_t *speed)
 		}
 		if (!strcmp(speedstr, "1000")) {
 			*speed = RTE_ETH_LINK_SPEED_1G;
+		} else if (!strcmp(speedstr, "2500")) {
+			*speed = RTE_ETH_LINK_SPEED_2_5G;
+		} else if (!strcmp(speedstr, "5000")) {
+			*speed = RTE_ETH_LINK_SPEED_5G;
 		} else if (!strcmp(speedstr, "10000")) {
 			*speed = RTE_ETH_LINK_SPEED_10G;
 		} else if (!strcmp(speedstr, "25000")) {
@@ -1408,7 +1443,7 @@ static cmdline_parse_token_string_t cmd_config_speed_all_item1 =
 	TOKEN_STRING_INITIALIZER(struct cmd_config_speed_all, item1, "speed");
 static cmdline_parse_token_string_t cmd_config_speed_all_value1 =
 	TOKEN_STRING_INITIALIZER(struct cmd_config_speed_all, value1,
-				"10#100#1000#10000#25000#40000#50000#100000#200000#400000#auto");
+				"10#100#1000#2500#5000#10000#25000#40000#50000#100000#200000#400000#auto");
 static cmdline_parse_token_string_t cmd_config_speed_all_item2 =
 	TOKEN_STRING_INITIALIZER(struct cmd_config_speed_all, item2, "duplex");
 static cmdline_parse_token_string_t cmd_config_speed_all_value2 =
@@ -1419,7 +1454,7 @@ static cmdline_parse_inst_t cmd_config_speed_all = {
 	.f = cmd_config_speed_all_parsed,
 	.data = NULL,
 	.help_str = "port config all speed "
-		"10|100|1000|10000|25000|40000|50000|100000|200000|400000|auto duplex "
+		"10|100|1000|2500|5000|10000|25000|40000|50000|100000|200000|400000|auto duplex "
 							"half|full|auto",
 	.tokens = {
 		(void *)&cmd_config_speed_all_port,
@@ -1483,7 +1518,7 @@ static cmdline_parse_token_string_t cmd_config_speed_specific_item1 =
 								"speed");
 static cmdline_parse_token_string_t cmd_config_speed_specific_value1 =
 	TOKEN_STRING_INITIALIZER(struct cmd_config_speed_specific, value1,
-				"10#100#1000#10000#25000#40000#50000#100000#200000#400000#auto");
+				"10#100#1000#2500#5000#10000#25000#40000#50000#100000#200000#400000#auto");
 static cmdline_parse_token_string_t cmd_config_speed_specific_item2 =
 	TOKEN_STRING_INITIALIZER(struct cmd_config_speed_specific, item2,
 								"duplex");
@@ -1495,7 +1530,7 @@ static cmdline_parse_inst_t cmd_config_speed_specific = {
 	.f = cmd_config_speed_specific_parsed,
 	.data = NULL,
 	.help_str = "port config <port_id> speed "
-		"10|100|1000|10000|25000|40000|50000|100000|200000|400000|auto duplex "
+		"10|100|1000|2500|5000|10000|25000|40000|50000|100000|200000|400000|auto duplex "
 							"half|full|auto",
 	.tokens = {
 		(void *)&cmd_config_speed_specific_port,
@@ -8365,6 +8400,10 @@ static void cmd_dump_parsed(void *parsed_result,
 		rte_devargs_dump(stdout);
 	else if (!strcmp(res->dump, "dump_lcores"))
 		rte_lcore_dump(stdout);
+#ifndef RTE_EXEC_ENV_WINDOWS
+	else if (!strcmp(res->dump, "dump_trace"))
+		rte_trace_save();
+#endif
 	else if (!strcmp(res->dump, "dump_log_types"))
 		rte_log_dump(stdout);
 }
@@ -8379,6 +8418,9 @@ static cmdline_parse_token_string_t cmd_dump_dump =
 		"dump_mempool#"
 		"dump_devargs#"
 		"dump_lcores#"
+#ifndef RTE_EXEC_ENV_WINDOWS
+		"dump_trace#"
+#endif
 		"dump_log_types");
 
 static cmdline_parse_inst_t cmd_dump = {
@@ -10851,8 +10893,8 @@ print_rx_offloads(uint64_t offloads)
 	if (offloads == 0)
 		return;
 
-	begin = __builtin_ctzll(offloads);
-	end = sizeof(offloads) * CHAR_BIT - __builtin_clzll(offloads);
+	begin = rte_ctz64(offloads);
+	end = sizeof(offloads) * CHAR_BIT - rte_clz64(offloads);
 
 	single_offload = 1ULL << begin;
 	for (bit = begin; bit < end; bit++) {
@@ -11270,8 +11312,8 @@ print_tx_offloads(uint64_t offloads)
 	if (offloads == 0)
 		return;
 
-	begin = __builtin_ctzll(offloads);
-	end = sizeof(offloads) * CHAR_BIT - __builtin_clzll(offloads);
+	begin = rte_ctz64(offloads);
+	end = sizeof(offloads) * CHAR_BIT - rte_clz64(offloads);
 
 	single_offload = 1ULL << begin;
 	for (bit = begin; bit < end; bit++) {
@@ -11973,6 +12015,9 @@ cmd_show_fec_mode_parsed(void *parsed_result,
 	case RTE_ETH_FEC_MODE_CAPA_MASK(RS):
 		strlcpy(buf, "rs", sizeof(buf));
 		break;
+	case RTE_ETH_FEC_MODE_CAPA_MASK(LLRS):
+		strlcpy(buf, "llrs", sizeof(buf));
+		break;
 	default:
 		return;
 	}
@@ -12068,7 +12113,7 @@ cmd_set_port_fec_mode_parsed(
 static cmdline_parse_inst_t cmd_set_fec_mode = {
 	.f = cmd_set_port_fec_mode_parsed,
 	.data = NULL,
-	.help_str = "set port <port_id> fec_mode auto|off|rs|baser",
+	.help_str = "set port <port_id> fec_mode auto|off|rs|baser|llrs",
 	.tokens = {
 		(void *)&cmd_set_port_fec_mode_set,
 		(void *)&cmd_set_port_fec_mode_port,
@@ -12275,12 +12320,13 @@ cmd_show_rx_tx_desc_status_parsed(void *parsed_result,
 	struct cmd_show_rx_tx_desc_status_result *res = parsed_result;
 	int rc;
 
-	if (!rte_eth_dev_is_valid_port(res->cmd_pid)) {
-		fprintf(stderr, "invalid port id %u\n", res->cmd_pid);
-		return;
-	}
-
 	if (!strcmp(res->cmd_keyword, "rxq")) {
+		if (rte_eth_rx_queue_is_valid(res->cmd_pid, res->cmd_qid) != 0) {
+			fprintf(stderr,
+				"Invalid input: port id = %d, queue id = %d\n",
+				res->cmd_pid, res->cmd_qid);
+			return;
+		}
 		rc = rte_eth_rx_descriptor_status(res->cmd_pid, res->cmd_qid,
 					     res->cmd_did);
 		if (rc < 0) {
@@ -12296,6 +12342,12 @@ cmd_show_rx_tx_desc_status_parsed(void *parsed_result,
 		else
 			printf("Desc status = UNAVAILABLE\n");
 	} else if (!strcmp(res->cmd_keyword, "txq")) {
+		if (rte_eth_tx_queue_is_valid(res->cmd_pid, res->cmd_qid) != 0) {
+			fprintf(stderr,
+				"Invalid input: port id = %d, queue id = %d\n",
+				res->cmd_pid, res->cmd_qid);
+			return;
+		}
 		rc = rte_eth_tx_descriptor_status(res->cmd_pid, res->cmd_qid,
 					     res->cmd_did);
 		if (rc < 0) {
@@ -12375,8 +12427,10 @@ cmd_show_rx_queue_desc_used_count_parsed(void *parsed_result,
 	struct cmd_show_rx_queue_desc_used_count_result *res = parsed_result;
 	int rc;
 
-	if (!rte_eth_dev_is_valid_port(res->cmd_pid)) {
-		fprintf(stderr, "invalid port id %u\n", res->cmd_pid);
+	if (rte_eth_rx_queue_is_valid(res->cmd_pid, res->cmd_qid) != 0) {
+		fprintf(stderr,
+			"Invalid input: port id = %d, queue id = %d\n",
+			res->cmd_pid, res->cmd_qid);
 		return;
 	}
 

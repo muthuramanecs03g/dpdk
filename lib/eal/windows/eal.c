@@ -12,6 +12,7 @@
 #include <rte_debug.h>
 #include <rte_bus.h>
 #include <rte_eal.h>
+#include <rte_eal_memconfig.h>
 #include <eal_memcfg.h>
 #include <rte_errno.h>
 #include <rte_lcore.h>
@@ -26,8 +27,8 @@
 #include "eal_firmware.h"
 #include "eal_hugepages.h"
 #include "eal_trace.h"
-#include "eal_log.h"
 #include "eal_windows.h"
+#include "log_internal.h"
 
 #define MEMSIZE_IF_NO_HUGE_PAGE (64ULL * 1024ULL * 1024ULL)
 
@@ -169,7 +170,7 @@ eal_parse_args(int argc, char **argv)
 			continue;
 
 		switch (opt) {
-		case 'h':
+		case OPT_HELP_NUM:
 			eal_usage(prgname);
 			exit(EXIT_SUCCESS);
 		default:
@@ -361,22 +362,36 @@ rte_eal_init(int argc, char **argv)
 	}
 
 	iova_mode = internal_conf->iova_mode;
-	if (iova_mode == RTE_IOVA_PA && !has_phys_addr) {
-		rte_eal_init_alert("Cannot use IOVA as 'PA' since physical addresses are not available");
-		rte_errno = EINVAL;
-		return -1;
-	}
 	if (iova_mode == RTE_IOVA_DC) {
 		RTE_LOG(DEBUG, EAL, "Specific IOVA mode is not requested, autodetecting\n");
 		if (has_phys_addr) {
 			RTE_LOG(DEBUG, EAL, "Selecting IOVA mode according to bus requests\n");
 			iova_mode = rte_bus_get_iommu_class();
-			if (iova_mode == RTE_IOVA_DC)
-				iova_mode = RTE_IOVA_PA;
+			if (iova_mode == RTE_IOVA_DC) {
+				if (!RTE_IOVA_IN_MBUF) {
+					iova_mode = RTE_IOVA_VA;
+					RTE_LOG(DEBUG, EAL, "IOVA as VA mode is forced by build option.\n");
+				} else	{
+					iova_mode = RTE_IOVA_PA;
+				}
+			}
 		} else {
 			iova_mode = RTE_IOVA_VA;
 		}
 	}
+
+	if (iova_mode == RTE_IOVA_PA && !has_phys_addr) {
+		rte_eal_init_alert("Cannot use IOVA as 'PA' since physical addresses are not available");
+		rte_errno = EINVAL;
+		return -1;
+	}
+
+	if (iova_mode == RTE_IOVA_PA && !RTE_IOVA_IN_MBUF) {
+		rte_eal_init_alert("Cannot use IOVA as 'PA' as it is disabled during build");
+		rte_errno = EINVAL;
+		return -1;
+	}
+
 	RTE_LOG(DEBUG, EAL, "Selected IOVA mode '%s'\n",
 		iova_mode == RTE_IOVA_PA ? "PA" : "VA");
 	rte_eal_get_configuration()->iova_mode = iova_mode;
@@ -387,13 +402,25 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 
+	rte_mcfg_mem_read_lock();
+
 	if (rte_eal_memory_init() < 0) {
+		rte_mcfg_mem_read_unlock();
 		rte_eal_init_alert("Cannot init memory");
 		rte_errno = ENOMEM;
 		return -1;
 	}
 
 	if (rte_eal_malloc_heap_init() < 0) {
+		rte_mcfg_mem_read_unlock();
+		rte_eal_init_alert("Cannot init malloc heap");
+		rte_errno = ENODEV;
+		return -1;
+	}
+
+	rte_mcfg_mem_read_unlock();
+
+	if (rte_eal_malloc_heap_populate() < 0) {
 		rte_eal_init_alert("Cannot init malloc heap");
 		rte_errno = ENODEV;
 		return -1;
@@ -416,7 +443,7 @@ rte_eal_init(int argc, char **argv)
 
 	ret = eal_thread_dump_current_affinity(cpuset, sizeof(cpuset));
 	RTE_LOG(DEBUG, EAL, "Main lcore %u is ready (tid=%zx;cpuset=[%s%s])\n",
-		config->main_lcore, (uintptr_t)pthread_self(), cpuset,
+		config->main_lcore, rte_thread_self().opaque_id, cpuset,
 		ret == 0 ? "" : "...");
 
 	RTE_LCORE_FOREACH_WORKER(i) {
@@ -441,7 +468,7 @@ rte_eal_init(int argc, char **argv)
 
 		/* Set thread name for aid in debugging. */
 		snprintf(thread_name, sizeof(thread_name),
-			"rte-worker-%d", i);
+			"dpdk-worker%d", i);
 		rte_thread_set_name(lcore_config[i].thread_id, thread_name);
 
 		ret = rte_thread_set_affinity_by_id(lcore_config[i].thread_id,

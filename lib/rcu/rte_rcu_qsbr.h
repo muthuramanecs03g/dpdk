@@ -226,7 +226,6 @@ rte_rcu_qsbr_get_memsize(uint32_t max_threads);
  *   On error - 1 with error code set in rte_errno.
  *   Possible rte_errno codes are:
  *   - EINVAL - max_threads is 0 or 'v' is NULL.
- *
  */
 int
 rte_rcu_qsbr_init(struct rte_rcu_qsbr *v, uint32_t max_threads);
@@ -462,7 +461,7 @@ rte_rcu_qsbr_start(struct rte_rcu_qsbr *v)
 	 * structure are visible to the workers before the token
 	 * update is visible.
 	 */
-	t = __atomic_add_fetch(&v->token, 1, __ATOMIC_RELEASE);
+	t = __atomic_fetch_add(&v->token, 1, __ATOMIC_RELEASE) + 1;
 
 	return t;
 }

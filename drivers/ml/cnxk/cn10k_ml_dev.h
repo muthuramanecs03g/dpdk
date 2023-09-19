@@ -38,6 +38,7 @@
 
 /* ML slow-path job flags */
 #define ML_CN10K_SP_FLAGS_OCM_NONRELOCATABLE BIT(0)
+#define ML_CN10K_SP_FLAGS_EXTENDED_LOAD_JD   BIT(1)
 
 /* Poll mode job state */
 #define ML_CN10K_POLL_JOB_START	 0
@@ -233,6 +234,22 @@ struct cn10k_ml_jd_header {
 	uint64_t *result;
 };
 
+/* Extra arguments for job descriptor */
+union cn10k_ml_jd_extended_args {
+	struct cn10k_ml_jd_extended_args_section_start {
+		/** DDR Scratch base address */
+		uint64_t ddr_scratch_base_address;
+
+		/** DDR Scratch range start */
+		uint64_t ddr_scratch_range_start;
+
+		/** DDR Scratch range end */
+		uint64_t ddr_scratch_range_end;
+
+		uint8_t rsvd[104];
+	} start;
+};
+
 /* Job descriptor structure */
 struct cn10k_ml_jd {
 	/* Job descriptor header (32 bytes) */
@@ -256,8 +273,8 @@ struct cn10k_ml_jd {
 		} fw_load;
 
 		struct cn10k_ml_jd_section_model_start {
-			/* Source model start address in DDR relative to ML_MLR_BASE */
-			uint64_t model_src_ddr_addr;
+			/* Extended arguments */
+			uint64_t extended_args;
 
 			/* Destination model start address in DDR relative to ML_MLR_BASE */
 			uint64_t model_dst_ddr_addr;
@@ -380,6 +397,89 @@ struct cn10k_ml_fw {
 	struct cn10k_ml_req *req;
 };
 
+/* Extended stats types enum */
+enum cn10k_ml_xstats_type {
+	/* Number of models loaded */
+	nb_models_loaded,
+
+	/* Number of models unloaded */
+	nb_models_unloaded,
+
+	/* Number of models started */
+	nb_models_started,
+
+	/* Number of models stopped */
+	nb_models_stopped,
+
+	/* Average inference hardware latency */
+	avg_hw_latency,
+
+	/* Minimum hardware latency */
+	min_hw_latency,
+
+	/* Maximum hardware latency */
+	max_hw_latency,
+
+	/* Average firmware latency */
+	avg_fw_latency,
+
+	/* Minimum firmware latency */
+	min_fw_latency,
+
+	/* Maximum firmware latency */
+	max_fw_latency,
+};
+
+/* Extended stats function type enum. */
+enum cn10k_ml_xstats_fn_type {
+	/* Device function */
+	CN10K_ML_XSTATS_FN_DEVICE,
+
+	/* Model function */
+	CN10K_ML_XSTATS_FN_MODEL,
+};
+
+/* Function pointer to get xstats for a type */
+typedef uint64_t (*cn10k_ml_xstats_fn)(struct rte_ml_dev *dev, uint16_t obj_idx,
+				       enum cn10k_ml_xstats_type stat);
+
+/* Extended stats entry structure */
+struct cn10k_ml_xstats_entry {
+	/* Name-ID map */
+	struct rte_ml_dev_xstats_map map;
+
+	/* xstats mode, device or model */
+	enum rte_ml_dev_xstats_mode mode;
+
+	/* Type of xstats */
+	enum cn10k_ml_xstats_type type;
+
+	/* xstats function */
+	enum cn10k_ml_xstats_fn_type fn_id;
+
+	/* Object ID, model ID for model stat type */
+	uint16_t obj_idx;
+
+	/* Allowed to reset the stat */
+	uint8_t reset_allowed;
+
+	/* An offset to be taken away to emulate resets */
+	uint64_t reset_value;
+};
+
+/* Extended stats data */
+struct cn10k_ml_xstats {
+	/* Pointer to xstats entries */
+	struct cn10k_ml_xstats_entry *entries;
+
+	/* Store num stats and offset of the stats for each model */
+	uint16_t count_per_model[ML_CN10K_MAX_MODELS];
+	uint16_t offset_for_model[ML_CN10K_MAX_MODELS];
+	uint16_t count_mode_device;
+	uint16_t count_mode_model;
+	uint16_t count;
+};
+
 /* Device private data */
 struct cn10k_ml_dev {
 	/* Device ROC */
@@ -397,8 +497,17 @@ struct cn10k_ml_dev {
 	/* Number of models loaded */
 	uint16_t nb_models_loaded;
 
-	/* xstats status */
-	bool xstats_enabled;
+	/* Number of models unloaded */
+	uint16_t nb_models_unloaded;
+
+	/* Number of models started */
+	uint16_t nb_models_started;
+
+	/* Number of models stopped */
+	uint16_t nb_models_stopped;
+
+	/* Extended stats data */
+	struct cn10k_ml_xstats xstats;
 
 	/* Enable / disable model data caching */
 	int cache_model_data;

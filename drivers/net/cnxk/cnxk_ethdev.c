@@ -81,9 +81,6 @@ cnxk_nix_inb_mode_set(struct cnxk_eth_dev *dev, bool use_inl_dev)
 {
 	struct roc_nix *nix = &dev->nix;
 
-	if (dev->inb.inl_dev == use_inl_dev)
-		return 0;
-
 	plt_nix_dbg("Security sessions(%u) still active, inl=%u!!!",
 		    dev->inb.nb_sess, !!dev->inb.inl_dev);
 
@@ -119,7 +116,7 @@ nix_security_setup(struct cnxk_eth_dev *dev)
 		/* By default pick using inline device for poll mode.
 		 * Will be overridden when event mode rq's are setup.
 		 */
-		cnxk_nix_inb_mode_set(dev, true);
+		cnxk_nix_inb_mode_set(dev, !dev->inb.no_inl_dev);
 
 		/* Allocate memory to be used as dptr for CPT ucode
 		 * WRITE_SA op.
@@ -203,6 +200,8 @@ nix_security_setup(struct cnxk_eth_dev *dev)
 			plt_err("Outbound fc sw mem alloc failed");
 			goto sa_bmap_free;
 		}
+
+		dev->outb.cpt_eng_caps = roc_nix_inl_eng_caps_get(nix);
 	}
 	return 0;
 
@@ -378,8 +377,9 @@ nix_init_flow_ctrl_config(struct rte_eth_dev *eth_dev)
 	if (rc)
 		return rc;
 
-	fc->mode = (fc_mode == ROC_NIX_FC_FULL) ? RTE_ETH_FC_FULL :
-						  RTE_ETH_FC_TX_PAUSE;
+	fc->mode = (fc_mode == ROC_NIX_FC_FULL) ? RTE_ETH_FC_FULL : RTE_ETH_FC_TX_PAUSE;
+	fc->rx_pause = (fc->mode == RTE_ETH_FC_FULL) || (fc->mode == RTE_ETH_FC_RX_PAUSE);
+	fc->tx_pause = (fc->mode == RTE_ETH_FC_FULL) || (fc->mode == RTE_ETH_FC_TX_PAUSE);
 	return rc;
 }
 
@@ -487,6 +487,8 @@ cnxk_nix_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	sq->qid = qid;
 	sq->nb_desc = nb_desc;
 	sq->max_sqe_sz = nix_sq_max_sqe_sz(dev);
+	if (sq->nb_desc >= CNXK_NIX_DEF_SQ_COUNT)
+		sq->fc_hyst_bits = 0x1;
 
 	if (nix->tx_compl_ena) {
 		sq->cqid = sq->qid + dev->nb_rxq;
@@ -628,6 +630,7 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 	struct roc_nix_rq *rq;
 	struct roc_nix_cq *cq;
 	uint16_t first_skip;
+	uint16_t wqe_skip;
 	int rc = -EINVAL;
 	size_t rxq_sz;
 	struct rte_mempool *lpb_pool = mp;
@@ -707,8 +710,15 @@ cnxk_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid,
 		rq->lpb_drop_ena = !(dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY);
 
 	/* Enable Inline IPSec on RQ, will not be used for Poll mode */
-	if (roc_nix_inl_inb_is_enabled(nix))
+	if (roc_nix_inl_inb_is_enabled(nix) && !dev->inb.inl_dev) {
 		rq->ipsech_ena = true;
+		/* WQE skip is needed when poll mode is enabled in CN10KA_B0 and above
+		 * for Inline IPsec traffic to CQ without inline device.
+		 */
+		wqe_skip = RTE_ALIGN_CEIL(sizeof(struct rte_mbuf), ROC_CACHE_LINE_SZ);
+		wqe_skip = wqe_skip / ROC_CACHE_LINE_SZ;
+		rq->wqe_skip = wqe_skip;
+	}
 
 	if (spb_pool) {
 		rq->spb_ena = 1;
@@ -1120,7 +1130,7 @@ nix_set_nop_rxtx_function(struct rte_eth_dev *eth_dev)
 {
 	/* These dummy functions are required for supporting
 	 * some applications which reconfigure queues without
-	 * stopping tx burst and rx burst threads(eg kni app)
+	 * stopping tx burst and rx burst threads.
 	 * When the queues context is saved, txq/rxqs are released
 	 * which caused app crash since rx/tx burst is still
 	 * on different lcores
@@ -1261,6 +1271,11 @@ cnxk_nix_configure(struct rte_eth_dev *eth_dev)
 	rx_cfg |= (ROC_NIX_LF_RX_CFG_DROP_RE | ROC_NIX_LF_RX_CFG_L2_LEN_ERR |
 		   ROC_NIX_LF_RX_CFG_LEN_IL4 | ROC_NIX_LF_RX_CFG_LEN_IL3 |
 		   ROC_NIX_LF_RX_CFG_LEN_OL4 | ROC_NIX_LF_RX_CFG_LEN_OL3);
+
+	rx_cfg &= (ROC_NIX_LF_RX_CFG_RX_ERROR_MASK);
+
+	if (roc_feature_nix_has_drop_re_mask())
+		rx_cfg |= (ROC_NIX_RE_CRC8_PCH | ROC_NIX_RE_MACSEC);
 
 	if (dev->rx_offloads & RTE_ETH_RX_OFFLOAD_SECURITY) {
 		rx_cfg |= ROC_NIX_LF_RX_CFG_IP6_UDP_OPT;
@@ -1875,6 +1890,9 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	/* Register callback for inline meta pool create */
 	roc_nix_inl_meta_pool_cb_register(cnxk_nix_inl_meta_pool_cb);
 
+	/* Register callback for inline meta pool create 1:N pool:aura */
+	roc_nix_inl_custom_meta_pool_cb_register(cnxk_nix_inl_custom_meta_pool_cb);
+
 	dev->eth_dev = eth_dev;
 	dev->configured = 0;
 	dev->ptype_disable = 0;
@@ -1942,6 +1960,18 @@ cnxk_eth_dev_init(struct rte_eth_dev *eth_dev)
 	rc = roc_npc_init(&dev->npc);
 	if (rc)
 		goto free_mac_addrs;
+
+	if (roc_feature_nix_has_macsec()) {
+		rc = cnxk_mcs_dev_init(dev, 0);
+		if (rc) {
+			plt_err("Failed to init MCS");
+			goto free_mac_addrs;
+		}
+		dev->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_MACSEC_STRIP;
+		dev->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_MACSEC_INSERT;
+
+		TAILQ_INIT(&dev->mcs_list);
+	}
 
 	plt_nix_dbg("Port=%d pf=%d vf=%d ver=%s hwcap=0x%" PRIx64
 		    " rxoffload_capa=0x%" PRIx64 " txoffload_capa=0x%" PRIx64,
@@ -2039,6 +2069,9 @@ cnxk_eth_dev_uninit(struct rte_eth_dev *eth_dev, bool reset)
 		eth_dev->data->rx_queues[i] = NULL;
 	}
 	eth_dev->data->nb_rx_queues = 0;
+
+	if (roc_feature_nix_has_macsec())
+		cnxk_mcs_dev_fini(dev);
 
 	/* Free security resources */
 	nix_security_release(dev);

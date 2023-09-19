@@ -751,12 +751,12 @@ delay_as_a_mt_safe_service(void *args)
 	uint32_t *lock = &params[1];
 
 	while (!*done) {
-		__atomic_add_fetch(lock, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(lock, 1, __ATOMIC_RELAXED);
 		rte_delay_us(500);
 		if (__atomic_load_n(lock, __ATOMIC_RELAXED) > 1)
 			/* pass: second core has simultaneously incremented */
 			*done = 1;
-		__atomic_sub_fetch(lock, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_sub(lock, 1, __ATOMIC_RELAXED);
 	}
 
 	return 0;
@@ -1040,7 +1040,7 @@ test_service_common(void)
 	return unit_test_suite_runner(&service_tests);
 }
 
-REGISTER_TEST_COMMAND(service_autotest, test_service_common);
+REGISTER_FAST_TEST(service_autotest, true, true, test_service_common);
 
 static struct unit_test_suite service_perf_tests  = {
 	.suite_name = "service core performance test suite",
@@ -1062,4 +1062,4 @@ test_service_perf(void)
 	return unit_test_suite_runner(&service_perf_tests);
 }
 
-REGISTER_TEST_COMMAND(service_perf_autotest, test_service_perf);
+REGISTER_PERF_TEST(service_perf_autotest, test_service_perf);

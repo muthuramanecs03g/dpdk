@@ -26,6 +26,7 @@
 #include <rte_memory.h>
 #include <rte_launch.h>
 #include <rte_eal.h>
+#include <rte_eal_memconfig.h>
 #include <rte_errno.h>
 #include <rte_per_lcore.h>
 #include <rte_lcore.h>
@@ -463,7 +464,7 @@ eal_parse_args(int argc, char **argv)
 			}
 			break;
 		}
-		case 'h':
+		case OPT_HELP_NUM:
 			eal_usage(prgname);
 			exit(EXIT_SUCCESS);
 		default:
@@ -693,22 +694,36 @@ rte_eal_init(int argc, char **argv)
 	 */
 	has_phys_addr = internal_conf->no_hugetlbfs == 0;
 	iova_mode = internal_conf->iova_mode;
-	if (iova_mode == RTE_IOVA_PA && !has_phys_addr) {
-		rte_eal_init_alert("Cannot use IOVA as 'PA' since physical addresses are not available");
-		rte_errno = EINVAL;
-		return -1;
-	}
 	if (iova_mode == RTE_IOVA_DC) {
 		RTE_LOG(DEBUG, EAL, "Specific IOVA mode is not requested, autodetecting\n");
 		if (has_phys_addr) {
 			RTE_LOG(DEBUG, EAL, "Selecting IOVA mode according to bus requests\n");
 			iova_mode = rte_bus_get_iommu_class();
-			if (iova_mode == RTE_IOVA_DC)
-				iova_mode = RTE_IOVA_PA;
+			if (iova_mode == RTE_IOVA_DC) {
+				if (!RTE_IOVA_IN_MBUF) {
+					iova_mode = RTE_IOVA_VA;
+					RTE_LOG(DEBUG, EAL, "IOVA as VA mode is forced by build option.\n");
+				} else	{
+					iova_mode = RTE_IOVA_PA;
+				}
+			}
 		} else {
 			iova_mode = RTE_IOVA_VA;
 		}
 	}
+
+	if (iova_mode == RTE_IOVA_PA && !has_phys_addr) {
+		rte_eal_init_alert("Cannot use IOVA as 'PA' since physical addresses are not available");
+		rte_errno = EINVAL;
+		return -1;
+	}
+
+	if (iova_mode == RTE_IOVA_PA && !RTE_IOVA_IN_MBUF) {
+		rte_eal_init_alert("Cannot use IOVA as 'PA' as it is disabled during build");
+		rte_errno = EINVAL;
+		return -1;
+	}
+
 	rte_eal_get_configuration()->iova_mode = iova_mode;
 	RTE_LOG(INFO, EAL, "Selected IOVA mode '%s'\n",
 		rte_eal_iova_mode() == RTE_IOVA_PA ? "PA" : "VA");
@@ -754,13 +769,25 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 
+	rte_mcfg_mem_read_lock();
+
 	if (rte_eal_memory_init() < 0) {
+		rte_mcfg_mem_read_unlock();
 		rte_eal_init_alert("Cannot init memory");
 		rte_errno = ENOMEM;
 		return -1;
 	}
 
 	if (rte_eal_malloc_heap_init() < 0) {
+		rte_mcfg_mem_read_unlock();
+		rte_eal_init_alert("Cannot init malloc heap");
+		rte_errno = ENODEV;
+		return -1;
+	}
+
+	rte_mcfg_mem_read_unlock();
+
+	if (rte_eal_malloc_heap_populate() < 0) {
 		rte_eal_init_alert("Cannot init malloc heap");
 		rte_errno = ENODEV;
 		return -1;
@@ -816,7 +843,7 @@ rte_eal_init(int argc, char **argv)
 
 		/* Set thread_name for aid in debugging. */
 		snprintf(thread_name, sizeof(thread_name),
-				"rte-worker-%d", i);
+				"dpdk-worker%d", i);
 		rte_thread_set_name(lcore_config[i].thread_id, thread_name);
 
 		ret = rte_thread_set_affinity_by_id(lcore_config[i].thread_id,
@@ -871,13 +898,9 @@ rte_eal_init(int argc, char **argv)
 		return -1;
 	}
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY && !internal_conf->no_telemetry) {
-		int tlog = rte_log_register_type_and_pick_level(
-				"lib.telemetry", RTE_LOG_WARNING);
-		if (tlog < 0)
-			tlog = RTE_LOGTYPE_EAL;
 		if (rte_telemetry_init(rte_eal_get_runtime_dir(),
 				rte_version(),
-				&internal_conf->ctrl_cpuset, rte_log, tlog) != 0)
+				&internal_conf->ctrl_cpuset) != 0)
 			return -1;
 	}
 
@@ -889,6 +912,16 @@ rte_eal_init(int argc, char **argv)
 int
 rte_eal_cleanup(void)
 {
+	static uint32_t run_once;
+	uint32_t has_run = 0;
+
+	if (!__atomic_compare_exchange_n(&run_once, &has_run, 1, 0,
+			__ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+		RTE_LOG(WARNING, EAL, "Already called cleanup\n");
+		rte_errno = EALREADY;
+		return -1;
+	}
+
 	struct internal_config *internal_conf =
 		eal_get_internal_configuration();
 	rte_service_finalize();

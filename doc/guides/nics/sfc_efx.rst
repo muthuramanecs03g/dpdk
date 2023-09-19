@@ -114,9 +114,15 @@ SFC EFX PMD has support for:
 
 - Loopback
 
+- Configurable Rx CRC stripping (if running firmware variant supports it and
+  if NIC is configured with single PF per port and without VFs, otherwise
+  always stripped)
+
 - SR-IOV PF
 
 - Port representors (see :ref: switch_representation)
+
+- VLAN stripping (if running firmware variant supports it)
 
 
 Non-supported Features
@@ -126,13 +132,9 @@ The features not yet supported include:
 
 - Priority-based flow control
 
-- Configurable RX CRC stripping (always stripped)
-
 - Header split on receive
 
 - VLAN filtering
-
-- VLAN stripping
 
 - LRO
 
@@ -270,9 +272,17 @@ Supported actions (***transfer*** rules):
 
 - OF_VLAN_SET_PCP
 
+- SET_IPV4_DST
+
+- SET_IPV4_SRC
+
 - SET_MAC_DST
 
 - SET_MAC_SRC
+
+- SET_TP_DST
+
+- SET_TP_SRC
 
 - OF_DEC_NW_TTL
 
@@ -297,6 +307,8 @@ Supported actions (***transfer*** rules):
 - PORT_ID
 
 - COUNT
+
+- INDIRECT
 
 - DROP
 

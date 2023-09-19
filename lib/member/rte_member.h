@@ -213,7 +213,6 @@ struct rte_member_setsum {
  * Parameters used when create the set summary table. Currently user can
  * specify two types of setsummary: HT based and vBF. For HT based, user can
  * specify cache or non-cache mode. Here is a table to describe some differences
- *
  */
 struct rte_member_parameters {
 	const char *name;			/**< Name of the hash. */
@@ -314,6 +313,7 @@ struct rte_member_parameters {
 	 * for bucket location.
 	 * For vBF type, these two hashes and their combinations are used as
 	 * hash locations to index the bit array.
+	 * For Sketch type, these seeds are not used.
 	 */
 	uint32_t prim_hash_seed;
 

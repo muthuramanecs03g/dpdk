@@ -825,10 +825,10 @@ rte_eth_rss_hf_refine(uint64_t rss_hf)
 #define RTE_ETH_VLAN_ID_MAX          0x0FFF /**< VLAN ID is in lower 12 bits*/
 /**@}*/
 
-/* Definitions used for receive MAC address   */
+/* Definitions used for receive MAC address */
 #define RTE_ETH_NUM_RECEIVE_MAC_ADDR   128 /**< Maximum nb. of receive mac addr. */
 
-/* Definitions used for unicast hash  */
+/* Definitions used for unicast hash */
 #define RTE_ETH_VMDQ_NUM_UC_HASH_ARRAY 128 /**< Maximum nb. of UC hash array. */
 
 /**@{@name VMDq Rx mode
@@ -1916,6 +1916,7 @@ enum rte_eth_fec_mode {
 	RTE_ETH_FEC_AUTO,	    /**< FEC autonegotiation modes */
 	RTE_ETH_FEC_BASER,          /**< FEC using common algorithm */
 	RTE_ETH_FEC_RS,             /**< FEC using RS algorithm */
+	RTE_ETH_FEC_LLRS,           /**< FEC using LLRS algorithm */
 };
 
 /* Translate from FEC mode to FEC capa */
@@ -2035,8 +2036,9 @@ struct rte_eth_dev_owner {
 #define RTE_ETH_DEV_FLOW_OPS_THREAD_SAFE  RTE_BIT32(0)
 /** Device supports link state interrupt */
 #define RTE_ETH_DEV_INTR_LSC              RTE_BIT32(1)
-/** Device is a bonded slave */
-#define RTE_ETH_DEV_BONDED_SLAVE          RTE_BIT32(2)
+/** Device is a bonding member */
+#define RTE_ETH_DEV_BONDING_MEMBER        RTE_BIT32(2)
+#define RTE_ETH_DEV_BONDED_SLAVE RTE_DEPRECATED(RTE_ETH_DEV_BONDED_SLAVE) RTE_ETH_DEV_BONDING_MEMBER
 /** Device supports device removal interrupt */
 #define RTE_ETH_DEV_INTR_RMV              RTE_BIT32(3)
 /** Device is port representor */
@@ -2664,6 +2666,44 @@ int rte_eth_dev_socket_id(uint16_t port_id);
  *   - 1 if device is attached
  */
 int rte_eth_dev_is_valid_port(uint16_t port_id);
+
+/**
+ * @warning
+ * @b EXPERIMENTAL: this API may change, or be removed, without prior notice.
+ *
+ * Check if Rx queue is valid.
+ * If the queue has been setup, it is considered valid.
+ *
+ * @param port_id
+ *   The port identifier of the Ethernet device.
+ * @param queue_id
+ *   The index of the receive queue.
+ * @return
+ *   - -ENODEV: if port_id is invalid.
+ *   - -EINVAL: if queue_id is out of range or queue has not been setup.
+ *   - 0 if Rx queue is valid.
+ */
+__rte_experimental
+int rte_eth_rx_queue_is_valid(uint16_t port_id, uint16_t queue_id);
+
+/**
+ * @warning
+ * @b EXPERIMENTAL: this API may change, or be removed, without prior notice.
+ *
+ * Check if Tx queue is valid.
+ * If the queue has been setup, it is considered valid.
+ *
+ * @param port_id
+ *   The port identifier of the Ethernet device.
+ * @param queue_id
+ *   The index of the transmit queue.
+ * @return
+ *   - -ENODEV: if port_id is invalid.
+ *   - -EINVAL: if queue_id is out of range or queue has not been setup.
+ *   - 0 if Tx queue is valid.
+ */
+__rte_experimental
+int rte_eth_tx_queue_is_valid(uint16_t port_id, uint16_t queue_id);
 
 /**
  * Start specified Rx queue of a port. It is used when rx_deferred_start
@@ -4204,10 +4244,7 @@ int rte_eth_fec_get_capability(uint16_t port_id,
  * @param port_id
  *   The port identifier of the Ethernet device.
  * @param fec_capa
- *   A bitmask of enabled FEC modes. If AUTO bit is set, other
- *   bits specify FEC modes which may be negotiated. If AUTO
- *   bit is clear, specify FEC modes to be used (only one valid
- *   mode per speed may be set).
+ *   A bitmask with the current FEC mode.
  * @return
  *   - (0) if successful.
  *   - (-ENOTSUP) if underlying hardware OR driver doesn't support.
@@ -4227,10 +4264,13 @@ int rte_eth_fec_get(uint16_t port_id, uint32_t *fec_capa);
  * @param port_id
  *   The port identifier of the Ethernet device.
  * @param fec_capa
- *   A bitmask of allowed FEC modes. If AUTO bit is set, other
- *   bits specify FEC modes which may be negotiated. If AUTO
- *   bit is clear, specify FEC modes to be used (only one valid
- *   mode per speed may be set).
+ *   A bitmask of allowed FEC modes.
+ *   If only the AUTO bit is set, the decision on which FEC
+ *   mode to use will be made by HW/FW or driver.
+ *   If the AUTO bit is set with some FEC modes, only specified
+ *   FEC modes can be set.
+ *   If AUTO bit is clear, specify FEC mode to be used
+ *   (only one valid mode per speed may be set).
  * @return
  *   - (0) if successful.
  *   - (-EINVAL) if the FEC mode is not valid.
@@ -4381,6 +4421,9 @@ int rte_eth_dev_mac_addr_remove(uint16_t port_id,
 
 /**
  * Set the default MAC address.
+ * It replaces the address at index 0 of the MAC address list.
+ * If the address was already in the MAC address list,
+ * please remove it first.
  *
  * @param port_id
  *   The port identifier of the Ethernet device.
@@ -4391,6 +4434,7 @@ int rte_eth_dev_mac_addr_remove(uint16_t port_id,
  *   - (-ENOTSUP) if hardware doesn't support.
  *   - (-ENODEV) if *port* invalid.
  *   - (-EINVAL) if MAC address is invalid.
+ *   - (-EEXIST) if MAC address was already in the address list.
  */
 int rte_eth_dev_default_mac_addr_set(uint16_t port_id,
 		struct rte_ether_addr *mac_addr);
@@ -4453,7 +4497,7 @@ int rte_eth_dev_rss_reta_query(uint16_t port_id,
  * @return
  *   - (0) if successful.
  *   - (-ENOTSUP) if hardware doesn't support.
-  *  - (-ENODEV) if *port_id* invalid.
+ *   - (-ENODEV) if *port_id* invalid.
  *   - (-EIO) if device is removed.
  *   - (-EINVAL) if bad parameter.
  */
@@ -4474,7 +4518,7 @@ int rte_eth_dev_uc_hash_table_set(uint16_t port_id, struct rte_ether_addr *addr,
  * @return
  *   - (0) if successful.
  *   - (-ENOTSUP) if hardware doesn't support.
-  *  - (-ENODEV) if *port_id* invalid.
+ *   - (-ENODEV) if *port_id* invalid.
  *   - (-EIO) if device is removed.
  *   - (-EINVAL) if bad parameter.
  */
@@ -5188,38 +5232,39 @@ int
 rte_eth_read_clock(uint16_t port_id, uint64_t *clock);
 
 /**
-* Get the port ID from device name. The device name should be specified
-* as below:
-* - PCIe address (Domain:Bus:Device.Function), for example- 0000:2:00.0
-* - SoC device name, for example- fsl-gmac0
-* - vdev dpdk name, for example- net_[pcap0|null0|tap0]
-*
-* @param name
-*  pci address or name of the device
-* @param port_id
-*   pointer to port identifier of the device
-* @return
-*   - (0) if successful and port_id is filled.
-*   - (-ENODEV or -EINVAL) on failure.
-*/
+ * Get the port ID from device name.
+ * The device name should be specified as below:
+ * - PCIe address (Domain:Bus:Device.Function), for example- 0000:2:00.0
+ * - SoC device name, for example- fsl-gmac0
+ * - vdev dpdk name, for example- net_[pcap0|null0|tap0]
+ *
+ * @param name
+ *   PCI address or name of the device.
+ * @param port_id
+ *   Pointer to port identifier of the device.
+ * @return
+ *   - (0) if successful and port_id is filled.
+ *   - (-ENODEV or -EINVAL) on failure.
+ */
 int
 rte_eth_dev_get_port_by_name(const char *name, uint16_t *port_id);
 
 /**
-* Get the device name from port ID. The device name is specified as below:
-* - PCIe address (Domain:Bus:Device.Function), for example- 0000:02:00.0
-* - SoC device name, for example- fsl-gmac0
-* - vdev dpdk name, for example- net_[pcap0|null0|tun0|tap0]
-*
-* @param port_id
-*   Port identifier of the device.
-* @param name
-*   Buffer of size RTE_ETH_NAME_MAX_LEN to store the name.
-* @return
-*   - (0) if successful.
-*   - (-ENODEV) if *port_id* is invalid.
-*   - (-EINVAL) on failure.
-*/
+ * Get the device name from port ID.
+ * The device name is specified as below:
+ * - PCIe address (Domain:Bus:Device.Function), for example- 0000:02:00.0
+ * - SoC device name, for example- fsl-gmac0
+ * - vdev dpdk name, for example- net_[pcap0|null0|tun0|tap0]
+ *
+ * @param port_id
+ *   Port identifier of the device.
+ * @param name
+ *   Buffer of size RTE_ETH_NAME_MAX_LEN to store the name.
+ * @return
+ *   - (0) if successful.
+ *   - (-ENODEV) if *port_id* is invalid.
+ *   - (-EINVAL) on failure.
+ */
 int
 rte_eth_dev_get_name_by_port(uint16_t port_id, char *name);
 
@@ -6329,7 +6374,6 @@ rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
  *   - EINVAL: offload flags are not correctly set
  *   - ENOTSUP: the offload feature is not supported by the hardware
  *   - ENODEV: if *port_id* is invalid (with debug enabled only)
- *
  */
 
 #ifndef RTE_ETHDEV_TX_PREPARE_NOOP

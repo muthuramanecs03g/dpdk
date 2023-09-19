@@ -65,7 +65,7 @@ struct rte_cryptodev_data {
 	/** Device ID for this instance */
 	uint8_t dev_id;
 	/** Socket ID where memory is allocated */
-	uint8_t socket_id;
+	int socket_id;
 	/** Unique identifier name */
 	char name[RTE_CRYPTODEV_NAME_MAX_LEN];
 
@@ -390,7 +390,6 @@ typedef void (*cryptodev_asym_clear_session_t)(struct rte_cryptodev *dev,
  *
  * @return
  *  - Returns number of successfully processed packets.
- *
  */
 typedef uint32_t (*cryptodev_sym_cpu_crypto_process_t)
 	(struct rte_cryptodev *dev, struct rte_cryptodev_sym_session *sess,
@@ -535,7 +534,7 @@ rte_cryptodev_pmd_allocate(const char *name, int socket_id);
  *   - 0 on success, negative on error
  */
 __rte_internal
-extern int
+int
 rte_cryptodev_pmd_release_device(struct rte_cryptodev *cryptodev);
 
 
@@ -684,7 +683,7 @@ rte_cryptodev_session_event_mdata_get(struct rte_crypto_op *op);
  * @internal
  * Cryptodev asymmetric crypto session.
  */
-RTE_STD_C11 struct rte_cryptodev_asym_session {
+struct rte_cryptodev_asym_session {
 	uint8_t driver_id;
 	/**< Session driver ID. */
 	uint16_t max_priv_data_sz;

@@ -109,7 +109,6 @@ struct rte_crypto_param_range {
 struct rte_cryptodev_symmetric_capability {
 	enum rte_crypto_sym_xform_type xform_type;
 	/**< Transform type : Authentication / Cipher / AEAD */
-	RTE_STD_C11
 	union {
 		struct {
 			enum rte_crypto_auth_algorithm algo;
@@ -162,7 +161,6 @@ struct rte_cryptodev_symmetric_capability {
 
 /**
  * Asymmetric Xform Crypto Capability
- *
  */
 struct rte_cryptodev_asymmetric_xform_capability {
 	enum rte_crypto_asym_xform_type xform_type;
@@ -188,7 +186,6 @@ struct rte_cryptodev_asymmetric_xform_capability {
 
 /**
  * Asymmetric Crypto Capability
- *
  */
 struct rte_cryptodev_asymmetric_capability {
 	struct rte_cryptodev_asymmetric_xform_capability xform_capa;
@@ -200,7 +197,6 @@ struct rte_cryptodev_capabilities {
 	enum rte_crypto_op_type op;
 	/**< Operation type */
 
-	RTE_STD_C11
 	union {
 		struct rte_cryptodev_symmetric_capability sym;
 		/**< Symmetric operation capability parameters */
@@ -222,7 +218,6 @@ struct rte_cryptodev_sym_capability_idx {
 /**
  * Structure used to describe asymmetric crypto xforms
  * Each xform maps to one asym algorithm.
- *
  */
 struct rte_cryptodev_asym_capability_idx {
 	enum rte_crypto_asym_xform_type type;
@@ -548,8 +543,7 @@ rte_cryptodev_asym_get_xform_string(enum rte_crypto_asym_xform_type xform_enum);
  * @return
  *   The name of this flag, or NULL if it's not a valid feature flag.
  */
-
-extern const char *
+const char *
 rte_cryptodev_get_feature_name(uint64_t flag);
 
 /**  Crypto device information */
@@ -665,7 +659,7 @@ struct rte_cryptodev_stats {
  *   - Returns crypto device identifier on success.
  *   - Return -1 on failure to find named crypto device.
  */
-extern int
+int
 rte_cryptodev_get_dev_id(const char *name);
 
 /**
@@ -678,7 +672,7 @@ rte_cryptodev_get_dev_id(const char *name);
  *   - Returns crypto device name.
  *   - Returns NULL if crypto device is not present.
  */
-extern const char *
+const char *
 rte_cryptodev_name_get(uint8_t dev_id);
 
 /**
@@ -688,7 +682,7 @@ rte_cryptodev_name_get(uint8_t dev_id);
  * @return
  *   - The total number of usable crypto devices.
  */
-extern uint8_t
+uint8_t
 rte_cryptodev_count(void);
 
 /**
@@ -699,7 +693,7 @@ rte_cryptodev_count(void);
  * @return
  *   Returns number of crypto device.
  */
-extern uint8_t
+uint8_t
 rte_cryptodev_device_count_by_driver(uint8_t driver_id);
 
 /**
@@ -726,7 +720,7 @@ rte_cryptodev_devices_get(const char *driver_name, uint8_t *devices,
  *   a default of zero if the socket could not be determined.
  *   -1 if returned is the dev_id value is out of range.
  */
-extern int
+int
 rte_cryptodev_socket_id(uint8_t dev_id);
 
 /** Crypto device configuration structure */
@@ -759,7 +753,7 @@ struct rte_cryptodev_config {
  *   - 0: Success, device configured.
  *   - <0: Error code returned by the driver configuration function.
  */
-extern int
+int
 rte_cryptodev_configure(uint8_t dev_id, struct rte_cryptodev_config *config);
 
 /**
@@ -777,7 +771,7 @@ rte_cryptodev_configure(uint8_t dev_id, struct rte_cryptodev_config *config);
  *   - 0: Success, device started.
  *   - <0: Error code of the driver device start function.
  */
-extern int
+int
 rte_cryptodev_start(uint8_t dev_id);
 
 /**
@@ -786,7 +780,7 @@ rte_cryptodev_start(uint8_t dev_id);
  *
  * @param	dev_id		The identifier of the device.
  */
-extern void
+void
 rte_cryptodev_stop(uint8_t dev_id);
 
 /**
@@ -798,7 +792,7 @@ rte_cryptodev_stop(uint8_t dev_id);
  *  - 0 on successfully closing device
  *  - <0 on failure to close device
  */
-extern int
+int
 rte_cryptodev_close(uint8_t dev_id);
 
 /**
@@ -822,7 +816,7 @@ rte_cryptodev_close(uint8_t dev_id);
  *   - 0: Success, queue pair correctly set up.
  *   - <0: Queue pair configuration failed
  */
-extern int
+int
 rte_cryptodev_queue_pair_setup(uint8_t dev_id, uint16_t queue_pair_id,
 		const struct rte_cryptodev_qp_conf *qp_conf, int socket_id);
 
@@ -850,7 +844,7 @@ rte_cryptodev_get_qp_status(uint8_t dev_id, uint16_t queue_pair_id);
  * @return
  *   - The number of configured queue pairs.
  */
-extern uint16_t
+uint16_t
 rte_cryptodev_queue_pair_count(uint8_t dev_id);
 
 
@@ -865,7 +859,7 @@ rte_cryptodev_queue_pair_count(uint8_t dev_id);
  *   - Zero if successful.
  *   - Non-zero otherwise.
  */
-extern int
+int
 rte_cryptodev_stats_get(uint8_t dev_id, struct rte_cryptodev_stats *stats);
 
 /**
@@ -873,7 +867,7 @@ rte_cryptodev_stats_get(uint8_t dev_id, struct rte_cryptodev_stats *stats);
  *
  * @param	dev_id		The identifier of the device.
  */
-extern void
+void
 rte_cryptodev_stats_reset(uint8_t dev_id);
 
 /**
@@ -889,7 +883,7 @@ rte_cryptodev_stats_reset(uint8_t dev_id);
  * the last valid element has it's op field set to
  * RTE_CRYPTO_OP_TYPE_UNDEFINED.
  */
-extern void
+void
 rte_cryptodev_info_get(uint8_t dev_id, struct rte_cryptodev_info *dev_info);
 
 
@@ -906,7 +900,7 @@ rte_cryptodev_info_get(uint8_t dev_id, struct rte_cryptodev_info *dev_info);
  *  - On success, zero.
  *  - On failure, a negative value.
  */
-extern int
+int
 rte_cryptodev_callback_register(uint8_t dev_id,
 		enum rte_cryptodev_event_type event,
 		rte_cryptodev_cb_fn cb_fn, void *cb_arg);
@@ -924,7 +918,7 @@ rte_cryptodev_callback_register(uint8_t dev_id,
  *  - On success, zero.
  *  - On failure, a negative value.
  */
-extern int
+int
 rte_cryptodev_callback_unregister(uint8_t dev_id,
 		enum rte_cryptodev_event_type event,
 		rte_cryptodev_cb_fn cb_fn, void *cb_arg);
@@ -1048,11 +1042,14 @@ rte_cryptodev_asym_session_pool_create(const char *name, uint32_t nb_elts,
  * @param   dev_id   ID of device that we want the session to be used on
  * @param   xforms   Symmetric crypto transform operations to apply on flow
  *                   processed with this session
- * @param   mp       Mempool where the private data is allocated.
+ * @param   mp       Mempool to allocate symmetric session objects from
  *
  * @return
  *  - On success return pointer to sym-session.
- *  - On failure returns NULL.
+ *  - On failure returns NULL and rte_errno is set to the error code:
+ *    - EINVAL on invalid arguments.
+ *    - ENOMEM on memory error for session allocation.
+ *    - ENOTSUP if device doesn't support session configuration.
  */
 void *
 rte_cryptodev_sym_session_create(uint8_t dev_id,
@@ -1407,7 +1404,7 @@ typedef int (*cryptodev_sym_raw_operation_done_t)(void *qp, uint8_t *drv_ctx,
  * @param	user_data	Dequeued user data.
  * @return
  *  - The number of operations to be dequeued.
- **/
+ */
 typedef uint32_t (*rte_cryptodev_raw_get_dequeue_count_t)(void *user_data);
 
 /**
@@ -1417,7 +1414,7 @@ typedef uint32_t (*rte_cryptodev_raw_get_dequeue_count_t)(void *user_data);
  * @param	user_data	Dequeued user data.
  * @param	index		Index number of the processed descriptor.
  * @param	is_op_success	Operation status provided by the driver.
- **/
+ */
 typedef void (*rte_cryptodev_raw_post_dequeue_t)(void *user_data,
 	uint32_t index, uint8_t is_op_success);
 
@@ -1519,18 +1516,13 @@ struct rte_crypto_raw_dp_ctx {
 /**
  * Configure raw data-path context data.
  *
- * NOTE:
- * After the context data is configured, the user should call
- * rte_cryptodev_raw_attach_session() before using it in
- * rte_cryptodev_raw_enqueue/dequeue function call.
- *
  * @param	dev_id		The device identifier.
  * @param	qp_id		The index of the queue pair from which to
  *				retrieve processed packets. The value must be
  *				in the range [0, nb_queue_pair - 1] previously
  *				supplied to rte_cryptodev_configure().
  * @param	ctx		The raw data-path context data.
- * @param	sess_type	session type.
+ * @param	sess_type	Session type.
  * @param	session_ctx	Session context data.
  * @param	is_update	Set 0 if it is to initialize the ctx.
  *				Set 1 if ctx is initialized and only to update
@@ -1538,6 +1530,9 @@ struct rte_crypto_raw_dp_ctx {
  * @return
  *   - On success return 0.
  *   - On failure return negative integer.
+ *     - -EINVAL if input parameters are invalid.
+ *     - -ENOTSUP if crypto device does not support raw DP operations with the
+ *        provided session.
  */
 __rte_experimental
 int

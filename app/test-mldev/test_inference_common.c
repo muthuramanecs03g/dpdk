@@ -20,35 +20,24 @@
 
 #define ML_TEST_READ_TYPE(buffer, type) (*((type *)buffer))
 
-#define ML_TEST_CHECK_OUTPUT(output, reference, tolerance)                                         \
+#define ML_TEST_CHECK_OUTPUT(output, reference, tolerance) \
 	(((float)output - (float)reference) <= (((float)reference * tolerance) / 100.0))
 
-#define ML_OPEN_WRITE_GET_ERR(name, buffer, size, err)                                             \
-	do {                                                                                       \
-		FILE *fp = fopen(name, "w+");                                                      \
-		if (fp == NULL) {                                                                  \
-			ml_err("Unable to create file: %s, error: %s", name, strerror(errno));     \
-			err = true;                                                                \
-		} else {                                                                           \
-			if (fwrite(buffer, 1, size, fp) != size) {                                 \
-				ml_err("Error writing output, file: %s, error: %s", name,          \
-				       strerror(errno));                                           \
-				err = true;                                                        \
-			}                                                                          \
-			fclose(fp);                                                                \
-		}                                                                                  \
+#define ML_OPEN_WRITE_GET_ERR(name, buffer, size, err) \
+	do { \
+		FILE *fp = fopen(name, "w+"); \
+		if (fp == NULL) { \
+			ml_err("Unable to create file: %s, error: %s", name, strerror(errno)); \
+			err = true; \
+		} else { \
+			if (fwrite(buffer, 1, size, fp) != size) { \
+				ml_err("Error writing output, file: %s, error: %s", name, \
+				       strerror(errno)); \
+				err = true; \
+			} \
+			fclose(fp); \
+		} \
 	} while (0)
-
-static void
-print_line(uint16_t len)
-{
-	uint16_t i;
-
-	for (i = 0; i < len; i++)
-		printf("-");
-
-	printf("\n");
-}
 
 /* Enqueue inference requests with burst size equal to 1 */
 static int
@@ -313,19 +302,19 @@ test_inference_cap_check(struct ml_options *opt)
 	rte_ml_dev_info_get(opt->dev_id, &dev_info);
 
 	if (opt->queue_pairs > dev_info.max_queue_pairs) {
-		ml_err("Insufficient capabilities: queue_pairs = %u, max_queue_pairs = %u",
+		ml_err("Insufficient capabilities: queue_pairs = %u > (max_queue_pairs = %u)",
 		       opt->queue_pairs, dev_info.max_queue_pairs);
 		return false;
 	}
 
 	if (opt->queue_size > dev_info.max_desc) {
-		ml_err("Insufficient capabilities: queue_size = %u, max_desc = %u", opt->queue_size,
-		       dev_info.max_desc);
+		ml_err("Insufficient capabilities: queue_size = %u > (max_desc = %u)",
+		       opt->queue_size, dev_info.max_desc);
 		return false;
 	}
 
 	if (opt->nb_filelist > dev_info.max_models) {
-		ml_err("Insufficient capabilities:  Filelist count exceeded device limit, count = %u (max limit = %u)",
+		ml_err("Insufficient capabilities:  Filelist count exceeded device limit, count = %u > (max limit = %u)",
 		       opt->nb_filelist, dev_info.max_models);
 		return false;
 	}
@@ -343,6 +332,12 @@ test_inference_opt_check(struct ml_options *opt)
 	ret = ml_test_opt_check(opt);
 	if (ret != 0)
 		return ret;
+
+	/* check for at least one filelist */
+	if (opt->nb_filelist == 0) {
+		ml_err("Filelist empty, need at least one filelist to run the test\n");
+		return -EINVAL;
+	}
 
 	/* check file availability */
 	for (i = 0; i < opt->nb_filelist; i++) {
@@ -413,7 +408,7 @@ test_inference_opt_dump(struct ml_options *opt)
 	ml_dump("stats", "%s", (opt->stats ? "true" : "false"));
 
 	if (opt->batches == 0)
-		ml_dump("batches", "%u (default)", opt->batches);
+		ml_dump("batches", "%u (default batch size)", opt->batches);
 	else
 		ml_dump("batches", "%u", opt->batches);
 
@@ -604,10 +599,10 @@ ml_inference_iomem_setup(struct ml_test *test, struct ml_options *opt, uint16_t 
 	char mp_name[RTE_MEMPOOL_NAMESIZE];
 	const struct rte_memzone *mz;
 	uint64_t nb_buffers;
+	char *buffer = NULL;
 	uint32_t buff_size;
 	uint32_t mz_size;
-	uint32_t fsize;
-	FILE *fp;
+	size_t fsize;
 	int ret;
 
 	/* get input buffer size */
@@ -647,51 +642,36 @@ ml_inference_iomem_setup(struct ml_test *test, struct ml_options *opt, uint16_t 
 		t->model[fid].reference = NULL;
 
 	/* load input file */
-	fp = fopen(opt->filelist[fid].input, "r");
-	if (fp == NULL) {
-		ml_err("Failed to open input file : %s\n", opt->filelist[fid].input);
-		ret = -errno;
+	ret = ml_read_file(opt->filelist[fid].input, &fsize, &buffer);
+	if (ret != 0)
 		goto error;
-	}
 
-	fseek(fp, 0, SEEK_END);
-	fsize = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
-	if (fsize != t->model[fid].inp_dsize) {
-		ml_err("Invalid input file, size = %u (expected size = %" PRIu64 ")\n", fsize,
+	if (fsize == t->model[fid].inp_dsize) {
+		rte_memcpy(t->model[fid].input, buffer, fsize);
+		free(buffer);
+	} else {
+		ml_err("Invalid input file, size = %zu (expected size = %" PRIu64 ")\n", fsize,
 		       t->model[fid].inp_dsize);
 		ret = -EINVAL;
-		fclose(fp);
 		goto error;
 	}
-
-	if (fread(t->model[fid].input, 1, t->model[fid].inp_dsize, fp) != t->model[fid].inp_dsize) {
-		ml_err("Failed to read input file : %s\n", opt->filelist[fid].input);
-		ret = -errno;
-		fclose(fp);
-		goto error;
-	}
-	fclose(fp);
 
 	/* load reference file */
+	buffer = NULL;
 	if (t->model[fid].reference != NULL) {
-		fp = fopen(opt->filelist[fid].reference, "r");
-		if (fp == NULL) {
-			ml_err("Failed to open reference file : %s\n",
-			       opt->filelist[fid].reference);
-			ret = -errno;
+		ret = ml_read_file(opt->filelist[fid].reference, &fsize, &buffer);
+		if (ret != 0)
 			goto error;
-		}
 
-		if (fread(t->model[fid].reference, 1, t->model[fid].out_dsize, fp) !=
-		    t->model[fid].out_dsize) {
-			ml_err("Failed to read reference file : %s\n",
-			       opt->filelist[fid].reference);
-			ret = -errno;
-			fclose(fp);
+		if (fsize == t->model[fid].out_dsize) {
+			rte_memcpy(t->model[fid].reference, buffer, fsize);
+			free(buffer);
+		} else {
+			ml_err("Invalid reference file, size = %zu (expected size = %" PRIu64 ")\n",
+			       fsize, t->model[fid].out_dsize);
+			ret = -EINVAL;
 			goto error;
 		}
-		fclose(fp);
 	}
 
 	/* create mempool for quantized input and output buffers. ml_request_initialize is
@@ -722,6 +702,8 @@ error:
 		rte_mempool_free(t->model[fid].io_pool);
 		t->model[fid].io_pool = NULL;
 	}
+
+	free(buffer);
 
 	return ret;
 }
@@ -885,9 +867,6 @@ next_element:
 			goto next_output;
 	}
 done:
-	if (match)
-		t->nb_valid++;
-
 	return match;
 }
 
@@ -910,10 +889,8 @@ ml_request_finish(struct rte_mempool *mp, void *opaque, void *obj, unsigned int 
 	rte_ml_io_dequantize(t->cmn.opt->dev_id, model->id, t->model[req->fid].nb_batches,
 			     req->output, model->output);
 
-	if (model->reference == NULL) {
-		t->nb_valid++;
+	if (model->reference == NULL)
 		goto dump_output_pass;
-	}
 
 	if (!ml_inference_validation(opaque, req))
 		goto dump_output_fail;
@@ -938,6 +915,7 @@ dump_output_pass:
 		if (error)
 			return;
 	}
+	t->nb_valid++;
 
 	return;
 
@@ -945,7 +923,7 @@ dump_output_fail:
 	if (t->cmn.opt->debug) {
 		/* dump quantized output buffer */
 		if (asprintf(&dump_path, "%s.q.%u", t->cmn.opt->filelist[req->fid].output,
-				obj_idx) == -1)
+			     obj_idx) == -1)
 			return;
 		ML_OPEN_WRITE_GET_ERR(dump_path, req->output, model->out_qsize, error);
 		free(dump_path);
@@ -953,8 +931,8 @@ dump_output_fail:
 			return;
 
 		/* dump dequantized output buffer */
-		if (asprintf(&dump_path, "%s.%u", t->cmn.opt->filelist[req->fid].output,
-				obj_idx) == -1)
+		if (asprintf(&dump_path, "%s.%u", t->cmn.opt->filelist[req->fid].output, obj_idx) ==
+		    -1)
 			return;
 		ML_OPEN_WRITE_GET_ERR(dump_path, model->output, model->out_dsize, error);
 		free(dump_path);
@@ -1026,106 +1004,4 @@ ml_inference_launch_cores(struct ml_test *test, struct ml_options *opt, uint16_t
 	}
 
 	return 0;
-}
-
-int
-ml_inference_stats_get(struct ml_test *test, struct ml_options *opt)
-{
-	struct test_inference *t = ml_test_priv(test);
-	uint64_t total_cycles = 0;
-	uint32_t nb_filelist;
-	uint64_t throughput;
-	uint64_t avg_e2e;
-	uint32_t qp_id;
-	uint64_t freq;
-	int ret;
-	int i;
-
-	if (!opt->stats)
-		return 0;
-
-	/* get xstats size */
-	t->xstats_size = rte_ml_dev_xstats_names_get(opt->dev_id, NULL, 0);
-	if (t->xstats_size >= 0) {
-		/* allocate for xstats_map and values */
-		t->xstats_map = rte_malloc(
-			"ml_xstats_map", t->xstats_size * sizeof(struct rte_ml_dev_xstats_map), 0);
-		if (t->xstats_map == NULL) {
-			ret = -ENOMEM;
-			goto error;
-		}
-
-		t->xstats_values =
-			rte_malloc("ml_xstats_values", t->xstats_size * sizeof(uint64_t), 0);
-		if (t->xstats_values == NULL) {
-			ret = -ENOMEM;
-			goto error;
-		}
-
-		ret = rte_ml_dev_xstats_names_get(opt->dev_id, t->xstats_map, t->xstats_size);
-		if (ret != t->xstats_size) {
-			printf("Unable to get xstats names, ret = %d\n", ret);
-			ret = -1;
-			goto error;
-		}
-
-		for (i = 0; i < t->xstats_size; i++)
-			rte_ml_dev_xstats_get(opt->dev_id, &t->xstats_map[i].id,
-					      &t->xstats_values[i], 1);
-	}
-
-	/* print xstats*/
-	printf("\n");
-	print_line(80);
-	printf(" ML Device Extended Statistics\n");
-	print_line(80);
-	for (i = 0; i < t->xstats_size; i++)
-		printf(" %-64s = %" PRIu64 "\n", t->xstats_map[i].name, t->xstats_values[i]);
-	print_line(80);
-
-	/* release buffers */
-	rte_free(t->xstats_map);
-
-	rte_free(t->xstats_values);
-
-	/* print end-to-end stats */
-	freq = rte_get_tsc_hz();
-	for (qp_id = 0; qp_id < RTE_MAX_LCORE; qp_id++)
-		total_cycles += t->args[qp_id].end_cycles - t->args[qp_id].start_cycles;
-	avg_e2e = total_cycles / opt->repetitions;
-
-	if (freq == 0) {
-		avg_e2e = total_cycles / opt->repetitions;
-		printf(" %-64s = %" PRIu64 "\n", "Average End-to-End Latency (cycles)", avg_e2e);
-	} else {
-		avg_e2e = (total_cycles * NS_PER_S) / (opt->repetitions * freq);
-		printf(" %-64s = %" PRIu64 "\n", "Average End-to-End Latency (ns)", avg_e2e);
-	}
-
-	/* print inference throughput */
-	if (strcmp(opt->test_name, "inference_ordered") == 0)
-		nb_filelist = 1;
-	else
-		nb_filelist = opt->nb_filelist;
-
-	if (freq == 0) {
-		throughput = (nb_filelist * t->cmn.opt->repetitions * 1000000) / total_cycles;
-		printf(" %-64s = %" PRIu64 "\n", "Average Throughput (inferences / million cycles)",
-		       throughput);
-	} else {
-		throughput = (nb_filelist * t->cmn.opt->repetitions * freq) / total_cycles;
-		printf(" %-64s = %" PRIu64 "\n", "Average Throughput (inferences / second)",
-		       throughput);
-	}
-
-	print_line(80);
-
-	return 0;
-
-error:
-	rte_free(t->xstats_map);
-
-	rte_free(t->xstats_values);
-
-	return ret;
 }

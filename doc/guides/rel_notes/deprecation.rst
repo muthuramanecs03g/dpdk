@@ -5,8 +5,14 @@ ABI and API Deprecation
 =======================
 
 See the guidelines document for details of the :doc:`ABI policy
-<../contributing/abi_policy>`. API and ABI deprecation notices are to be posted
-here.
+<../contributing/abi_policy>`.
+
+With DPDK 23.11, there will be a new major ABI version: 24.
+This means that during the development of 23.11,
+new items may be added to structs or enums,
+even if those additions involve an ABI compatibility breakage.
+
+Other API and ABI deprecation notices are to be posted below.
 
 Deprecation Notices
 -------------------
@@ -14,19 +20,22 @@ Deprecation Notices
 * kvargs: The function ``rte_kvargs_process`` will get a new parameter
   for returning key match count. It will ease handling of no-match case.
 
+* cmdline: The function ``cmdline_poll`` does not work correctly on either
+  Linux or Windows and is unused by any part of DPDK.
+  This function is now deprecated and will be removed in DPDK 23.11.
+
 * telemetry: The functions ``rte_tel_data_add_array_u64`` and ``rte_tel_data_add_dict_u64``,
   used by telemetry callbacks for adding unsigned integer values to be returned to the user,
   are renamed to ``rte_tel_data_add_array_uint`` and ``rte_tel_data_add_dict_uint`` respectively.
   As such, the old function names are deprecated and will be removed in a future release.
 
-* eal: RTE_FUNC_PTR_OR_* macros have been marked deprecated and will be removed
-  in the future. Applications can use ``devtools/cocci/func_or_ret.cocci``
-  to update their code.
-
 * eal: The functions ``rte_thread_setname`` and ``rte_ctrl_thread_create``
   are planned to be deprecated starting with the 23.07 release, subject to
   the replacement API rte_thread_set_name and rte_thread_create_control being
   marked as stable, and planned to be removed by the 23.11 release.
+
+* eal: ``RTE_CPUFLAG_NUMFLAGS`` will be removed in DPDK 23.11 release.
+  This is to allow new CPU features to be added without ABI breakage.
 
 * rte_atomicNN_xxx: These APIs do not take memory order parameter. This does
   not allow for writing optimized code for all the CPU architectures supported
@@ -42,13 +51,6 @@ Deprecation Notices
   operations and a new wrapper ``rte_atomic_thread_fence`` instead of
   ``__atomic_thread_fence`` must be used for patches that need to be merged in
   20.08 onwards. This change will not introduce any performance degradation.
-
-* kni: The KNI kernel module and library are not recommended for use by new
-  applications - other technologies such as virtio-user are recommended instead.
-  Following the DPDK technical board
-  `decision <https://mails.dpdk.org/archives/dev/2021-January/197077.html>`_
-  and `refinement <https://mails.dpdk.org/archives/dev/2022-June/243596.html>`_,
-  the KNI kernel module, library and PMD will be removed from the DPDK 23.11 release.
 
 * lib: will fix extending some enum/define breaking the ABI. There are multiple
   samples in DPDK that enum/define terminated with a ``.*MAX.*`` value which is
@@ -118,6 +120,25 @@ Deprecation Notices
   The legacy actions should be removed
   once ``MODIFY_FIELD`` alternative is implemented in drivers.
 
+* bonding: The macro ``RTE_ETH_DEV_BONDED_SLAVE`` will be
+  deprecated in DPDK 23.07, and removed in DPDK 23.11.
+  The relevant code can be updated using ``RTE_ETH_DEV_BONDING_MEMBER``.
+  The data structure ``struct rte_eth_bond_8023ad_slave_info`` will be
+  renamed to ``struct rte_eth_bond_8023ad_member_info`` in DPDK 23.11.
+  The following functions will be removed in DPDK 23.11.
+  The old functions:
+  ``rte_eth_bond_8023ad_slave_info``,
+  ``rte_eth_bond_active_slaves_get``,
+  ``rte_eth_bond_slave_add``,
+  ``rte_eth_bond_slave_remove``, and
+  ``rte_eth_bond_slaves_get``
+  will be replaced by:
+  ``rte_eth_bond_8023ad_member_info``,
+  ``rte_eth_bond_active_members_get``,
+  ``rte_eth_bond_member_add``,
+  ``rte_eth_bond_member_remove``, and
+  ``rte_eth_bond_members_get``.
+
 * cryptodev: The function ``rte_cryptodev_cb_fn`` will be updated
   to have another parameter ``qp_id`` to return the queue pair ID
   which got error interrupt to the application,
@@ -130,8 +151,33 @@ Deprecation Notices
   ``rte_cryptodev_get_auth_algo_string``, ``rte_cryptodev_get_aead_algo_string`` and
   ``rte_cryptodev_asym_get_xform_string`` respectively.
 
-* flow_classify: The flow_classify library and example have no maintainer.
-  The library is experimental and, as such, it could be removed from DPDK.
-  Its removal has been postponed to let potential users report interest
-  in maintaining it.
-  In the absence of such interest, this library will be removed in DPDK 23.11.
+* security: Hide structures ``rte_security_ops`` and ``rte_security_ctx``
+  as these are internal to DPDK library and drivers.
+
+* security: New SA option ``ingress_oop`` would be added in structure
+  ``rte_security_ipsec_sa_options`` to support out of place processing
+  for inline inbound SA from DPDK 23.11. ``reserved_opts`` field in the
+  same struct would be removed as discussed in techboard meeting.
+
+* eventdev: The single-event (non-burst) enqueue and dequeue operations,
+  used by static inline burst enqueue and dequeue functions in ``rte_eventdev.h``,
+  will be removed in DPDK 23.11.
+  This simplification includes changing the layout and potentially also
+  the size of the public ``rte_event_fp_ops`` struct, breaking the ABI.
+  Since these functions are not called directly by the application,
+  the API remains unaffected.
+
+* pipeline: The pipeline library legacy API (functions rte_pipeline_*)
+  will be deprecated and subsequently removed in DPDK 24.11 release.
+  Before this, the new pipeline library API (functions rte_swx_pipeline_*)
+  will gradually transition from experimental to stable status.
+
+* table: The table library legacy API (functions rte_table_*)
+  will be deprecated and subsequently removed in DPDK 24.11 release.
+  Before this, the new table library API (functions rte_swx_table_*)
+  will gradually transition from experimental to stable status.
+
+* port: The port library legacy API (functions rte_port_*)
+  will be deprecated and subsequently removed in DPDK 24.11 release.
+  Before this, the new port library API (functions rte_swx_port_*)
+  will gradually transition from experimental to stable status.

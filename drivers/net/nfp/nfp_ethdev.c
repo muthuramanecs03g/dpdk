@@ -5,14 +5,6 @@
  * Small portions derived from code Copyright(c) 2010-2015 Intel Corporation.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * @file dpdk/pmd/nfp_ethdev.c
- *
- * Netronome vNIC DPDK Poll-Mode Driver: Main entry point
- */
-
 #include <rte_common.h>
 #include <ethdev_driver.h>
 #include <ethdev_pci.h>
@@ -38,6 +30,8 @@
 #include "nfp_logs.h"
 #include "nfp_cpp_bridge.h"
 
+#include "nfd3/nfp_nfd3.h"
+#include "nfdk/nfp_nfdk.h"
 #include "flower/nfp_flower.h"
 
 static int
@@ -51,8 +45,7 @@ nfp_net_pf_read_mac(struct nfp_app_fw_nic *app_fw_nic, int port)
 
 	nfp_eth_table = nfp_eth_read_ports(app_fw_nic->pf_dev->cpp);
 
-	nfp_eth_copy_mac((uint8_t *)&hw->mac_addr,
-			 (uint8_t *)&nfp_eth_table->ports[port].mac_addr);
+	rte_ether_addr_copy(&nfp_eth_table->ports[port].mac_addr, &hw->mac_addr);
 
 	free(nfp_eth_table);
 	return 0;
@@ -64,6 +57,8 @@ nfp_net_start(struct rte_eth_dev *dev)
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
 	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
 	uint32_t new_ctrl, update = 0;
+	uint32_t cap_extend;
+	uint32_t ctrl_extend = 0;
 	struct nfp_net_hw *hw;
 	struct nfp_pf_dev *pf_dev;
 	struct nfp_app_fw_nic *app_fw_nic;
@@ -151,8 +146,16 @@ nfp_net_start(struct rte_eth_dev *dev)
 	if (hw->cap & NFP_NET_CFG_CTRL_RINGCFG)
 		new_ctrl |= NFP_NET_CFG_CTRL_RINGCFG;
 
-	nn_cfg_writel(hw, NFP_NET_CFG_CTRL, new_ctrl);
 	if (nfp_net_reconfig(hw, new_ctrl, update) < 0)
+		return -EIO;
+
+	/* Enable packet type offload by extend ctrl word1. */
+	cap_extend = nn_cfg_readl(hw, NFP_NET_CFG_CAP_WORD1);
+	if ((cap_extend & NFP_NET_CFG_CTRL_PKT_TYPE) != 0)
+		ctrl_extend = NFP_NET_CFG_CTRL_PKT_TYPE;
+
+	update = NFP_NET_CFG_UPDATE_GEN;
+	if (nfp_net_ext_reconfig(hw, ctrl_extend, update) < 0)
 		return -EIO;
 
 	/*
@@ -446,6 +449,11 @@ static const struct eth_dev_ops nfp_net_eth_dev_ops = {
 	.link_update		= nfp_net_link_update,
 	.stats_get		= nfp_net_stats_get,
 	.stats_reset		= nfp_net_stats_reset,
+	.xstats_get             = nfp_net_xstats_get,
+	.xstats_reset           = nfp_net_xstats_reset,
+	.xstats_get_names       = nfp_net_xstats_get_names,
+	.xstats_get_by_id       = nfp_net_xstats_get_by_id,
+	.xstats_get_names_by_id = nfp_net_xstats_get_names_by_id,
 	.dev_infos_get		= nfp_net_infos_get,
 	.dev_supported_ptypes_get = nfp_net_supported_ptypes_get,
 	.mtu_set		= nfp_net_dev_mtu_set,
@@ -463,33 +471,21 @@ static const struct eth_dev_ops nfp_net_eth_dev_ops = {
 	.rx_queue_intr_disable  = nfp_rx_queue_intr_disable,
 	.udp_tunnel_port_add    = nfp_udp_tunnel_port_add,
 	.udp_tunnel_port_del    = nfp_udp_tunnel_port_del,
+	.fw_version_get         = nfp_net_firmware_version_get,
 };
 
-static inline int
-nfp_net_ethdev_ops_mount(struct nfp_net_hw *hw, struct rte_eth_dev *eth_dev)
+static inline void
+nfp_net_ethdev_ops_mount(struct nfp_net_hw *hw,
+		struct rte_eth_dev *eth_dev)
 {
-	switch (NFD_CFG_CLASS_VER_of(hw->ver)) {
-	case NFP_NET_CFG_VERSION_DP_NFD3:
-		eth_dev->tx_pkt_burst = &nfp_net_nfd3_xmit_pkts;
-		break;
-	case NFP_NET_CFG_VERSION_DP_NFDK:
-		if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 5) {
-			PMD_DRV_LOG(ERR, "NFDK must use ABI 5 or newer, found: %d",
-				NFD_CFG_MAJOR_VERSION_of(hw->ver));
-			return -EINVAL;
-		}
-		eth_dev->tx_pkt_burst = &nfp_net_nfdk_xmit_pkts;
-		break;
-	default:
-		PMD_DRV_LOG(ERR, "The version of firmware is not correct.");
-		return -EINVAL;
-	}
+	if (hw->ver.extend == NFP_NET_CFG_VERSION_DP_NFD3)
+		eth_dev->tx_pkt_burst = nfp_net_nfd3_xmit_pkts;
+	else
+		eth_dev->tx_pkt_burst = nfp_net_nfdk_xmit_pkts;
 
 	eth_dev->dev_ops = &nfp_net_eth_dev_ops;
 	eth_dev->rx_queue_count = nfp_net_rx_queue_count;
 	eth_dev->rx_pkt_burst = &nfp_net_recv_pkts;
-
-	return 0;
 }
 
 static int
@@ -503,8 +499,8 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	uint64_t rx_bar_off = 0;
 	uint64_t tx_bar_off = 0;
 	uint32_t start_q;
-	int stride = 4;
 	int port = 0;
+	int err;
 
 	PMD_INIT_FUNC_TRACE();
 
@@ -533,17 +529,8 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
 
-	hw->device_id = pci_dev->id.device_id;
-	hw->vendor_id = pci_dev->id.vendor_id;
-	hw->subsystem_device_id = pci_dev->id.subsystem_device_id;
-	hw->subsystem_vendor_id = pci_dev->id.subsystem_vendor_id;
 
-	PMD_INIT_LOG(DEBUG, "nfp_net: device (%u:%u) %u:%u:%u:%u",
-		     pci_dev->id.vendor_id, pci_dev->id.device_id,
-		     pci_dev->addr.domain, pci_dev->addr.bus,
-		     pci_dev->addr.devid, pci_dev->addr.function);
-
-	hw->ctrl_bar = (uint8_t *)pci_dev->mem_resource[0].addr;
+	hw->ctrl_bar = pci_dev->mem_resource[0].addr;
 	if (hw->ctrl_bar == NULL) {
 		PMD_DRV_LOG(ERR,
 			"hw->ctrl_bar is NULL. BAR0 not configured");
@@ -551,26 +538,42 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	}
 
 	if (port == 0) {
+		uint32_t min_size;
+
 		hw->ctrl_bar = pf_dev->ctrl_bar;
+		min_size = NFP_MAC_STATS_SIZE * hw->pf_dev->nfp_eth_table->max_index;
+		hw->mac_stats_bar = nfp_rtsym_map(hw->pf_dev->sym_tbl, "_mac_stats",
+				min_size, &hw->mac_stats_area);
+		if (hw->mac_stats_bar == NULL) {
+			PMD_INIT_LOG(ERR, "nfp_rtsym_map fails for _mac_stats_bar");
+			return -EIO;
+		}
+		hw->mac_stats = hw->mac_stats_bar;
 	} else {
 		if (pf_dev->ctrl_bar == NULL)
 			return -ENODEV;
 		/* Use port offset in pf ctrl_bar for this ports control bar */
 		hw->ctrl_bar = pf_dev->ctrl_bar + (port * NFP_PF_CSR_SLICE_SIZE);
+		hw->mac_stats = app_fw_nic->ports[0]->mac_stats_bar + (port * NFP_MAC_STATS_SIZE);
 	}
 
 	PMD_INIT_LOG(DEBUG, "ctrl bar: %p", hw->ctrl_bar);
+	PMD_INIT_LOG(DEBUG, "MAC stats: %p", hw->mac_stats);
 
-	hw->ver = nn_cfg_readl(hw, NFP_NET_CFG_VERSION);
+	err = nfp_net_common_init(pci_dev, hw);
+	if (err != 0)
+		return err;
 
-	if (nfp_net_check_dma_mask(hw, pci_dev->name) != 0)
-		return -ENODEV;
+	nfp_net_ethdev_ops_mount(hw, eth_dev);
 
-	if (nfp_net_ethdev_ops_mount(hw, eth_dev))
-		return -EINVAL;
+	hw->eth_xstats_base = rte_malloc("rte_eth_xstat", sizeof(struct rte_eth_xstat) *
+			nfp_net_xstats_size(eth_dev), 0);
+	if (hw->eth_xstats_base == NULL) {
+		PMD_INIT_LOG(ERR, "no memory for xstats base values on device %s!",
+				pci_dev->device.name);
+		return -ENOMEM;
+	}
 
-	hw->max_rx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_RXRINGS);
-	hw->max_tx_queues = nn_cfg_readl(hw, NFP_NET_CFG_MAX_TXRINGS);
 
 	/* Work out where in the BAR the queues start. */
 	switch (pci_dev->id.device_id) {
@@ -598,28 +601,11 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 		     hw->ctrl_bar, hw->tx_bar, hw->rx_bar);
 
 	nfp_net_cfg_queue_setup(hw);
-
-	/* Get some of the read-only fields from the config BAR */
-	hw->cap = nn_cfg_readl(hw, NFP_NET_CFG_CAP);
-	hw->max_mtu = nn_cfg_readl(hw, NFP_NET_CFG_MAX_MTU);
 	hw->mtu = RTE_ETHER_MTU;
-	hw->flbufsz = DEFAULT_FLBUF_SIZE;
 
 	/* VLAN insertion is incompatible with LSOv2 */
 	if (hw->cap & NFP_NET_CFG_CTRL_LSO2)
 		hw->cap &= ~NFP_NET_CFG_CTRL_TXVLAN;
-
-	nfp_net_init_metadata_format(hw);
-
-	if (NFD_CFG_MAJOR_VERSION_of(hw->ver) < 2)
-		hw->rx_offset = NFP_NET_RX_OFFSET;
-	else
-		hw->rx_offset = nn_cfg_readl(hw, NFP_NET_CFG_RX_OFFSET_ADDR);
-
-	hw->ctrl = 0;
-
-	hw->stride_rx = stride;
-	hw->stride_tx = stride;
 
 	nfp_net_log_device_information(hw);
 
@@ -635,19 +621,18 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 	}
 
 	nfp_net_pf_read_mac(app_fw_nic, port);
-	nfp_net_write_mac(hw, (uint8_t *)&hw->mac_addr);
+	nfp_net_write_mac(hw, &hw->mac_addr.addr_bytes[0]);
 
-	tmp_ether_addr = (struct rte_ether_addr *)&hw->mac_addr;
+	tmp_ether_addr = &hw->mac_addr;
 	if (!rte_is_valid_assigned_ether_addr(tmp_ether_addr)) {
 		PMD_INIT_LOG(INFO, "Using random mac address for port %d", port);
 		/* Using random mac addresses for VFs */
-		rte_eth_random_addr(&hw->mac_addr[0]);
-		nfp_net_write_mac(hw, (uint8_t *)&hw->mac_addr);
+		rte_eth_random_addr(&hw->mac_addr.addr_bytes[0]);
+		nfp_net_write_mac(hw, &hw->mac_addr.addr_bytes[0]);
 	}
 
 	/* Copying mac address to DPDK eth_dev struct */
-	rte_ether_addr_copy((struct rte_ether_addr *)hw->mac_addr,
-			&eth_dev->data->mac_addrs[0]);
+	rte_ether_addr_copy(&hw->mac_addr, eth_dev->data->mac_addrs);
 
 	if ((hw->cap & NFP_NET_CFG_CTRL_LIVE_ADDR) == 0)
 		eth_dev->data->dev_flags |= RTE_ETH_DEV_NOLIVE_MAC_ADDR;
@@ -658,8 +643,7 @@ nfp_net_init(struct rte_eth_dev *eth_dev)
 		     "mac=" RTE_ETHER_ADDR_PRT_FMT,
 		     eth_dev->data->port_id, pci_dev->id.vendor_id,
 		     pci_dev->id.device_id,
-		     hw->mac_addr[0], hw->mac_addr[1], hw->mac_addr[2],
-		     hw->mac_addr[3], hw->mac_addr[4], hw->mac_addr[5]);
+		     RTE_ETHER_ADDR_BYTES(&hw->mac_addr));
 
 	/* Registering LSC interrupt handler */
 	rte_intr_callback_register(pci_dev->intr_handle,
@@ -827,7 +811,8 @@ nfp_init_app_fw_nic(struct nfp_pf_dev *pf_dev)
 
 	/* Map the symbol table */
 	pf_dev->ctrl_bar = nfp_rtsym_map(pf_dev->sym_tbl, "_pf0_net_bar0",
-			app_fw_nic->total_phyports * 32768, &pf_dev->ctrl_area);
+			app_fw_nic->total_phyports * NFP_NET_CFG_BAR_SZ,
+			&pf_dev->ctrl_area);
 	if (pf_dev->ctrl_bar == NULL) {
 		PMD_INIT_LOG(ERR, "nfp_rtsym_map fails for _pf0_net_ctrl_bar");
 		ret = -EIO;
@@ -909,6 +894,7 @@ nfp_pf_init(struct rte_pci_device *pci_dev)
 	int ret;
 	int err = 0;
 	uint64_t addr;
+	uint32_t cpp_id;
 	struct nfp_cpp *cpp;
 	enum nfp_app_fw_id app_fw_id;
 	struct nfp_pf_dev *pf_dev;
@@ -1008,7 +994,8 @@ nfp_pf_init(struct rte_pci_device *pci_dev)
 		goto pf_cleanup;
 	}
 
-	pf_dev->hw_queues = nfp_cpp_map_area(pf_dev->cpp, 0, 0,
+	cpp_id = NFP_CPP_ISLAND_ID(0, NFP_CPP_ACTION_RW, 0, 0);
+	pf_dev->hw_queues = nfp_cpp_map_area(pf_dev->cpp, cpp_id,
 			addr, NFP_QCP_QUEUE_AREA_SZ,
 			&pf_dev->hwqueues_area);
 	if (pf_dev->hw_queues == NULL) {
@@ -1103,8 +1090,7 @@ nfp_secondary_init_app_fw_nic(struct rte_pci_device *pci_dev,
 
 		eth_dev->process_private = cpp;
 		hw = NFP_NET_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
-		if (nfp_net_ethdev_ops_mount(hw, eth_dev))
-			return -EINVAL;
+		nfp_net_ethdev_ops_mount(hw, eth_dev);
 
 		rte_eth_dev_probing_finish(eth_dev);
 	}
@@ -1267,9 +1253,3 @@ static struct rte_pci_driver rte_nfp_net_pf_pmd = {
 RTE_PMD_REGISTER_PCI(net_nfp_pf, rte_nfp_net_pf_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_nfp_pf, pci_id_nfp_pf_net_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_nfp_pf, "* igb_uio | uio_pci_generic | vfio");
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */

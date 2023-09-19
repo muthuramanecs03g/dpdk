@@ -218,7 +218,6 @@ struct rte_mempool_info {
  */
 struct rte_mempool {
 	char name[RTE_MEMPOOL_NAMESIZE]; /**< Name of mempool. */
-	RTE_STD_C11
 	union {
 		void *pool_data;         /**< Ring or pool to store objects. */
 		uint64_t pool_id;        /**< External mempool identifier. */
@@ -1492,23 +1491,53 @@ rte_mempool_do_generic_get(struct rte_mempool *mp, void **obj_table,
 			   unsigned int n, struct rte_mempool_cache *cache)
 {
 	int ret;
-	unsigned int remaining = n;
+	unsigned int remaining;
 	uint32_t index, len;
 	void **cache_objs;
 
 	/* No cache provided */
-	if (unlikely(cache == NULL))
+	if (unlikely(cache == NULL)) {
+		remaining = n;
 		goto driver_dequeue;
+	}
 
-	/* Use the cache as much as we have to return hot objects first */
-	len = RTE_MIN(remaining, cache->len);
+	/* The cache is a stack, so copy will be in reverse order. */
 	cache_objs = &cache->objs[cache->len];
+
+	if (__extension__(__builtin_constant_p(n)) && n <= cache->len) {
+		/*
+		 * The request size is known at build time, and
+		 * the entire request can be satisfied from the cache,
+		 * so let the compiler unroll the fixed length copy loop.
+		 */
+		cache->len -= n;
+		for (index = 0; index < n; index++)
+			*obj_table++ = *--cache_objs;
+
+		RTE_MEMPOOL_CACHE_STAT_ADD(cache, get_success_bulk, 1);
+		RTE_MEMPOOL_CACHE_STAT_ADD(cache, get_success_objs, n);
+
+		return 0;
+	}
+
+	/*
+	 * Use the cache as much as we have to return hot objects first.
+	 * If the request size 'n' is known at build time, the above comparison
+	 * ensures that n > cache->len here, so omit RTE_MIN().
+	 */
+	len = __extension__(__builtin_constant_p(n)) ? cache->len :
+			RTE_MIN(n, cache->len);
 	cache->len -= len;
-	remaining -= len;
+	remaining = n - len;
 	for (index = 0; index < len; index++)
 		*obj_table++ = *--cache_objs;
 
-	if (remaining == 0) {
+	/*
+	 * If the request size 'n' is known at build time, the case
+	 * where the entire request can be satisfied from the cache
+	 * has already been handled above, so omit handling it here.
+	 */
+	if (!__extension__(__builtin_constant_p(n)) && remaining == 0) {
 		/* The entire request is satisfied from the cache. */
 
 		RTE_MEMPOOL_CACHE_STAT_ADD(cache, get_success_bulk, 1);
@@ -1837,7 +1866,6 @@ void rte_mempool_list_dump(FILE *f);
  *   NULL on error
  *   with rte_errno set appropriately. Possible rte_errno values include:
  *    - ENOENT - required entry not available to return.
- *
  */
 struct rte_mempool *rte_mempool_lookup(const char *name);
 

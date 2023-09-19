@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2022 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #ifndef _IDPF_OSDEP_H_
@@ -23,6 +23,7 @@
 #include <rte_log.h>
 #include <rte_random.h>
 #include <rte_io.h>
+#include <rte_compat.h>
 
 #define INLINE inline
 #define STATIC static
@@ -44,6 +45,8 @@ typedef struct idpf_lock idpf_lock;
 #define lower_32_bits(n)	((u32)(n))
 #define low_16_bits(x)		((x) & 0xFFFF)
 #define high_16_bits(x)		(((x) & 0xFFFF0000) >> 16)
+
+#define IDPF_M(m, s)		((m) << (s))
 
 #ifndef ETH_ADDR_LEN
 #define ETH_ADDR_LEN		6
@@ -210,28 +213,10 @@ struct idpf_lock {
 	rte_spinlock_t spinlock;
 };
 
-static inline void
-idpf_init_lock(struct idpf_lock *sp)
-{
-	rte_spinlock_init(&sp->spinlock);
-}
-
-static inline void
-idpf_acquire_lock(struct idpf_lock *sp)
-{
-	rte_spinlock_lock(&sp->spinlock);
-}
-
-static inline void
-idpf_release_lock(struct idpf_lock *sp)
-{
-	rte_spinlock_unlock(&sp->spinlock);
-}
-
-static inline void
-idpf_destroy_lock(__rte_unused struct idpf_lock *sp)
-{
-}
+#define idpf_init_lock(sp) rte_spinlock_init(&(sp)->spinlock)
+#define idpf_acquire_lock(sp) rte_spinlock_lock(&(sp)->spinlock)
+#define idpf_release_lock(sp) rte_spinlock_unlock(&(sp)->spinlock)
+#define idpf_destroy_lock(sp) RTE_SET_USED(sp)
 
 struct idpf_hw;
 

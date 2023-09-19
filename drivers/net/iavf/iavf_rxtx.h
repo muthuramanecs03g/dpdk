@@ -16,6 +16,9 @@
 /* used for Rx Bulk Allocate */
 #define IAVF_RX_MAX_BURST         32
 
+/* Max data buffer size must be 16K - 128 bytes */
+#define IAVF_RX_MAX_DATA_BUF_SIZE (16 * 1024 - 128)
+
 /* used for Vector PMD */
 #define IAVF_VPMD_RX_MAX_BURST    32
 #define IAVF_VPMD_TX_MAX_BURST    32
@@ -24,13 +27,17 @@
 #define IAVF_VPMD_TX_MAX_FREE_BUF 64
 
 #define IAVF_TX_NO_VECTOR_FLAGS (				 \
+		RTE_ETH_TX_OFFLOAD_VLAN_INSERT |		 \
+		RTE_ETH_TX_OFFLOAD_QINQ_INSERT |		 \
 		RTE_ETH_TX_OFFLOAD_MULTI_SEGS |		 \
 		RTE_ETH_TX_OFFLOAD_TCP_TSO |		 \
+		RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO |	 \
+		RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO |	 \
+		RTE_ETH_TX_OFFLOAD_IPIP_TNL_TSO |	 \
+		RTE_ETH_TX_OFFLOAD_GENEVE_TNL_TSO |	 \
 		RTE_ETH_TX_OFFLOAD_SECURITY)
 
 #define IAVF_TX_VECTOR_OFFLOAD (				 \
-		RTE_ETH_TX_OFFLOAD_VLAN_INSERT |		 \
-		RTE_ETH_TX_OFFLOAD_QINQ_INSERT |		 \
 		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |		 \
 		RTE_ETH_TX_OFFLOAD_SCTP_CKSUM |		 \
 		RTE_ETH_TX_OFFLOAD_UDP_CKSUM |		 \
@@ -44,7 +51,8 @@
 		RTE_ETH_RX_OFFLOAD_CHECKSUM |		 \
 		RTE_ETH_RX_OFFLOAD_SCTP_CKSUM |		 \
 		RTE_ETH_RX_OFFLOAD_VLAN |		 \
-		RTE_ETH_RX_OFFLOAD_RSS_HASH)
+		RTE_ETH_RX_OFFLOAD_RSS_HASH |    \
+		RTE_ETH_RX_OFFLOAD_TIMESTAMP)
 
 /**
  * According to the vlan capabilities returned by the driver and FW, the vlan tci
@@ -73,6 +81,7 @@
 		RTE_MBUF_F_TX_IP_CKSUM |		 \
 		RTE_MBUF_F_TX_L4_MASK |		 \
 		RTE_MBUF_F_TX_TCP_SEG |          \
+		RTE_MBUF_F_TX_UDP_SEG |          \
 		RTE_MBUF_F_TX_OUTER_IP_CKSUM |   \
 		RTE_MBUF_F_TX_OUTER_UDP_CKSUM)
 
@@ -85,6 +94,7 @@
 		RTE_MBUF_F_TX_IP_CKSUM |		 \
 		RTE_MBUF_F_TX_L4_MASK |		 \
 		RTE_MBUF_F_TX_TCP_SEG |		 \
+		RTE_MBUF_F_TX_UDP_SEG |      \
 		RTE_MBUF_F_TX_TUNNEL_MASK |	\
 		RTE_MBUF_F_TX_OUTER_IP_CKSUM |  \
 		RTE_MBUF_F_TX_OUTER_UDP_CKSUM | \
@@ -680,19 +690,32 @@ uint16_t iavf_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
 				  uint16_t nb_pkts);
 uint16_t iavf_recv_pkts_vec_avx2(void *rx_queue, struct rte_mbuf **rx_pkts,
 				 uint16_t nb_pkts);
+uint16_t iavf_recv_pkts_vec_avx2_offload(void *rx_queue, struct rte_mbuf **rx_pkts,
+					 uint16_t nb_pkts);
 uint16_t iavf_recv_pkts_vec_avx2_flex_rxd(void *rx_queue,
 					  struct rte_mbuf **rx_pkts,
 					  uint16_t nb_pkts);
+uint16_t iavf_recv_pkts_vec_avx2_flex_rxd_offload(void *rx_queue,
+						  struct rte_mbuf **rx_pkts,
+						  uint16_t nb_pkts);
 uint16_t iavf_recv_scattered_pkts_vec_avx2(void *rx_queue,
 					   struct rte_mbuf **rx_pkts,
 					   uint16_t nb_pkts);
+uint16_t iavf_recv_scattered_pkts_vec_avx2_offload(void *rx_queue,
+						   struct rte_mbuf **rx_pkts,
+						   uint16_t nb_pkts);
 uint16_t iavf_recv_scattered_pkts_vec_avx2_flex_rxd(void *rx_queue,
 						    struct rte_mbuf **rx_pkts,
 						    uint16_t nb_pkts);
+uint16_t iavf_recv_scattered_pkts_vec_avx2_flex_rxd_offload(void *rx_queue,
+							    struct rte_mbuf **rx_pkts,
+							    uint16_t nb_pkts);
 uint16_t iavf_xmit_pkts_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
 			    uint16_t nb_pkts);
 uint16_t iavf_xmit_pkts_vec_avx2(void *tx_queue, struct rte_mbuf **tx_pkts,
 				 uint16_t nb_pkts);
+uint16_t iavf_xmit_pkts_vec_avx2_offload(void *tx_queue, struct rte_mbuf **tx_pkts,
+					 uint16_t nb_pkts);
 int iavf_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc);
 int iavf_rx_vec_dev_check(struct rte_eth_dev *dev);
 int iavf_tx_vec_dev_check(struct rte_eth_dev *dev);

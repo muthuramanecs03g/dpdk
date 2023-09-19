@@ -696,11 +696,7 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, uint16_t queues,
 	dev->frontend_features = 0;
 	dev->unsupported_features = 0;
 	dev->backend_type = backend_type;
-
-	if (*ifname) {
-		dev->ifname = *ifname;
-		*ifname = NULL;
-	}
+	dev->ifname = *ifname;
 
 	if (virtio_user_dev_setup(dev) < 0) {
 		PMD_INIT_LOG(ERR, "(%s) backend set up fails", dev->path);
@@ -794,6 +790,7 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, uint16_t queues,
 		}
 	}
 
+	*ifname = NULL;
 	return 0;
 
 notify_uninit:
@@ -1025,7 +1022,7 @@ virtio_user_handle_cq_split(struct virtio_user_dev *dev, uint16_t queue_idx)
 		uep->id = desc_idx;
 		uep->len = n_descs;
 
-		__atomic_add_fetch(&vring->used->idx, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&vring->used->idx, 1, __ATOMIC_RELAXED);
 	}
 }
 

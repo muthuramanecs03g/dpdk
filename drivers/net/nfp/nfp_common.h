@@ -3,14 +3,6 @@
  * All rights reserved.
  */
 
-/*
- * vim:shiftwidth=8:noexpandtab
- *
- * @file dpdk/pmd/nfp_net_pmd.h
- *
- * Netronome NFP_NET PMD
- */
-
 #ifndef _NFP_COMMON_H_
 #define _NFP_COMMON_H_
 
@@ -88,24 +80,6 @@ struct nfp_net_adapter;
 #define NFP_NET_LINK_DOWN_CHECK_TIMEOUT 4000 /* ms */
 #define NFP_NET_LINK_UP_CHECK_TIMEOUT   1000 /* ms */
 
-/* Version number helper defines */
-#define NFD_CFG_CLASS_VER_msk       0xff
-#define NFD_CFG_CLASS_VER_shf       24
-#define NFD_CFG_CLASS_VER(x)        (((x) & 0xff) << 24)
-#define NFD_CFG_CLASS_VER_of(x)     (((x) >> 24) & 0xff)
-#define NFD_CFG_CLASS_TYPE_msk      0xff
-#define NFD_CFG_CLASS_TYPE_shf      16
-#define NFD_CFG_CLASS_TYPE(x)       (((x) & 0xff) << 16)
-#define NFD_CFG_CLASS_TYPE_of(x)    (((x) >> 16) & 0xff)
-#define NFD_CFG_MAJOR_VERSION_msk   0xff
-#define NFD_CFG_MAJOR_VERSION_shf   8
-#define NFD_CFG_MAJOR_VERSION(x)    (((x) & 0xff) << 8)
-#define NFD_CFG_MAJOR_VERSION_of(x) (((x) >> 8) & 0xff)
-#define NFD_CFG_MINOR_VERSION_msk   0xff
-#define NFD_CFG_MINOR_VERSION_shf   0
-#define NFD_CFG_MINOR_VERSION(x)    (((x) & 0xff) << 0)
-#define NFD_CFG_MINOR_VERSION_of(x) (((x) >> 0) & 0xff)
-
 /* Number of supported physical ports */
 #define NFP_MAX_PHYPORTS	12
 
@@ -145,35 +119,13 @@ struct nfp_pf_dev {
 	/* The eth table reported by firmware */
 	struct nfp_eth_table *nfp_eth_table;
 
-	/* Current values for control */
-	uint32_t ctrl;
-
 	uint8_t *ctrl_bar;
-	uint8_t *tx_bar;
-	uint8_t *rx_bar;
-
-	uint8_t *qcp_cfg;
-	rte_spinlock_t reconfig_lock;
-
-	uint16_t flbufsz;
-	uint16_t device_id;
-	uint16_t vendor_id;
-	uint16_t subsystem_device_id;
-	uint16_t subsystem_vendor_id;
-#if defined(DSTQ_SELECTION)
-#if DSTQ_SELECTION
-	uint16_t device_function;
-#endif
-#endif
 
 	struct nfp_cpp *cpp;
 	struct nfp_cpp_area *ctrl_area;
 	struct nfp_cpp_area *hwqueues_area;
-	struct nfp_cpp_area *msix_area;
 
 	uint8_t *hw_queues;
-
-	union eth_table_entry *eth_table;
 
 	struct nfp_hwinfo *hwinfo;
 	struct nfp_rtsym_table *sym_tbl;
@@ -204,7 +156,7 @@ struct nfp_net_hw {
 	struct rte_eth_dev *eth_dev;
 
 	/* Info from the firmware */
-	uint32_t ver;
+	struct nfp_net_fw_ver ver;
 	uint32_t cap;
 	uint32_t max_mtu;
 	uint32_t mtu;
@@ -234,29 +186,23 @@ struct nfp_net_hw {
 	uint16_t vendor_id;
 	uint16_t subsystem_device_id;
 	uint16_t subsystem_vendor_id;
-#if defined(DSTQ_SELECTION)
-#if DSTQ_SELECTION
-	uint16_t device_function;
-#endif
-#endif
 
-	uint8_t mac_addr[RTE_ETHER_ADDR_LEN];
+	struct rte_ether_addr mac_addr;
 
 	/* Records starting point for counters */
 	struct rte_eth_stats eth_stats_base;
+	struct rte_eth_xstat *eth_xstats_base;
 
 	struct nfp_cpp *cpp;
 	struct nfp_cpp_area *ctrl_area;
-	struct nfp_cpp_area *hwqueues_area;
-	struct nfp_cpp_area *msix_area;
+	struct nfp_cpp_area *mac_stats_area;
+	uint8_t *mac_stats_bar;
+	uint8_t *mac_stats;
 
-	uint8_t *hw_queues;
-	/* Sequential physical port number */
+	/* Sequential physical port number, only valid for CoreNIC firmware */
 	uint8_t idx;
 	/* Internal port number as seen from NFP */
 	uint8_t nfp_idx;
-
-	union eth_table_entry *eth_table;
 };
 
 struct nfp_net_adapter {
@@ -427,12 +373,13 @@ nfp_pci_queue(struct rte_pci_device *pdev, uint16_t queue)
 
 /* Prototypes for common NFP functions */
 int nfp_net_reconfig(struct nfp_net_hw *hw, uint32_t ctrl, uint32_t update);
+int nfp_net_ext_reconfig(struct nfp_net_hw *hw, uint32_t ctrl_ext, uint32_t update);
 int nfp_net_configure(struct rte_eth_dev *dev);
+int nfp_net_common_init(struct rte_pci_device *pci_dev, struct nfp_net_hw *hw);
 void nfp_net_log_device_information(const struct nfp_net_hw *hw);
 void nfp_net_enable_queues(struct rte_eth_dev *dev);
 void nfp_net_disable_queues(struct rte_eth_dev *dev);
 void nfp_net_params_setup(struct nfp_net_hw *hw);
-void nfp_eth_copy_mac(uint8_t *dst, const uint8_t *src);
 void nfp_net_write_mac(struct nfp_net_hw *hw, uint8_t *mac);
 int nfp_net_set_mac_addr(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr);
 int nfp_configure_rx_interrupt(struct rte_eth_dev *dev,
@@ -444,6 +391,22 @@ int nfp_net_link_update(struct rte_eth_dev *dev,
 			__rte_unused int wait_to_complete);
 int nfp_net_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *stats);
 int nfp_net_stats_reset(struct rte_eth_dev *dev);
+uint32_t nfp_net_xstats_size(const struct rte_eth_dev *dev);
+int nfp_net_xstats_get_names(struct rte_eth_dev *dev,
+		struct rte_eth_xstat_name *xstats_names,
+		unsigned int size __rte_unused);
+int nfp_net_xstats_get(struct rte_eth_dev *dev,
+		struct rte_eth_xstat *xstats,
+		unsigned int n __rte_unused);
+int nfp_net_xstats_get_names_by_id(struct rte_eth_dev *dev,
+		const uint64_t *ids,
+		struct rte_eth_xstat_name *xstats_names,
+		unsigned int size);
+int nfp_net_xstats_get_by_id(struct rte_eth_dev *dev,
+		const uint64_t *ids,
+		uint64_t *values,
+		unsigned int n);
+int nfp_net_xstats_reset(struct rte_eth_dev *dev);
 int nfp_net_infos_get(struct rte_eth_dev *dev,
 		      struct rte_eth_dev_info *dev_info);
 const uint32_t *nfp_net_supported_ptypes_get(struct rte_eth_dev *dev);
@@ -451,7 +414,6 @@ int nfp_rx_queue_intr_enable(struct rte_eth_dev *dev, uint16_t queue_id);
 int nfp_rx_queue_intr_disable(struct rte_eth_dev *dev, uint16_t queue_id);
 void nfp_net_params_setup(struct nfp_net_hw *hw);
 void nfp_net_cfg_queue_setup(struct nfp_net_hw *hw);
-void nfp_eth_copy_mac(uint8_t *dst, const uint8_t *src);
 void nfp_net_dev_interrupt_handler(void *param);
 void nfp_net_dev_interrupt_delayed_handler(void *param);
 int nfp_net_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu);
@@ -480,6 +442,10 @@ int nfp_net_tx_desc_limits(struct nfp_net_hw *hw,
 		uint16_t *max_tx_desc);
 int nfp_net_check_dma_mask(struct nfp_net_hw *hw, char *name);
 void nfp_net_init_metadata_format(struct nfp_net_hw *hw);
+void nfp_net_cfg_read_version(struct nfp_net_hw *hw);
+int nfp_net_firmware_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size);
+int nfp_repr_firmware_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size);
+bool nfp_net_is_valid_nfd_version(struct nfp_net_fw_ver version);
 
 #define NFP_NET_DEV_PRIVATE_TO_HW(adapter)\
 	(&((struct nfp_net_adapter *)adapter)->hw)
@@ -494,9 +460,3 @@ void nfp_net_init_metadata_format(struct nfp_net_hw *hw);
 	((struct nfp_app_fw_flower *)app_fw_priv)
 
 #endif /* _NFP_COMMON_H_ */
-/*
- * Local variables:
- * c-file-style: "Linux"
- * indent-tabs-mode: t
- * End:
- */

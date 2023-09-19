@@ -25,6 +25,7 @@ class ErrorSeverity(IntEnum):
     SSH_ERR = 4
     DPDK_BUILD_ERR = 10
     TESTCASE_VERIFY_ERR = 20
+    BLOCKING_TESTSUITE_ERR = 25
 
 
 class DTSError(Exception):
@@ -62,13 +63,19 @@ class SSHConnectionError(DTSError):
     """
 
     host: str
+    errors: list[str]
     severity: ClassVar[ErrorSeverity] = ErrorSeverity.SSH_ERR
 
-    def __init__(self, host: str):
+    def __init__(self, host: str, errors: list[str] | None = None):
         self.host = host
+        self.errors = [] if errors is None else errors
 
     def __str__(self) -> str:
-        return f"Error trying to connect with {self.host}"
+        message = f"Error trying to connect with {self.host}."
+        if self.errors:
+            message += f" Errors encountered while retrying: {', '.join(self.errors)}"
+
+        return message
 
 
 class SSHSessionDeadError(DTSError):
@@ -144,3 +151,14 @@ class TestCaseVerifyError(DTSError):
 
     def __str__(self) -> str:
         return repr(self.value)
+
+
+class BlockingTestSuiteError(DTSError):
+    suite_name: str
+    severity: ClassVar[ErrorSeverity] = ErrorSeverity.BLOCKING_TESTSUITE_ERR
+
+    def __init__(self, suite_name: str) -> None:
+        self.suite_name = suite_name
+
+    def __str__(self) -> str:
+        return f"Blocking suite {self.suite_name} failed."

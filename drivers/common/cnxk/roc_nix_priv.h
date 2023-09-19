@@ -12,7 +12,7 @@
 #define NIX_MAX_SQB	     ((uint16_t)512)
 #define NIX_DEF_SQB	     ((uint16_t)16)
 #define NIX_MIN_SQB	     ((uint16_t)8)
-#define NIX_SQB_LIST_SPACE   ((uint16_t)2)
+#define NIX_SQB_PREFETCH     ((uint16_t)1)
 
 /* Apply BP/DROP when CQ is 95% full */
 #define NIX_CQ_THRESH_LEVEL	(5 * 256 / 100)
@@ -20,7 +20,7 @@
 /* Apply LBP at 75% of actual BP */
 #define NIX_CQ_LPB_THRESH_FRAC	(75 * 16 / 100)
 #define NIX_CQ_FULL_ERRATA_SKID (1024ull * 256)
-#define NIX_RQ_AURA_THRESH(x)	(((x)*95) / 100)
+#define NIX_RQ_AURA_THRESH(percent, val) (((val) * (percent)) / 100)
 
 /* IRQ triggered when NIX_LF_CINTX_CNT[QCOUNT] crosses this value */
 #define CQ_CQE_THRESH_DEFAULT	0x1ULL
@@ -130,6 +130,7 @@ struct nix {
 	struct nix_qint *cints_mem;
 	uint8_t configured_qints;
 	uint8_t configured_cints;
+	uint8_t exact_match_ena;
 	struct roc_nix_rq **rqs;
 	struct roc_nix_sq **sqs;
 	uint16_t vwqe_interval;
@@ -208,6 +209,8 @@ struct nix {
 	uint16_t outb_se_ring_cnt;
 	uint16_t outb_se_ring_base;
 	uint16_t cpt_lbpid;
+	uint16_t cpt_nixbpid;
+	uint64_t cpt_eng_caps;
 	bool need_meta_aura;
 	/* Mode provided by driver */
 	bool inb_inl_dev;

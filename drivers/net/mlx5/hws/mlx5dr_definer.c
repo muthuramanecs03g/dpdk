@@ -10,6 +10,7 @@
 #define ETH_TYPE_IPV6_VXLAN	0x86DD
 #define ETH_VXLAN_DEFAULT_PORT	4789
 #define IP_UDP_PORT_MPLS	6635
+#define UDP_ROCEV2_PORT	4791
 #define DR_FLOW_LAYER_TUNNEL_NO_MPLS (MLX5_FLOW_LAYER_TUNNEL & ~MLX5_FLOW_LAYER_MPLS)
 
 #define STE_NO_VLAN	0x0
@@ -20,6 +21,9 @@
 #define STE_TCP		0x1
 #define STE_UDP		0x2
 #define STE_ICMP	0x3
+
+#define MLX5DR_DEFINER_QUOTA_BLOCK 0
+#define MLX5DR_DEFINER_QUOTA_PASS  2
 
 /* Setter function based on bit offset and mask, for 32bit DW*/
 #define _DR_SET_32(p, v, byte_off, bit_off, mask) \
@@ -171,7 +175,9 @@ struct mlx5dr_definer_conv_data {
 	X(SET_BE16,	gre_opt_checksum,	v->checksum_rsvd.checksum,	rte_flow_item_gre_opt) \
 	X(SET,		meter_color,		rte_col_2_mlx5_col(v->color),	rte_flow_item_meter_color) \
 	X(SET_BE32,     ipsec_spi,              v->hdr.spi,             rte_flow_item_esp) \
-	X(SET_BE32,     ipsec_sequence_number,  v->hdr.seq,             rte_flow_item_esp)
+	X(SET_BE32,     ipsec_sequence_number,  v->hdr.seq,             rte_flow_item_esp) \
+	X(SET,		ib_l4_udp_port,		UDP_ROCEV2_PORT,	rte_flow_item_ib_bth) \
+	X(SET,		ib_l4_opcode,		v->hdr.opcode,		rte_flow_item_ib_bth)
 
 /* Item set function format */
 #define X(set_type, func_name, value, item_type) \
@@ -529,7 +535,7 @@ mlx5dr_definer_get_mpls_fc(struct mlx5dr_definer_conv_data *cd, bool inner)
 		break;
 	default:
 		rte_errno = ENOTSUP;
-		DR_LOG(ERR, "MPLS index %d is not supported\n", mpls_idx);
+		DR_LOG(ERR, "MPLS index %d is not supported", mpls_idx);
 		return NULL;
 	}
 
@@ -565,7 +571,7 @@ mlx5dr_definer_get_mpls_oks_fc(struct mlx5dr_definer_conv_data *cd, bool inner)
 		break;
 	default:
 		rte_errno = ENOTSUP;
-		DR_LOG(ERR, "MPLS index %d is not supported\n", mpls_idx);
+		DR_LOG(ERR, "MPLS index %d is not supported", mpls_idx);
 		return NULL;
 	}
 
@@ -581,6 +587,16 @@ mlx5dr_definer_mpls_label_set(struct mlx5dr_definer_fc *fc,
 
 	memcpy(tag + fc->byte_off, v->label_tc_s, sizeof(v->label_tc_s));
 	memcpy(tag + fc->byte_off + sizeof(v->label_tc_s), &v->ttl, sizeof(v->ttl));
+}
+
+static void
+mlx5dr_definer_ib_l4_qp_set(struct mlx5dr_definer_fc *fc,
+			    const void *item_spec,
+			    uint8_t *tag)
+{
+	const struct rte_flow_item_ib_bth *v = item_spec;
+
+	memcpy(tag + fc->byte_off, &v->hdr.dst_qp, sizeof(v->hdr.dst_qp));
 }
 
 static int
@@ -1447,6 +1463,62 @@ mlx5dr_definer_conv_item_tag(struct mlx5dr_definer_conv_data *cd,
 	return 0;
 }
 
+static void
+mlx5dr_definer_quota_set(struct mlx5dr_definer_fc *fc,
+			 const void *item_data, uint8_t *tag)
+{
+	/**
+	 * MLX5 PMD implements QUOTA with Meter object.
+	 * PMD Quota action translation implicitly increments
+	 * Meter register value after HW assigns it.
+	 * Meter register values are:
+	 *            HW     QUOTA(HW+1)  QUOTA state
+	 * RED        0        1 (01b)       BLOCK
+	 * YELLOW     1        2 (10b)       PASS
+	 * GREEN      2        3 (11b)       PASS
+	 *
+	 * Quota item checks Meter register bit 1 value to determine state:
+	 *            SPEC       MASK
+	 * PASS     2 (10b)    2 (10b)
+	 * BLOCK    0 (00b)    2 (10b)
+	 *
+	 * item_data is NULL when template quota item is non-masked:
+	 * .. / quota / ..
+	 */
+
+	const struct rte_flow_item_quota *quota = item_data;
+	uint32_t val;
+
+	if (quota && quota->state == RTE_FLOW_QUOTA_STATE_BLOCK)
+		val = MLX5DR_DEFINER_QUOTA_BLOCK;
+	else
+		val = MLX5DR_DEFINER_QUOTA_PASS;
+
+	DR_SET(tag, val, fc->byte_off, fc->bit_off, fc->bit_mask);
+}
+
+static int
+mlx5dr_definer_conv_item_quota(struct mlx5dr_definer_conv_data *cd,
+			       __rte_unused struct rte_flow_item *item,
+			       int item_idx)
+{
+	int mtr_reg = flow_hw_get_reg_id(RTE_FLOW_ITEM_TYPE_METER_COLOR, 0);
+	struct mlx5dr_definer_fc *fc;
+
+	if (mtr_reg < 0) {
+		rte_errno = EINVAL;
+		return rte_errno;
+	}
+
+	fc = mlx5dr_definer_get_register_fc(cd, mtr_reg);
+	if (!fc)
+		return rte_errno;
+
+	fc->tag_set = &mlx5dr_definer_quota_set;
+	fc->item_idx = item_idx;
+	return 0;
+}
+
 static int
 mlx5dr_definer_conv_item_metadata(struct mlx5dr_definer_conv_data *cd,
 				  struct rte_flow_item *item,
@@ -2042,6 +2114,63 @@ mlx5dr_definer_conv_item_flex_parser(struct mlx5dr_definer_conv_data *cd,
 }
 
 static int
+mlx5dr_definer_conv_item_ib_l4(struct mlx5dr_definer_conv_data *cd,
+			       struct rte_flow_item *item,
+			       int item_idx)
+{
+	const struct rte_flow_item_ib_bth *m = item->mask;
+	struct mlx5dr_definer_fc *fc;
+	bool inner = cd->tunnel;
+
+	/* In order to match on RoCEv2(layer4 ib), we must match
+	 * on ip_protocol and l4_dport.
+	 */
+	if (!cd->relaxed) {
+		fc = &cd->fc[DR_CALC_FNAME(IP_PROTOCOL, inner)];
+		if (!fc->tag_set) {
+			fc->item_idx = item_idx;
+			fc->tag_mask_set = &mlx5dr_definer_ones_set;
+			fc->tag_set = &mlx5dr_definer_udp_protocol_set;
+			DR_CALC_SET(fc, eth_l2, l4_type_bwc, inner);
+		}
+
+		fc = &cd->fc[DR_CALC_FNAME(L4_DPORT, inner)];
+		if (!fc->tag_set) {
+			fc->item_idx = item_idx;
+			fc->tag_mask_set = &mlx5dr_definer_ones_set;
+			fc->tag_set = &mlx5dr_definer_ib_l4_udp_port_set;
+			DR_CALC_SET(fc, eth_l4, destination_port, inner);
+		}
+	}
+
+	if (!m)
+		return 0;
+
+	if (m->hdr.se || m->hdr.m || m->hdr.padcnt || m->hdr.tver ||
+		m->hdr.pkey || m->hdr.f || m->hdr.b || m->hdr.rsvd0 ||
+		m->hdr.a || m->hdr.rsvd1 || !is_mem_zero(m->hdr.psn, 3)) {
+		rte_errno = ENOTSUP;
+		return rte_errno;
+	}
+
+	if (m->hdr.opcode) {
+		fc = &cd->fc[MLX5DR_DEFINER_FNAME_IB_L4_OPCODE];
+		fc->item_idx = item_idx;
+		fc->tag_set = &mlx5dr_definer_ib_l4_opcode_set;
+		DR_CALC_SET_HDR(fc, ib_l4, opcode);
+	}
+
+	if (!is_mem_zero(m->hdr.dst_qp, 3)) {
+		fc = &cd->fc[MLX5DR_DEFINER_FNAME_IB_L4_QPN];
+		fc->item_idx = item_idx;
+		fc->tag_set = &mlx5dr_definer_ib_l4_qp_set;
+		DR_CALC_SET_HDR(fc, ib_l4, qp);
+	}
+
+	return 0;
+}
+
+static int
 mlx5dr_definer_conv_items_to_hl(struct mlx5dr_context *ctx,
 				struct mlx5dr_match_template *mt,
 				uint8_t *hl)
@@ -2163,6 +2292,10 @@ mlx5dr_definer_conv_items_to_hl(struct mlx5dr_context *ctx,
 			ret = mlx5dr_definer_conv_item_meter_color(&cd, items, i);
 			item_flags |= MLX5_FLOW_ITEM_METER_COLOR;
 			break;
+		case RTE_FLOW_ITEM_TYPE_QUOTA:
+			ret = mlx5dr_definer_conv_item_quota(&cd, items, i);
+			item_flags |= MLX5_FLOW_ITEM_QUOTA;
+			break;
 		case RTE_FLOW_ITEM_TYPE_IPV6_ROUTING_EXT:
 			ret = mlx5dr_definer_conv_item_ipv6_routing_ext(&cd, items, i);
 			item_flags |= cd.tunnel ? MLX5_FLOW_ITEM_INNER_IPV6_ROUTING_EXT :
@@ -2181,6 +2314,10 @@ mlx5dr_definer_conv_items_to_hl(struct mlx5dr_context *ctx,
 			ret = mlx5dr_definer_conv_item_mpls(&cd, items, i);
 			item_flags |= MLX5_FLOW_LAYER_MPLS;
 			cd.mpls_idx++;
+			break;
+		case RTE_FLOW_ITEM_TYPE_IB_BTH:
+			ret = mlx5dr_definer_conv_item_ib_l4(&cd, items, i);
+			item_flags |= MLX5_FLOW_ITEM_IB_BTH;
 			break;
 		default:
 			DR_LOG(ERR, "Unsupported item type %d", items->type);

@@ -550,6 +550,7 @@ struct ice_pf {
 	uint64_t supported_rxdid; /* bitmap for supported RXDID */
 	uint64_t rss_hf;
 	struct ice_tm_conf tm_conf;
+	uint16_t outer_ethertype;
 };
 
 #define ICE_MAX_QUEUE_NUM  2048
@@ -691,7 +692,7 @@ ice_align_floor(int n)
 {
 	if (n == 0)
 		return 0;
-	return 1 << (sizeof(n) * CHAR_BIT - 1 - __builtin_clz(n));
+	return 1 << (sizeof(n) * CHAR_BIT - 1 - rte_clz32(n));
 }
 
 #define ICE_PHY_TYPE_SUPPORT_50G(phy_type) \

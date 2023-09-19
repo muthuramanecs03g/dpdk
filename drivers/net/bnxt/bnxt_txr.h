@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2021 Broadcom
+ * Copyright(c) 2014-2023 Broadcom
  * All rights reserved.
  */
 
@@ -24,6 +24,7 @@ struct bnxt_tx_ring_info {
 
 	rte_iova_t		tx_desc_mapping;
 
+	unsigned short          *nr_bds;
 	struct bnxt_ring	*tx_ring_struct;
 };
 
@@ -90,5 +91,4 @@ int bnxt_flush_tx_cmp(struct bnxt_cp_ring_info *cpr);
 					TX_BD_LONG_LFLAGS_IP_CHKSUM)
 #define TX_BD_FLG_TIP_TCP_UDP_CHKSUM	(TX_BD_LONG_LFLAGS_TCP_UDP_CHKSUM | \
 					TX_BD_LONG_LFLAGS_T_IP_CHKSUM)
-
 #endif
